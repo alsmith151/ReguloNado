@@ -1,0 +1,33 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+outputs/
+multirun/
+wandb/
+
+# Rust build artefacts
+/target/
+
+# Maturin-built native extension
+*.so
+python/regulonado/_rs*.so
+
+# Generated datasets and SLURM logs (large, regenerable)
+/dataset/
+/logs/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Backups from manual refactors
+*.bak
+src/*.bak
