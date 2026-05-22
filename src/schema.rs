@@ -1,9 +1,12 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use arrow_array::{ArrayRef, Float32Array, Int8Array, ListArray, builder::{Float32Builder, Int8Builder, ListBuilder}};
+use arrow_array::{
+    builder::{Float32Builder, Int8Builder, ListBuilder},
+    ArrayRef, Float32Array, Int8Array, ListArray,
+};
 use arrow_buffer::{OffsetBuffer, ScalarBuffer};
 use arrow_schema::{DataType, Field, Schema};
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Build the Arrow schema expected by HuggingFace `datasets`.
 ///
@@ -131,7 +134,12 @@ pub(crate) fn offsets(count: usize, width: usize) -> OffsetBuffer<i32> {
 ///
 /// The logical shape is `(rows, inner_rows, cols)`, but Arrow stores the values
 /// as one contiguous primitive array plus two offset buffers.
-pub(crate) fn make_2d_i8_array(values: Vec<i8>, rows: usize, inner_rows: usize, cols: usize) -> ArrayRef {
+pub(crate) fn make_2d_i8_array(
+    values: Vec<i8>,
+    rows: usize,
+    inner_rows: usize,
+    cols: usize,
+) -> ArrayRef {
     let values_array = Arc::new(Int8Array::from(values)) as ArrayRef;
     let inner_field = Arc::new(Field::new("item", DataType::Int8, true));
     let inner = Arc::new(ListArray::new(
@@ -154,7 +162,12 @@ pub(crate) fn make_2d_i8_array(values: Vec<i8>, rows: usize, inner_rows: usize, 
 }
 
 /// Wrap a flat row-major float32 buffer as an Arrow Array2D-compatible nested list.
-pub(crate) fn make_2d_f32_array(values: Vec<f32>, rows: usize, inner_rows: usize, cols: usize) -> ArrayRef {
+pub(crate) fn make_2d_f32_array(
+    values: Vec<f32>,
+    rows: usize,
+    inner_rows: usize,
+    cols: usize,
+) -> ArrayRef {
     let values_array = Arc::new(Float32Array::from(values)) as ArrayRef;
     let inner_field = Arc::new(Field::new("item", DataType::Float32, true));
     let inner = Arc::new(ListArray::new(

@@ -1,14 +1,14 @@
-use pyo3::prelude::*;
-use pyo3::exceptions::PyRuntimeError;
-use numpy::{IntoPyArray, PyArray2};
+use crate::binning::bin_region;
+use crate::io_utils::maybe_log_progress;
+use crate::signal_file::{process_one_track, process_one_track_at_offset};
+use bigtools::BigWigRead;
 use ndarray::Array2;
+use numpy::{IntoPyArray, PyArray2};
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
 use rayon::prelude::*;
 use std::path::Path;
 use std::sync::Arc;
-use bigtools::BigWigRead;
-use crate::binning::bin_region;
-use crate::signal_file::{process_one_track, process_one_track_at_offset};
-use crate::io_utils::maybe_log_progress;
 use std::time::Instant;
 
 /// Debug helper: extract one BigWig into one raw row-major float32 file.

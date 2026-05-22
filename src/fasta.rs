@@ -13,7 +13,9 @@ pub(crate) struct FastaIndexRecord {
 /// The Rust Arrow writer only needs plain, indexed FASTA. For each sequence it
 /// computes byte ranges directly from `.fai`, avoiding Python and avoiding
 /// construction of a `GenomeIntervalDataset` during Arrow writing.
-pub(crate) fn load_fasta_index(fasta_path: &str) -> Result<HashMap<String, FastaIndexRecord>, String> {
+pub(crate) fn load_fasta_index(
+    fasta_path: &str,
+) -> Result<HashMap<String, FastaIndexRecord>, String> {
     let fai_path = format!("{fasta_path}.fai");
     let text = std::fs::read_to_string(&fai_path)
         .map_err(|e| format!("Cannot read FASTA index {fai_path}: {e}"))?;

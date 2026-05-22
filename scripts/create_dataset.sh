@@ -2,9 +2,10 @@
 #SBATCH --job-name=regulonado-build
 #SBATCH --output=logs/regulonado-build-%j.out
 #SBATCH --error=logs/regulonado-build-%j.err
-#SBATCH --time=24:00:00
-#SBATCH --mem=64G
-#SBATCH --cpus-per-task=32
+#SBATCH --time=12:00:00
+#SBATCH --mem=256G
+#SBATCH --cpus-per-task=16
+#SBATCH --nodes=1
 #SBATCH --partition=long
 #SBATCH --account=default
 
@@ -36,12 +37,17 @@ SHIFT_MAX_BP="${SHIFT_MAX_BP:-64}"
 # Rayon thread count for parallel BigWig extraction — set to full CPU allocation.
 N_EXTRACT_THREADS="${N_EXTRACT_THREADS:-${SLURM_CPUS_PER_TASK:-32}}"
 
+# Concurrent Arrow shard writers after each chromosome scan. With 2295 tracks,
+# each full-size writer batch can hold ~9 GB labels+sequence before compression.
+# 4 writers is intended for 256 GB jobs; try 6-8 with 512 GB if profiling helps.
+ARROW_WRITE_THREADS="${ARROW_WRITE_THREADS:-4}"
+
 # Arrow record batch size. The builder auto-caps this to avoid i32 offset overflow:
 # safe limit = floor(2^31 / (n_tracks × n_bins)). For a 2295-track full build
 # that cap is ~152 samples/batch. Setting higher is fine; it gets capped with a
 # log warning. Keep it generous so smaller builds stay uncapped.
 ARROW_BATCH_SIZE="${ARROW_BATCH_SIZE:-512}"
-ARROW_COMPRESSION="${ARROW_COMPRESSION:-zstd}"
+ARROW_COMPRESSION="${ARROW_COMPRESSION:-lz4}"
 
 # --- I/O flags ---------------------------------------------------------------
 # STAGE=true copies FASTA + BigWigs to SLURM_TMPDIR before building.
@@ -50,6 +56,7 @@ ARROW_COMPRESSION="${ARROW_COMPRESSION:-zstd}"
 # Requires SLURM_TMPDIR to have enough free space (roughly n_tracks × avg_bw_size).
 STAGE="${STAGE:-true}"
 DROP_MISSING="${DROP_MISSING:-true}"
+DEDUPE_TRACKS="${DEDUPE_TRACKS:-content}"
 OVERWRITE="${OVERWRITE:-false}"
 PROFILE="${PROFILE:-false}"
 
@@ -91,7 +98,9 @@ echo "Tracks            : $N_TRACKS"
 echo "Output            : $OUTPUT_DIR"
 echo "Scratch (TMPDIR)  : $SLURM_TMPDIR"
 echo "Extract threads   : $N_EXTRACT_THREADS"
+echo "Arrow write thrds : $ARROW_WRITE_THREADS"
 echo "Stage to scratch  : $STAGE"
+echo "Dedupe tracks     : $DEDUPE_TRACKS"
 echo "Shift max bp      : $SHIFT_MAX_BP"
 echo "Arrow batch       : $ARROW_BATCH_SIZE (auto-capped if tracks×bins exceeds i32)"
 echo "Arrow compression : $ARROW_COMPRESSION"
@@ -108,8 +117,10 @@ ARGS=(
     --n-pred-bins       "$N_PRED_BINS"
     --shift-max-bp      "$SHIFT_MAX_BP"
     --n-extract-threads "$N_EXTRACT_THREADS"
+    --arrow-write-threads "$ARROW_WRITE_THREADS"
     --arrow-batch-size  "$ARROW_BATCH_SIZE"
     --arrow-compression "$ARROW_COMPRESSION"
+    --dedupe-tracks     "$DEDUPE_TRACKS"
 )
 
 [[ "$STAGE"        == "true" ]] && ARGS+=(--stage)

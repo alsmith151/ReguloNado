@@ -154,13 +154,15 @@ def test_chrom_pass_matches_direct_bigwig(synth_dataset):
         N_PRED_BINS,
         CONTEXT_LEN,
         BIN_SIZE,
-        batch_size=4,
+        batch_size=2,
         n_threads=2,
+        arrow_write_threads=2,
         compression="none",
     )
 
     fast = _load_arrow_files(fast_dir)
     cp = _load_arrow_files(cp_dir)
+    assert len(sorted(cp_dir.glob("data-*-of-*.arrow"))) >= 4
 
     # Same row count.
     assert len(fast["labels"]) == len(cp["labels"]) == len(bed_rows_tuples)
@@ -240,3 +242,114 @@ def test_chrom_pass_loads_via_datasets(synth_dataset, tmp_path):
     row = ds[0]
     arr = np.asarray(row["labels"])
     assert arr.shape == (N_TRACKS, N_PRED_BINS)
+
+
+def test_chrom_pass_arrow_write_threads_are_equivalent(synth_dataset, tmp_path):
+    """Parallel Arrow writers should not change rows or loadability."""
+    from datasets import Array2D, Features, Value, load_from_disk
+
+    from regulonado._rs import write_arrow_split_chrom_pass  # type: ignore[import-not-found]
+    from regulonado.dataset import _write_hf_split_metadata
+
+    bw_paths = synth_dataset["bw_paths"]
+    bed_rows_tuples = [
+        (c, int(s), int(e), "fold0") for (c, s, e) in synth_dataset["bed_rows"]
+    ]
+    sample_indices = list(range(len(bed_rows_tuples)))
+    signal_intervals = [(c, int(s), int(e)) for (c, s, e) in synth_dataset["bed_rows"]]
+    features = Features({
+        "input_ids": Array2D(dtype="int8", shape=(4, CONTEXT_LEN)),
+        "labels": Array2D(dtype="float32", shape=(N_TRACKS, N_PRED_BINS)),
+        "interval": Value(dtype="string"),
+        "index": Value(dtype="int64"),
+        "local_index": Value(dtype="int64"),
+    })
+
+    loaded = {}
+    for write_threads in (1, 2):
+        split_dir = tmp_path / f"split_threads_{write_threads}"
+        split_dir.mkdir()
+        write_arrow_split_chrom_pass(
+            bw_paths,
+            [False] * N_TRACKS,
+            signal_intervals,
+            str(split_dir),
+            sample_indices,
+            bed_rows_tuples,
+            synth_dataset["fasta"],
+            N_PRED_BINS,
+            CONTEXT_LEN,
+            BIN_SIZE,
+            batch_size=2,
+            n_threads=2,
+            arrow_write_threads=write_threads,
+            compression="none",
+        )
+        shards = sorted(p.name for p in split_dir.glob("data-*-of-*.arrow"))
+        assert len(shards) >= 4
+        _write_hf_split_metadata(split_dir, features=features, arrow_filenames=shards)
+        loaded[write_threads] = load_from_disk(str(split_dir))
+
+    assert len(loaded[1]) == len(loaded[2]) == len(bed_rows_tuples)
+    assert loaded[1]["index"] == loaded[2]["index"]
+    assert loaded[1]["local_index"] == loaded[2]["local_index"]
+    assert sorted(loaded[1]["index"]) == sample_indices
+    assert sorted(loaded[1]["local_index"]) == sample_indices
+    for i in sample_indices:
+        np.testing.assert_array_equal(loaded[1][i]["labels"], loaded[2][i]["labels"])
+        np.testing.assert_array_equal(loaded[1][i]["input_ids"], loaded[2][i]["input_ids"])
+
+
+def test_chrom_pass_shared_scan_writes_multiple_splits(synth_dataset, tmp_path):
+    """The shared chrom pass should write loadable split directories in one call."""
+    from datasets import Array2D, Features, Value, load_from_disk
+
+    from regulonado._rs import write_arrow_splits_chrom_pass  # type: ignore[import-not-found]
+    from regulonado.dataset import _write_hf_split_metadata
+
+    bw_paths = synth_dataset["bw_paths"]
+    bed_rows_tuples = [
+        (c, int(s), int(e), "fold0") for (c, s, e) in synth_dataset["bed_rows"]
+    ]
+    signal_intervals = [(c, int(s), int(e)) for (c, s, e) in synth_dataset["bed_rows"]]
+    features = Features({
+        "input_ids": Array2D(dtype="int8", shape=(4, CONTEXT_LEN)),
+        "labels": Array2D(dtype="float32", shape=(N_TRACKS, N_PRED_BINS)),
+        "interval": Value(dtype="string"),
+        "index": Value(dtype="int64"),
+        "local_index": Value(dtype="int64"),
+    })
+
+    split_a = tmp_path / "train"
+    split_b = tmp_path / "validation"
+    split_a.mkdir()
+    split_b.mkdir()
+    train_indices = [0, 2, 4, 6]
+    validation_indices = [1, 3, 5, 7]
+
+    write_arrow_splits_chrom_pass(
+        bw_paths,
+        [False] * N_TRACKS,
+        signal_intervals,
+        ["train", "validation"],
+        [str(split_a), str(split_b)],
+        [train_indices, validation_indices],
+        bed_rows_tuples,
+        synth_dataset["fasta"],
+        N_PRED_BINS,
+        CONTEXT_LEN,
+        BIN_SIZE,
+        batch_size=2,
+        n_threads=2,
+        arrow_write_threads=2,
+        compression="none",
+    )
+
+    for split_dir, expected_indices in [(split_a, train_indices), (split_b, validation_indices)]:
+        shards = sorted(p.name for p in split_dir.glob("data-*-of-*.arrow"))
+        assert shards
+        _write_hf_split_metadata(split_dir, features=features, arrow_filenames=shards)
+        ds = load_from_disk(str(split_dir))
+        assert len(ds) == len(expected_indices)
+        assert sorted(ds["index"]) == expected_indices
+        assert sorted(ds["local_index"]) == list(range(len(expected_indices)))

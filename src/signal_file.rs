@@ -1,6 +1,6 @@
+use crate::binning::bin_region_into;
 use bigtools::{BBIFileRead, BigWigRead};
 use std::io::{BufWriter, Write};
-use crate::binning::bin_region_into;
 
 /// Negate all float32 values in a raw binary file in-place.
 ///
