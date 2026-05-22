@@ -1,15 +1,20 @@
-use pyo3::prelude::*;
+use crate::bigwig_io::{extract_bigwig_labels_batch, open_bigwig_handles};
+use crate::fasta::{load_fasta_index, read_one_hot_sequence};
+use crate::io_utils::{ipc_write_options, maybe_log_progress};
+use crate::schema::{
+    append_2d_f32, append_2d_i8, hf_arrow_schema, make_2d_f32_array, make_2d_i8_array,
+};
+use crate::signal_file::{read_sample_labels, read_track_major_labels_batch};
+use arrow_array::{
+    builder::{Float32Builder, Int64Builder, Int8Builder, ListBuilder, StringBuilder},
+    ArrayRef, RecordBatch,
+};
+use arrow_ipc::writer::StreamWriter;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
 use rayon;
 use std::sync::Arc;
 use std::time::Instant;
-use arrow_array::{ArrayRef, RecordBatch, builder::{Int64Builder, ListBuilder, StringBuilder, Int8Builder, Float32Builder}};
-use arrow_ipc::writer::StreamWriter;
-use crate::schema::{hf_arrow_schema, append_2d_i8, append_2d_f32, make_2d_i8_array, make_2d_f32_array};
-use crate::fasta::{load_fasta_index, read_one_hot_sequence};
-use crate::io_utils::{ipc_write_options, maybe_log_progress};
-use crate::signal_file::{read_sample_labels, read_track_major_labels_batch};
-use crate::bigwig_io::{open_bigwig_handles, extract_bigwig_labels_batch};
 
 /// Compatibility helper: write an Arrow shard from a sample-major signal file.
 ///

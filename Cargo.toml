@@ -16,7 +16,7 @@ rayon = "1"
 byteorder = "1"
 arrow-array = "56"
 arrow-buffer = "56"
-arrow-ipc = { version = "56", features = ["zstd"] }
+arrow-ipc = { version = "56", features = ["lz4", "zstd"] }
 arrow-schema = "56"
 serde_json = "1"
 wide = "0.7"

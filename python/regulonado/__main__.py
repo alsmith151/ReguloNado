@@ -117,6 +117,13 @@ def build(
     drop_missing: Annotated[
         bool, typer.Option("--drop-missing", help="Drop missing BigWig paths instead of raising an error")
     ] = False,
+    dedupe_tracks: Annotated[
+        str,
+        typer.Option(
+            "--dedupe-tracks",
+            help="Track deduplication mode: none, identity, or content",
+        ),
+    ] = "none",
     profile: Annotated[
         bool,
         typer.Option(
@@ -165,7 +172,17 @@ def build(
             "--arrow-compression",
             help="Arrow IPC compression: zstd, lz4, or none",
         ),
-    ] = "zstd",
+    ] = "lz4",
+    arrow_write_threads: Annotated[
+        Optional[int],
+        typer.Option(
+            "--arrow-write-threads",
+            help=(
+                "Concurrent Arrow shard writers for chrom_pass. Defaults to "
+                "min(8, --n-extract-threads); lower this if memory is tight."
+            ),
+        ),
+    ] = None,
     strategy: Annotated[
         str,
         typer.Option(
@@ -177,6 +194,17 @@ def build(
             ),
         ),
     ] = "chrom_pass",
+    chrom: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--chrom",
+            help=(
+                "Restrict each split to BED rows on this chromosome "
+                "(repeat for several). The `index` column on every output "
+                "row still refers to the absolute row in the full BED."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Build an Arrow DatasetDict from BED / FASTA / BigWig sources.
 
@@ -242,6 +270,7 @@ def build(
             stage_to_scratch=stage,
             overwrite=overwrite,
             drop_missing=drop_missing,
+            dedupe_tracks=dedupe_tracks,
         )
     else:
         build_dataset_fast(
@@ -259,14 +288,17 @@ def build(
             signal_track_chunk=signal_track_chunk,
             arrow_batch_size=arrow_batch_size,
             arrow_compression=arrow_compression,
+            arrow_write_threads=arrow_write_threads,
             num_proc=num_proc,
             cache_dir=cache_dir,
             writer_batch_size=writer_batch_size,
             stage_to_scratch=stage,
             overwrite=overwrite,
             drop_missing=drop_missing,
+            dedupe_tracks=dedupe_tracks,
             profile=profile,
             strategy=strategy,
+            chrom_filter=list(chrom) if chrom else None,
         )
 
 

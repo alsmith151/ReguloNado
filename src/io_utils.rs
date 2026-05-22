@@ -1,4 +1,4 @@
-use arrow_ipc::{CompressionType, MetadataVersion, writer::IpcWriteOptions};
+use arrow_ipc::{writer::IpcWriteOptions, CompressionType, MetadataVersion};
 use std::time::{Duration, Instant};
 
 pub(crate) fn maybe_log_progress(

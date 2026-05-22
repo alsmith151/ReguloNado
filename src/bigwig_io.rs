@@ -1,6 +1,6 @@
-use bigtools::{BigWigRead, utils::file::reopen::ReopenableFile};
-use rayon::prelude::*;
 use crate::binning::bin_region_into;
+use bigtools::{utils::file::reopen::ReopenableFile, BigWigRead};
+use rayon::prelude::*;
 
 pub(crate) type BwHandle = BigWigRead<ReopenableFile>;
 

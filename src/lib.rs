@@ -18,15 +18,15 @@
 //! `extract_all_tracks_to_dir`, `write_arrow_split_from_sample_major`)
 //! remain available for benchmarking individual stages.
 
-mod binning;
-mod fasta;
-mod schema;
-mod io_utils;
-mod signal_file;
 mod bigwig_io;
-mod writers;
-mod debug;
+mod binning;
 mod chrom_pass;
+mod debug;
+mod fasta;
+mod io_utils;
+mod schema;
+mod signal_file;
+mod writers;
 
 use pyo3::prelude::*;
 
@@ -40,9 +40,25 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(debug::extract_bigwig_regions, m)?)?;
     m.add_function(wrap_pyfunction!(debug::extract_all_tracks_to_dir, m)?)?;
     m.add_function(wrap_pyfunction!(debug::extract_all_tracks_to_file, m)?)?;
-    m.add_function(wrap_pyfunction!(writers::write_arrow_split_from_sample_major, m)?)?;
-    m.add_function(wrap_pyfunction!(writers::write_arrow_split_from_track_major, m)?)?;
-    m.add_function(wrap_pyfunction!(writers::write_arrow_split_from_bigwigs, m)?)?;
-    m.add_function(wrap_pyfunction!(chrom_pass::write_arrow_split_chrom_pass, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        writers::write_arrow_split_from_sample_major,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        writers::write_arrow_split_from_track_major,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        writers::write_arrow_split_from_bigwigs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        chrom_pass::write_arrow_split_chrom_pass,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        chrom_pass::write_arrow_splits_chrom_pass,
+        m
+    )?)?;
     Ok(())
 }
