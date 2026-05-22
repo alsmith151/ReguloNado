@@ -330,6 +330,7 @@ def _sample_major_signal_generator(
                 "labels": signal,
                 "interval": f"{chroms[global_idx]}:{starts[global_idx]}-{ends[global_idx]}",
                 "index": np.int64(global_idx),
+                "local_index": np.int64(local_idx),
             }
         except Exception:
             logger.exception(f"Skipping global index {global_idx}")
@@ -339,7 +340,7 @@ def _write_hf_split_metadata(
     split_dir: Path,
     *,
     features: Features,
-    arrow_filename: str,
+    arrow_filenames: list[str],
 ) -> None:
     split_dir.mkdir(parents=True, exist_ok=True)
     info = {
@@ -350,7 +351,7 @@ def _write_hf_split_metadata(
         "license": "",
     }
     state = {
-        "_data_files": [{"filename": arrow_filename}],
+        "_data_files": [{"filename": f} for f in arrow_filenames],
         "_fingerprint": "regulonado-rust-arrow",
         "_format_columns": None,
         "_format_kwargs": {},
@@ -428,7 +429,7 @@ def sample_generator(
 
     try:
         with ThreadPoolExecutor(max_workers=n_threads) as executor:
-            for index in indices:
+            for local_idx, index in enumerate(indices):
                 try:
                     # Sequence: (stored_context, 4) → permute → (4, stored_context)
                     seq = gid[index].permute(1, 0).numpy().astype(np.int8)
@@ -449,6 +450,7 @@ def sample_generator(
                         "labels": signal,
                         "interval": f"{chrom}:{bed_starts[index]}-{bed_ends[index]}",
                         "index": np.int64(index),
+                        "local_index": np.int64(local_idx),
                     }
                 except Exception:
                     logger.exception(f"Skipping index {index}")
@@ -563,6 +565,7 @@ def build_dataset(
         "labels": Array2D(dtype="float32", shape=(n_tracks, stored_n_bins)),
         "interval": Value(dtype="string"),
         "index": Value(dtype="int64"),
+        "local_index": Value(dtype="int64"),
     })
 
     gen_kwargs_base = dict(
@@ -671,12 +674,24 @@ def build_dataset_fast(
     overwrite: bool = False,
     drop_missing: bool = False,
     profile: bool = False,
+    strategy: str = "chrom_pass",
 ) -> DatasetDict:
     """Fast low-scratch dataset build using the Rust extension.
 
     Each split is written directly from BigWig + FASTA sources into compressed
     Arrow shards. Peak scratch is the current Arrow output plus one in-memory
     record batch, not a full dense `(tracks, samples, bins)` signal file.
+
+    Parameters
+    ----------
+    strategy : {"chrom_pass", "fast"}
+        - "chrom_pass" (default): one chromosome at a time, decoding all
+          tracks' binned signal once per chromosome and slicing per-sample
+          rows from RAM. One Arrow shard per chromosome, ordered chrom-major
+          (largest chromosome first). Rows within each shard are in
+          original BED order. ~10× fewer BigWig seeks than "fast".
+        - "fast": sample-batched writer; reads each sample's interval from
+          every BigWig per batch. Retained for parity testing.
     """
     if splits is None:
         splits = DEFAULT_SPLITS
@@ -757,6 +772,7 @@ def build_dataset_fast(
         "labels": Array2D(dtype="float32", shape=(n_tracks, stored_n_bins)),
         "interval": Value(dtype="string"),
         "index": Value(dtype="int64"),
+        "local_index": Value(dtype="int64"),
     })
 
     split_indices: dict[str, list[int]] = {}
@@ -780,11 +796,15 @@ def build_dataset_fast(
             split_datasets[split] = Dataset.load_from_disk(str(output_dir / split))
         return DatasetDict(split_datasets)
 
-    from regulonado._rs import write_arrow_split_from_bigwigs  # type: ignore[import]
+    if strategy not in {"chrom_pass", "fast"}:
+        raise ValueError(f"strategy must be 'chrom_pass' or 'fast', got {strategy!r}")
+    from regulonado._rs import (  # type: ignore[import]
+        write_arrow_split_chrom_pass,
+        write_arrow_split_from_bigwigs,
+    )
 
     scratch_out.mkdir(parents=True, exist_ok=True)
 
-    # --- Write Arrow directly from BigWigs, avoiding a multi-TB signal file ----
     minus_flags = [_is_minus_strand(p) for p in active_bw_paths]
     t_arrow_total = time.perf_counter()
     for split, folds in splits.items():
@@ -796,7 +816,7 @@ def build_dataset_fast(
 
         sample_indices = split_indices[split]
         logger.info(
-            f"Writing '{split}' Arrow shard directly from BigWigs: {len(sample_indices)} samples, "
+            f"Writing '{split}' shard(s) [{strategy}]: {len(sample_indices)} samples, "
             f"{n_tracks} tracks, stored_context={stored_context} bp, "
             f"stored_n_bins={stored_n_bins}, batch_size={effective_arrow_batch}, "
             f"compression={arrow_compression}"
@@ -806,25 +826,56 @@ def build_dataset_fast(
         if split_scratch.exists():
             shutil.rmtree(split_scratch)
         split_scratch.mkdir(parents=True, exist_ok=True)
-        arrow_filename = "data-00000-of-00001.arrow"
+
         t_split_arrow = time.perf_counter()
-        write_arrow_split_from_bigwigs(
-            active_bw_paths,
-            minus_flags,
-            signal_intervals,
-            str(split_scratch / arrow_filename),
-            sample_indices,
-            bed_rows,
-            active_fasta,
-            stored_n_bins,
-            stored_context,
-            batch_size=effective_arrow_batch,
-            n_threads=n_extract_threads,
-            compression=arrow_compression,
-            profile=profile,
+        if strategy == "chrom_pass":
+            write_arrow_split_chrom_pass(
+                active_bw_paths,
+                minus_flags,
+                signal_intervals,
+                str(split_scratch),
+                sample_indices,
+                bed_rows,
+                active_fasta,
+                stored_n_bins,
+                stored_context,
+                bin_size,
+                batch_size=effective_arrow_batch,
+                n_threads=n_extract_threads,
+                compression=arrow_compression,
+                profile=profile,
+            )
+            arrow_filenames = sorted(
+                p.name for p in split_scratch.glob("data-*-of-*.arrow")
+            )
+            if not arrow_filenames:
+                raise RuntimeError(
+                    f"chrom_pass produced no shards in {split_scratch}; "
+                    f"check that the FASTA contains the BED chromosomes"
+                )
+        else:
+            arrow_filenames = ["data-00000-of-00001.arrow"]
+            write_arrow_split_from_bigwigs(
+                active_bw_paths,
+                minus_flags,
+                signal_intervals,
+                str(split_scratch / arrow_filenames[0]),
+                sample_indices,
+                bed_rows,
+                active_fasta,
+                stored_n_bins,
+                stored_context,
+                batch_size=effective_arrow_batch,
+                n_threads=n_extract_threads,
+                compression=arrow_compression,
+            )
+        logger.info(
+            f"Arrow shard(s) for '{split}' written in "
+            f"{time.perf_counter() - t_split_arrow:.1f}s ({len(arrow_filenames)} file(s))"
         )
-        logger.info(f"Arrow shard '{split}' written in {time.perf_counter() - t_split_arrow:.1f}s")
-        _write_hf_split_metadata(split_scratch, features=features, arrow_filename=arrow_filename)
+        _write_hf_split_metadata(
+            split_scratch, features=features, arrow_filenames=arrow_filenames
+        )
         split_datasets[split] = Dataset.load_from_disk(str(split_scratch))
     logger.info(f"Arrow writing completed in {time.perf_counter() - t_arrow_total:.1f}s")
 
@@ -848,7 +899,7 @@ def build_dataset_fast(
         "n_pred_bins": n_pred_bins,
         "shift_max_bp": shift_max_bp,
         "splits": splits,
-        "build_strategy": "fast",
+        "build_strategy": strategy,
     }
     (output_dir / "regulonado_metadata.json").write_text(json.dumps(metadata, indent=2))
 

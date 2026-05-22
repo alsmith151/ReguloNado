@@ -12,7 +12,7 @@ multirun/
 wandb/
 
 # Rust build artefacts
-/target/
+target/
 
 # Maturin-built native extension
 *.so
