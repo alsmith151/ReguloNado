@@ -92,6 +92,7 @@ pub(crate) fn write_arrow_split_from_sample_major(
         );
         let mut interval_builder = StringBuilder::with_capacity(rows_in_batch, rows_in_batch * 32);
         let mut index_builder = Int64Builder::with_capacity(rows_in_batch);
+        let mut local_index_builder = Int64Builder::with_capacity(rows_in_batch);
 
         for (local_idx, global_idx) in
             (batch_start..batch_end).zip(sample_indices[batch_start..batch_end].iter())
@@ -108,6 +109,7 @@ pub(crate) fn write_arrow_split_from_sample_major(
             append_2d_f32(&mut label_builder, &labels, n_tracks, n_bins);
             interval_builder.append_value(format!("{chrom}:{start}-{end}"));
             index_builder.append_value(*global_idx as i64);
+            local_index_builder.append_value(local_idx as i64);
         }
 
         let batch = RecordBatch::try_new(
@@ -117,6 +119,7 @@ pub(crate) fn write_arrow_split_from_sample_major(
                 Arc::new(label_builder.finish()) as ArrayRef,
                 Arc::new(interval_builder.finish()) as ArrayRef,
                 Arc::new(index_builder.finish()) as ArrayRef,
+                Arc::new(local_index_builder.finish()) as ArrayRef,
             ],
         )
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -218,8 +221,9 @@ pub(crate) fn write_arrow_split_from_track_major(
         let mut input_values = Vec::with_capacity(rows_in_batch * 4 * context_len);
         let mut interval_builder = StringBuilder::with_capacity(rows_in_batch, rows_in_batch * 32);
         let mut index_builder = Int64Builder::with_capacity(rows_in_batch);
+        let mut local_index_builder = Int64Builder::with_capacity(rows_in_batch);
 
-        for global_idx in batch_indices.iter().copied() {
+        for (row_offset, global_idx) in batch_indices.iter().copied().enumerate() {
             let (chrom, start, end, _) = bed_rows.get(global_idx).ok_or_else(|| {
                 PyRuntimeError::new_err(format!("BED index {global_idx} is out of range"))
             })?;
@@ -229,6 +233,7 @@ pub(crate) fn write_arrow_split_from_track_major(
             input_values.extend_from_slice(&seq);
             interval_builder.append_value(format!("{chrom}:{start}-{end}"));
             index_builder.append_value(global_idx as i64);
+            local_index_builder.append_value((batch_start + row_offset) as i64);
         }
 
         let batch = RecordBatch::try_new(
@@ -238,6 +243,7 @@ pub(crate) fn write_arrow_split_from_track_major(
                 make_2d_f32_array(labels, rows_in_batch, n_tracks, n_bins),
                 Arc::new(interval_builder.finish()) as ArrayRef,
                 Arc::new(index_builder.finish()) as ArrayRef,
+                Arc::new(local_index_builder.finish()) as ArrayRef,
             ],
         )
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -279,8 +285,7 @@ pub(crate) fn write_arrow_split_from_track_major(
     context_len,
     batch_size=4,
     n_threads=None,
-    compression=None,
-    profile=false
+    compression=None
 ))]
 pub(crate) fn write_arrow_split_from_bigwigs(
     py: Python<'_>,
@@ -296,7 +301,6 @@ pub(crate) fn write_arrow_split_from_bigwigs(
     batch_size: usize,
     n_threads: Option<usize>,
     compression: Option<String>,
-    profile: bool,
 ) -> PyResult<()> {
     if let Some(n_threads) = n_threads {
         rayon::ThreadPoolBuilder::new()
@@ -346,18 +350,9 @@ pub(crate) fn write_arrow_split_from_bigwigs(
         compression,
     );
 
-    let mut prof_extract_wall_ns: Vec<u64> = if profile { Vec::with_capacity(total_batches) } else { Vec::new() };
-    let mut prof_opens_thread_ns: Vec<u64> = if profile { Vec::with_capacity(total_batches) } else { Vec::new() };
-    let mut prof_read_bin_thread_ns: Vec<u64> = if profile { Vec::with_capacity(total_batches) } else { Vec::new() };
-    let mut prof_assemble_wall_ns: Vec<u64> = if profile { Vec::with_capacity(total_batches) } else { Vec::new() };
-    let mut prof_fasta_wall_ns: Vec<u64> = if profile { Vec::with_capacity(total_batches) } else { Vec::new() };
-    let mut prof_arrow_wall_ns: Vec<u64> = if profile { Vec::with_capacity(total_batches) } else { Vec::new() };
-
-    let t_initial_open = Instant::now();
-    let (mut bw_handles, prof_initial_opens_thread_ns) = py
-        .allow_threads(|| open_bigwig_handles(&bw_paths, profile))
+    let mut bw_handles = py
+        .allow_threads(|| open_bigwig_handles(&bw_paths))
         .map_err(PyRuntimeError::new_err)?;
-    let _initial_open_wall_ns = t_initial_open.elapsed().as_nanos() as u64;
 
     for batch_start in (0..sample_indices.len()).step_by(batch_size) {
         py.check_signals()?;
@@ -376,31 +371,23 @@ pub(crate) fn write_arrow_split_from_bigwigs(
             batch_signal_intervals.push(interval.clone());
         }
 
-        let t_extract = if profile { Some(Instant::now()) } else { None };
-        let (labels, timings) = py
+        let labels = py
             .allow_threads(|| {
                 extract_bigwig_labels_batch(
                     &mut bw_handles,
                     &minus_flags,
                     &batch_signal_intervals,
                     n_bins,
-                    profile,
                 )
             })
             .map_err(PyRuntimeError::new_err)?;
-        if profile {
-            prof_extract_wall_ns.push(t_extract.unwrap().elapsed().as_nanos() as u64);
-            prof_opens_thread_ns.push(timings.opens_thread_ns);
-            prof_read_bin_thread_ns.push(timings.read_bin_thread_ns);
-            prof_assemble_wall_ns.push(timings.assemble_wall_ns);
-        }
 
-        let t_fasta = if profile { Some(Instant::now()) } else { None };
         let mut input_values = Vec::with_capacity(rows_in_batch * 4 * context_len);
         let mut interval_builder = StringBuilder::with_capacity(rows_in_batch, rows_in_batch * 32);
         let mut index_builder = Int64Builder::with_capacity(rows_in_batch);
+        let mut local_index_builder = Int64Builder::with_capacity(rows_in_batch);
 
-        for global_idx in batch_indices.iter().copied() {
+        for (row_offset, global_idx) in batch_indices.iter().copied().enumerate() {
             let (chrom, start, end, _) = bed_rows.get(global_idx).ok_or_else(|| {
                 PyRuntimeError::new_err(format!("BED index {global_idx} is out of range"))
             })?;
@@ -410,12 +397,9 @@ pub(crate) fn write_arrow_split_from_bigwigs(
             input_values.extend_from_slice(&seq);
             interval_builder.append_value(format!("{chrom}:{start}-{end}"));
             index_builder.append_value(global_idx as i64);
-        }
-        if profile {
-            prof_fasta_wall_ns.push(t_fasta.unwrap().elapsed().as_nanos() as u64);
+            local_index_builder.append_value((batch_start + row_offset) as i64);
         }
 
-        let t_arrow = if profile { Some(Instant::now()) } else { None };
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
@@ -423,52 +407,19 @@ pub(crate) fn write_arrow_split_from_bigwigs(
                 make_2d_f32_array(labels, rows_in_batch, n_tracks, n_bins),
                 Arc::new(interval_builder.finish()) as ArrayRef,
                 Arc::new(index_builder.finish()) as ArrayRef,
+                Arc::new(local_index_builder.finish()) as ArrayRef,
             ],
         )
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         writer
             .write(&batch)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        if profile {
-            prof_arrow_wall_ns.push(t_arrow.unwrap().elapsed().as_nanos() as u64);
-        }
         maybe_log_progress(
             &mut last_log,
             started,
             "arrow(direct-bigwig) batches",
             batch_start / batch_size + 1,
             total_batches,
-        );
-    }
-
-    if profile {
-        let pct = |v: &[u64], p: usize| -> f64 {
-            if v.is_empty() { return 0.0; }
-            let mut s = v.to_vec();
-            s.sort_unstable();
-            s[(s.len().saturating_sub(1)) * p / 100] as f64 / 1_000_000.0
-        };
-        let total_s = |v: &[u64]| v.iter().sum::<u64>() as f64 / 1_000_000_000.0;
-        let n = total_batches;
-        eprintln!(
-            "[regulonado_rs] profile batches={n}\n  \
-             initial_opens: total_thread_s={:.2}\n  \
-             opens:    total_thread_s={:.2}  per_batch_ms p50={:.1} p95={:.1}\n  \
-             read_bin: total_thread_s={:.2}  per_batch_ms p50={:.1} p95={:.1}\n  \
-             assemble: total_wall_s={:.2}    per_batch_ms p50={:.1} p95={:.1}\n  \
-             fasta:    total_wall_s={:.2}    per_batch_ms p50={:.1} p95={:.1}\n  \
-             arrow:    total_wall_s={:.2}    per_batch_ms p50={:.1} p95={:.1}",
-            prof_initial_opens_thread_ns as f64 / 1_000_000_000.0,
-            total_s(&prof_opens_thread_ns),
-            pct(&prof_opens_thread_ns, 50), pct(&prof_opens_thread_ns, 95),
-            total_s(&prof_read_bin_thread_ns),
-            pct(&prof_read_bin_thread_ns, 50), pct(&prof_read_bin_thread_ns, 95),
-            total_s(&prof_assemble_wall_ns),
-            pct(&prof_assemble_wall_ns, 50), pct(&prof_assemble_wall_ns, 95),
-            total_s(&prof_fasta_wall_ns),
-            pct(&prof_fasta_wall_ns, 50), pct(&prof_fasta_wall_ns, 95),
-            total_s(&prof_arrow_wall_ns),
-            pct(&prof_arrow_wall_ns, 50), pct(&prof_arrow_wall_ns, 95),
         );
     }
 

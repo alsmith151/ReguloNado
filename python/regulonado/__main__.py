@@ -163,9 +163,20 @@ def build(
         str,
         typer.Option(
             "--arrow-compression",
-            help="Arrow IPC compression: zstd or none",
+            help="Arrow IPC compression: zstd, lz4, or none",
         ),
     ] = "zstd",
+    strategy: Annotated[
+        str,
+        typer.Option(
+            "--strategy",
+            help=(
+                "Build strategy: 'chrom_pass' (default, one shard per "
+                "chromosome, ~10× fewer BigWig seeks) or 'fast' (sample-"
+                "batched, single shard per split)."
+            ),
+        ),
+    ] = "chrom_pass",
 ) -> None:
     """Build an Arrow DatasetDict from BED / FASTA / BigWig sources.
 
@@ -255,6 +266,7 @@ def build(
             overwrite=overwrite,
             drop_missing=drop_missing,
             profile=profile,
+            strategy=strategy,
         )
 
 

@@ -1,20 +1,22 @@
 //! regulonado_rs - Rust hot path for the Regulonado dataset builder.
 //!
-//! The production build path is deliberately split into two phases:
+//! Two production writers are available:
 //!
-//! 1. `write_arrow_split_from_bigwigs(...)` writes each Arrow split directly
-//!    from BigWig + FASTA sources in sample batches. This avoids materializing a
-//!    multi-TB dense scratch signal file during full builds.
+//! 1. `write_arrow_split_chrom_pass(...)` (recommended) — processes one
+//!    chromosome at a time, decoding the binned signal of all tracks once
+//!    into an in-RAM `(n_tracks, n_chrom_bins)` matrix and then slicing
+//!    per-sample rows out of it. Output is one Arrow IPC shard per
+//!    chromosome.
 //!
-//! 2. `extract_all_tracks_to_file(...)` plus
-//!    `write_arrow_split_from_track_major(...)` remain available for benchmarks
-//!    and small builds where a dense track-major scratch file is acceptable.
+//! 2. `write_arrow_split_from_bigwigs(...)` — sample-batched writer that
+//!    reads each sample's interval from every BigWig per batch. Retained
+//!    as a fallback / reference path for parity testing.
 //!
-//! Older entry points such as `extract_bigwig_regions`,
-//! `extract_bigwig_to_file`, `extract_all_tracks_to_dir`, and
-//! `write_arrow_split_from_sample_major` remain useful for debugging and
-//! benchmarking individual stages, but the full dataset builder should use the
-//! track-major extraction plus direct Arrow writer.
+//! The dense track-major scratch path (`extract_all_tracks_to_file` +
+//! `write_arrow_split_from_track_major`) and the per-sample debug entry
+//! points (`extract_bigwig_regions`, `extract_bigwig_to_file`,
+//! `extract_all_tracks_to_dir`, `write_arrow_split_from_sample_major`)
+//! remain available for benchmarking individual stages.
 
 mod binning;
 mod fasta;
@@ -24,6 +26,7 @@ mod signal_file;
 mod bigwig_io;
 mod writers;
 mod debug;
+mod chrom_pass;
 
 use pyo3::prelude::*;
 
@@ -40,5 +43,6 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(writers::write_arrow_split_from_sample_major, m)?)?;
     m.add_function(wrap_pyfunction!(writers::write_arrow_split_from_track_major, m)?)?;
     m.add_function(wrap_pyfunction!(writers::write_arrow_split_from_bigwigs, m)?)?;
+    m.add_function(wrap_pyfunction!(chrom_pass::write_arrow_split_chrom_pass, m)?)?;
     Ok(())
 }

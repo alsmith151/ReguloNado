@@ -36,9 +36,10 @@ pub(crate) fn ipc_write_options(compression: &str) -> Result<IpcWriteOptions, St
     let codec = match compression.to_ascii_lowercase().as_str() {
         "" | "none" | "uncompressed" => None,
         "zstd" => Some(CompressionType::ZSTD),
+        "lz4" | "lz4_frame" => Some(CompressionType::LZ4_FRAME),
         other => {
             return Err(format!(
-                "Unsupported Arrow compression '{other}'. Use 'zstd' or 'none'."
+                "Unsupported Arrow compression '{other}'. Use 'zstd', 'lz4', or 'none'."
             ))
         }
     };

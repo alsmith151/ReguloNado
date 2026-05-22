@@ -30,7 +30,8 @@ pub(crate) fn hf_arrow_schema(context_len: usize, n_tracks: usize, n_bins: usize
                     "input_ids": {"shape": [4, context_len], "dtype": "int8", "_type": "Array2D"},
                     "labels": {"shape": [n_tracks, n_bins], "dtype": "float32", "_type": "Array2D"},
                     "interval": {"dtype": "string", "_type": "Value"},
-                    "index": {"dtype": "int64", "_type": "Value"}
+                    "index": {"dtype": "int64", "_type": "Value"},
+                    "local_index": {"dtype": "int64", "_type": "Value"}
                 }
             }
         })
@@ -57,6 +58,7 @@ pub(crate) fn hf_arrow_schema(context_len: usize, n_tracks: usize, n_bins: usize
             label_field,
             Field::new("interval", DataType::Utf8, false),
             Field::new("index", DataType::Int64, false),
+            Field::new("local_index", DataType::Int64, false),
         ],
         metadata,
     ))
