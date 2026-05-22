@@ -1,0 +1,7 @@
+/ceph/project/milne_group/cchahrou/data/2025-03-24_chip_sem_archive/seqnado_output/bigwigs/deeptools/unscaled/SEM-ELL2_ELL2.bigWig
+/ceph/project/milne_group/cchahrou/data/2025-03-24_chip_sem_archive/seqnado_output/bigwigs/deeptools/unscaled/SEM-MED26_MED26.bigWig
+/ceph/project/milne_group/cchahrou/data/2025-03-24_chip_sem_archive/seqnado_output/bigwigs/deeptools/unscaled/SEM-MLLN_MLL-N.bigWig
+/ceph/project/milne_group/cchahrou/data/2025-03-24_chip_sem_archive/seqnado_output/bigwigs/deeptools/unscaled/SEM-BAF180_BAF180.bigWig
+/ceph/project/milne_group/cchahrou/data/2025-03-24_chip_sem_archive/seqnado_output/bigwigs/deeptools/unscaled/SEM-MED1_MED1.bigWig
+/ceph/project/milne_group/cchahrou/data/2025-03-24_chip_sem_archive/seqnado_output/bigwigs/deeptools/unscaled/SEM-BRD3_BRD3.bigWig
+/ceph/project/milne_group/cchahrou/data/2025-03-24_chip_sem_archive/seqnado_output/bigwigs/deeptools/unscaled/SEM-H3K79ME2-1_H3K79me2.bigWig
