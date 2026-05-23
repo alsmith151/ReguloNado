@@ -1,0 +1,8 @@
+# Backbone family name used by the adapter builder.
+name: borzoi
+# Optional model identifier for Borzoi.from_pretrained(...).
+pretrained_name: null
+# Optional override for backbone output length when the dataset metadata should not decide it.
+target_length: null
+# Raw keyword arguments passed to BorzoiConfig when not loading pretrained weights.
+config_overrides: {}

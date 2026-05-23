@@ -1,0 +1,2 @@
+# Loss family name interpreted by the training entrypoint.
+name: mse

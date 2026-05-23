@@ -1,0 +1,100 @@
+defaults:
+  - backbone: borzoi
+  - head: transfer_mlp
+  - loss: poisson_multinomial
+  - _self_
+
+# Default profile targets plain transfer learning on new data.
+# Condition-aware perturbation heads remain available via overrides such as
+# `head=residual_film model.use_track_metadata=true model.share_condition_base_channels=true`.
+
+# Global random seed used for Python, NumPy, and Torch.
+seed: 42
+# Final run directory; defaults to Hydra's timestamped output folder.
+output_dir: ${hydra:runtime.output_dir}
+
+data:
+  # Path to a saved Hugging Face dataset directory produced by Regulonado.
+  path: ???
+  # Apply per-track scale factors stored in dataset metadata before loss computation.
+  apply_scale: true
+  # Apply the Borzoi-style squash transform after optional scaling.
+  apply_squash: true
+  # Clamp targets using per-track clip thresholds from metadata or defaults.
+  apply_clip: true
+  # Stream Arrow shards from disk one at a time instead of loading into RAM.
+  # Required when Arrow files use LZ4/Zstd compression (mmap is not possible on compressed IPC).
+  # When true, trainer.max_steps must be set — epoch counting is unavailable.
+  streaming: false
+  # Enable random reverse-complement augmentation on the training split only.
+  enable_rc_aug: false
+  # Expected cropped sequence length fed to the backbone after any shift crop.
+  context_length: 524288
+  # Expected number of output bins after any shift crop.
+  n_pred_bins: 6144
+
+model:
+  # Default transfer-learning setup: ignore per-track metadata fields in the head.
+  use_track_metadata: false
+  # Only matters when metadata is enabled for FiLM-style perturbation heads.
+  share_condition_base_channels: false
+  # Hidden width used by the metadata encoder inside condition-aware heads.
+  metadata_hidden: 32
+  # Positive-output activation applied by the selected head.
+  activation_type: softplus
+
+trainer:
+  # Per-device train batch size.
+  batch_size: 1
+  # Per-device validation batch size.
+  eval_batch_size: 1
+  # DataLoader worker count per process.
+  num_workers: 4
+  # Keep DataLoader workers alive between iterations (no-op when num_workers=0).
+  persistent_workers: true
+  # Batches prefetched per worker; null uses PyTorch default of 2.
+  prefetch_factor: 2
+  # Learning rate for head parameters.
+  learning_rate: 1.0e-3
+  # Optional lower learning rate for the backbone.
+  backbone_learning_rate: 1.0e-4
+  # AdamW weight decay.
+  weight_decay: 1.0e-2
+  # Scheduler name passed to Hugging Face's get_scheduler.
+  scheduler: linear
+  # Frequency of training logs in optimizer-step units.
+  log_every_n_steps: 50
+  # Validation eval frequency in optimizer-step units; falls back to checkpoint_every_n_steps,
+  # then log_every_n_steps when null.
+  eval_every_n_steps: null
+  # Warmup steps in optimizer-step units.
+  warmup_steps: 0
+  # Used when max_steps is null.
+  max_epochs: 1
+  # Override epoch-based training with a fixed optimizer-step budget.
+  max_steps: null
+  # Accumulate gradients over this many forward passes.
+  gradient_accumulation_steps: 1
+  # no, fp16, or bf16.
+  mixed_precision: bf16
+  # Global gradient clipping norm.
+  gradient_clip_norm: 1.0
+  # Save checkpoints every N optimizer steps; null disables checkpoint saves.
+  checkpoint_every_n_steps: null
+  # Logging backends: [] for none, ["wandb"] to enable Weights & Biases.
+  report_to: []
+  # Freeze the backbone before optional selective unfreezing.
+  freeze_backbone: true
+  # Unfreeze the final N adapter-reported backbone stages nearest the model output.
+  # For Borzoi this means transformer blocks plus final_joined_convs; for Enformer,
+  # transformer blocks plus final_pointwise, in the order returned by iter_named_blocks().
+  unfreeze_backbone_stages_from_output_end: 0
+  # Explicit adapter-reported module names to unfreeze.
+  unfreeze_module_names: []
+
+hydra:
+  run:
+    dir: outputs/train/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}

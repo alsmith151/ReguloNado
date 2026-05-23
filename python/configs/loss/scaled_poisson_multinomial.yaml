@@ -1,0 +1,4 @@
+# Loss family name interpreted by the training entrypoint.
+name: scaled_poisson_multinomial
+# Relative weight on the Poisson total-count term after scaling and clipping.
+poisson_weight: 0.2
