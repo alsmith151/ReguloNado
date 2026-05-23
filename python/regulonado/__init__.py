@@ -1,4 +1,3 @@
-from regulonado import metrics, training, viz
 from regulonado.model import (
     ActivationType,
     BackboneAdapter,
@@ -19,6 +18,16 @@ from regulonado.model import (
     build_condition_shared_track_index,
     build_perturb_head,
 )
+
+
+def __getattr__(name: str):
+    if name in {"metrics", "training", "viz"}:
+        import importlib
+
+        module = importlib.import_module(f"regulonado.{name}")
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module 'regulonado' has no attribute {name!r}")
 
 __all__ = [
     "ActivationType",
