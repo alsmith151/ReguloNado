@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import random
@@ -487,9 +488,10 @@ def run_training(
     records = _track_records(metadata)
 
     # Only shuffle the training split — eval splits don't need shuffling and the buffer
-    # (1000 samples × num_workers) causes OOM on large sequences.
+    # (n_samples × sample_size × num_workers) consumes significant memory on large sequences.
+    # At ~45 MB/sample (1507 tracks × 6148 bins) a buffer of 30 uses ~1.4 GB per worker.
     if streaming and "train" in dataset_dict:
-        dataset_dict["train"] = dataset_dict["train"].shuffle(buffer_size=100, seed=seed)
+        dataset_dict["train"] = dataset_dict["train"].shuffle(buffer_size=30, seed=seed)
 
     dataset_dict = _apply_dataset_transforms(dataset_dict, metadata, records, cfg["data"])
 
@@ -572,6 +574,18 @@ def run_training(
         unfreeze_module_names=tuple(cfg["trainer"].get("unfreeze_module_names", [])),
         report_to=list(cfg["trainer"].get("report_to", [])),
     )
+
+    # Persistent workers with HF IterableDataset accumulate Arrow file handles and
+    # shuffle-buffer state between iterator cycles — workers never restart to clear them.
+    # Force non-persistent workers for streaming datasets to prevent this memory leak.
+    if streaming and trainer_cfg.persistent_workers:
+        import warnings
+        warnings.warn(
+            "persistent_workers=True is unsafe with streaming datasets (memory leak). "
+            "Overriding to persistent_workers=False.",
+            stacklevel=2,
+        )
+        trainer_cfg = dataclasses.replace(trainer_cfg, persistent_workers=False)
 
     output_dir = Path(str(cfg.get("output_dir") or Path.cwd() / "outputs"))
     output_dir.mkdir(parents=True, exist_ok=True)
