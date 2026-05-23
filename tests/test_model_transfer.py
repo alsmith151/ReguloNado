@@ -18,7 +18,7 @@ from regulonado.model import (
     TransferMLPPerturbHead,
     build_condition_shared_track_index,
 )
-from regulonado.train import run_training
+from regulonado.train import _build_optimizer, _normalise_checkpoint_mode, run_training
 from regulonado.training import (
     TrainerConfig,
     get_transform,
@@ -173,11 +173,36 @@ def test_scaled_poisson_multinomial_loss_is_finite():
     assert loss.ndim == 0
 
 
+def test_optimizer_excludes_bias_and_norm_from_weight_decay():
+    model = HeadedSequenceModel(
+        backbone=DummyBackbone(),
+        head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
+    )
+    cfg = TrainerConfig(learning_rate=1e-3, backbone_learning_rate=1e-4, weight_decay=0.1)
+    optimizer = _build_optimizer(model, cfg)
+    assert {group["weight_decay"] for group in optimizer.param_groups} == {0.0, 0.1}
+    assert {group["lr"] for group in optimizer.param_groups} == {1e-3, 1e-4}
+
+
+def test_checkpoint_mode_normalisation():
+    assert _normalise_checkpoint_mode("true") is True
+    assert _normalise_checkpoint_mode("false") is None
+    assert _normalise_checkpoint_mode("") is None
+    assert _normalise_checkpoint_mode("checkpoint-3000") == "checkpoint-3000"
+
+
 def test_metric_state_accumulates_and_finalizes():
     state = init_validation_metric_state()
     update_validation_metric_state(state, pred_lfc=[0.0, 1.0, 2.0], meas_lfc=[0.1, 0.9, 2.1])
     metrics = finalize_validation_metric_state(state)
     assert "delta_lfc/pearson" in metrics
+
+
+def test_metric_state_without_conditions_skips_delta_lfc_metrics():
+    state = init_validation_metric_state()
+    metrics = finalize_validation_metric_state(state)
+    assert "delta_lfc/pearson" not in metrics
+    assert "reconstruction/raw_pearson" in metrics
 
 
 def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
@@ -256,10 +281,19 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
                 "gradient_accumulation_steps": 1,
                 "mixed_precision": "no",
                 "gradient_clip_norm": 1.0,
+                "eval_every_n_steps": 1,
                 "checkpoint_every_n_steps": None,
                 "freeze_backbone": True,
                 "unfreeze_backbone_stages_from_output_end": 1,
                 "unfreeze_module_names": [],
+                "fit_metrics": {"enabled": True, "save_per_track": True},
+                "fit_examples": {
+                    "enabled": True,
+                    "num_examples": 1,
+                    "tracks_per_example": 1,
+                    "log_to_wandb": False,
+                },
+                "provenance": {"enabled": True, "save_git_diff": False},
             },
         },
         adapter_builder=lambda _: DummyAdapter(),
@@ -267,3 +301,7 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
 
     assert summary["history"]["train/loss"]
     assert (tmp_path / "run" / "training_summary.json").exists()
+    assert (tmp_path / "run" / "provenance.json").exists()
+    assert (tmp_path / "run" / "resolved_config.json").exists()
+    assert list((tmp_path / "run" / "fit").glob("step_*/summary.json"))
+    assert list((tmp_path / "run" / "fit" / "examples").glob("step_*/manifest.json"))

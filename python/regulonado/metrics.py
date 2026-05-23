@@ -103,8 +103,12 @@ def paired_delta_log2fc_vectors(
         target_baseline = targets[:, baseline_mask].mean(dim=1)
         target_perturbed = targets[:, perturbed_mask].mean(dim=1)
 
-        pred_lfc = torch.log2(pred_perturbed + pseudocount) - torch.log2(pred_baseline + pseudocount)
-        target_lfc = torch.log2(target_perturbed + pseudocount) - torch.log2(target_baseline + pseudocount)
+        pred_lfc = torch.log2(pred_perturbed + pseudocount) - torch.log2(
+            pred_baseline + pseudocount
+        )
+        target_lfc = torch.log2(target_perturbed + pseudocount) - torch.log2(
+            target_baseline + pseudocount
+        )
         pred_chunks.append(pred_lfc.detach().cpu().numpy().reshape(-1))
         target_chunks.append(target_lfc.detach().cpu().numpy().reshape(-1))
 
@@ -206,9 +210,12 @@ def update_validation_reconstruction_state(
 def finalize_validation_metric_state(state: dict[str, Any]) -> dict[str, float]:
     pred_lfc = _concat_chunks(state["pred_lfc_chunks"])
     meas_lfc = _concat_chunks(state["meas_lfc_chunks"])
-    delta_metrics = {
-        f"delta_lfc/{key}": value for key, value in delta_log2fc_metrics(pred_lfc, meas_lfc).items()
-    }
+    delta_metrics = {}
+    if pred_lfc.size > 0 and meas_lfc.size > 0:
+        delta_metrics = {
+            f"delta_lfc/{key}": value
+            for key, value in delta_log2fc_metrics(pred_lfc, meas_lfc).items()
+        }
 
     raw_count = int(state["raw_count"])
     raw_pearson = _safe_pearson_from_sums(
@@ -220,20 +227,24 @@ def finalize_validation_metric_state(state: dict[str, Any]) -> dict[str, float]:
         sum_xy=float(state["raw_sum_cross"]),
     )
     raw_mae = float(state["raw_abs_error_sum"]) / raw_count if raw_count > 0 else float("nan")
-    raw_rmse = float(np.sqrt(float(state["raw_sq_error_sum"]) / raw_count)) if raw_count > 0 else float("nan")
+    raw_rmse = (
+        float(np.sqrt(float(state["raw_sq_error_sum"]) / raw_count))
+        if raw_count > 0
+        else float("nan")
+    )
 
-    balanced_score = float("nan")
-    delta_pearson = delta_metrics.get("delta_lfc/pearson", float("nan"))
-    if np.isfinite(delta_pearson) and np.isfinite(raw_pearson):
-        balanced_score = float(0.5 * (delta_pearson + raw_pearson))
-
-    return {
+    metrics = {
         **delta_metrics,
         "reconstruction/raw_pearson": raw_pearson,
         "reconstruction/raw_mae": raw_mae,
         "reconstruction/raw_rmse": raw_rmse,
-        "selection/balanced_score": balanced_score,
     }
+    delta_pearson = delta_metrics.get("delta_lfc/pearson", float("nan"))
+    if np.isfinite(delta_pearson) and np.isfinite(raw_pearson):
+        metrics["selection/balanced_score"] = float(0.5 * (delta_pearson + raw_pearson))
+    elif np.isfinite(raw_pearson):
+        metrics["selection/balanced_score"] = raw_pearson
+    return metrics
 
 
 def per_track_pearson(preds: np.ndarray, targets: np.ndarray) -> dict[int, float]:

@@ -81,6 +81,13 @@ trainer:
   gradient_clip_norm: 1.0
   # Save checkpoints every N optimizer steps; null disables checkpoint saves.
   checkpoint_every_n_steps: null
+  # Full HF Trainer resume. Use true to auto-detect latest checkpoint in output_dir.
+  resume_from_checkpoint: null
+  # Warm start from model weights only; creates fresh optimizer/scheduler/RNG state.
+  init_weights_from_checkpoint: null
+  # Best-model selection metric.
+  metric_for_best_model: eval_loss
+  greater_is_better: false
   # Logging backends: [] for none, ["wandb"] to enable Weights & Biases.
   report_to: []
   # Freeze the backbone before optional selective unfreezing.
@@ -91,6 +98,22 @@ trainer:
   unfreeze_backbone_stages_from_output_end: 0
   # Explicit adapter-reported module names to unfreeze.
   unfreeze_module_names: []
+  provenance:
+    enabled: true
+    save_git_diff: true
+  fit_metrics:
+    enabled: true
+    save_per_track: true
+    log_per_track_to_wandb: false
+    group_by: [assay_type, cell_line]
+    high_signal_quantile: 0.95
+  fit_examples:
+    enabled: true
+    num_examples: 4
+    tracks_per_example: 3
+    log_to_wandb: true
+    max_wandb_images: 8
+    seed_offset: 10000
 
 hydra:
   run:

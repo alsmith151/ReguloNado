@@ -20,6 +20,8 @@
 set -euo pipefail
 
 CUDA_MODULE="${CUDA_MODULE:-cuda/12.9}"
+INSTALL_EXTRAS="${INSTALL_EXTRAS:---extra gpu}"
+UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/uv-cache-${USER}}"
 
 # Resolve repo root whether submitted via sbatch or run directly.
 if [[ -n "${REPO_DIR:-}" ]]; then
@@ -33,6 +35,7 @@ fi
 
 echo "Repo:        $REPO_DIR"
 echo "CUDA module: $CUDA_MODULE"
+echo "uv extras:   $INSTALL_EXTRAS"
 
 module load "$CUDA_MODULE"
 export CUDA_HOME="$(dirname "$(dirname "$(which nvcc)")")"
@@ -46,7 +49,10 @@ export CC=gcc
 export NVCC_PREPEND_FLAGS="-ccbin /usr/bin/g++"
 
 cd "$REPO_DIR"
-uv sync --extra gpu
+export UV_CACHE_DIR
+# shellcheck disable=SC2206
+EXTRA_ARGS=($INSTALL_EXTRAS)
+uv sync "${EXTRA_ARGS[@]}"
 
 echo ""
 echo "Installed:"

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import importlib.metadata
 import json
 import os
+import platform
 import random
+import subprocess
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -11,10 +16,19 @@ from typing import Any
 import hydra
 import numpy as np
 import torch
-from datasets import DatasetDict, IterableDataset as HFIterableDataset, load_from_disk
+from datasets import DatasetDict, load_from_disk
+from datasets import IterableDataset as HFIterableDataset
 from omegaconf import DictConfig, OmegaConf
+from scipy.stats import spearmanr
 from torch.optim import AdamW
-from transformers import Trainer, TrainerCallback, TrainerControl, TrainerState, TrainingArguments, get_scheduler
+from transformers import (
+    Trainer,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState,
+    TrainingArguments,
+    get_scheduler,
+)
 
 from regulonado.dataset import build_rc_permutation, make_transform
 from regulonado.model import (
@@ -25,7 +39,13 @@ from regulonado.model import (
     build_condition_shared_track_index,
     build_perturb_head,
 )
-from regulonado.training.config import TrainerConfig
+from regulonado.training.config import (
+    FitExamplesConfig,
+    FitMetricsConfig,
+    ProvenanceConfig,
+    TrainerConfig,
+    nested_config,
+)
 from regulonado.training.losses import (
     log1p_huber_loss,
     poisson_multinomial_loss,
@@ -53,6 +73,188 @@ class _LRLogCallback(TrainerCallback):
             logs[f"learning_rate/{label}"] = group["lr"]
         if state.log_history:
             state.log_history[-1].update(logs)
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return str(value)
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=_json_default))
+
+
+def _run_git(repo: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip()
+
+
+def _file_sha256(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _split_summary(dataset_dict: Mapping[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for split_name, split in dataset_dict.items():
+        try:
+            summary[split_name] = {"num_rows": len(split)}
+        except TypeError:
+            summary[split_name] = {"num_rows": None, "streaming": True}
+    return summary
+
+
+def _package_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _environment_summary() -> dict[str, Any]:
+    slurm_keys = [
+        "SLURM_JOB_ID",
+        "SLURM_JOB_NAME",
+        "SLURM_SUBMIT_DIR",
+        "SLURM_NODELIST",
+        "SLURM_CPUS_PER_TASK",
+        "SLURM_GPUS",
+        "CUDA_VISIBLE_DEVICES",
+    ]
+    return {
+        "python": sys.version,
+        "platform": platform.platform(),
+        "torch": {
+            "version": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda": torch.version.cuda,
+            "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+            "devices": [
+                torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())
+            ]
+            if torch.cuda.is_available()
+            else [],
+        },
+        "packages": {
+            name: _package_version(name)
+            for name in ("transformers", "datasets", "accelerate", "wandb", "numpy", "torch")
+        },
+        "slurm": {key: os.environ[key] for key in slurm_keys if key in os.environ},
+    }
+
+
+def _write_provenance(
+    *,
+    output_dir: Path,
+    cfg: Mapping[str, Any],
+    data_path: Path,
+    dataset_dict: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    records: Sequence[Mapping[str, Any]],
+    trainer_cfg: TrainerConfig,
+) -> None:
+    if not trainer_cfg.provenance.enabled:
+        return
+
+    repo = Path.cwd()
+    metadata_candidates = [
+        data_path / "regulonado_metadata.json",
+        data_path / "track_metadata.json",
+    ]
+    metadata_path = next((path for path in metadata_candidates if path.exists()), None)
+    git_status = _run_git(repo, "status", "--short")
+    provenance = {
+        "config": cfg,
+        "command": " ".join(sys.argv),
+        "git": {
+            "branch": _run_git(repo, "rev-parse", "--abbrev-ref", "HEAD"),
+            "commit": _run_git(repo, "rev-parse", "HEAD"),
+            "dirty": bool(git_status),
+            "status_short": git_status,
+        },
+        "dataset": {
+            "path": str(data_path),
+            "metadata_path": str(metadata_path) if metadata_path is not None else None,
+            "metadata_sha256": _file_sha256(metadata_path) if metadata_path is not None else None,
+            "n_tracks": len(records),
+            "splits": _split_summary(dataset_dict),
+            "context_length": metadata.get("context_length"),
+            "n_pred_bins": metadata.get("n_pred_bins"),
+            "bin_size": metadata.get("bin_size"),
+        },
+        "checkpoint_reuse": {
+            "resume_from_checkpoint": trainer_cfg.resume_from_checkpoint,
+            "init_weights_from_checkpoint": trainer_cfg.init_weights_from_checkpoint,
+        },
+        "environment": _environment_summary(),
+    }
+    _write_json(output_dir / "provenance.json", provenance)
+    _write_json(output_dir / "resolved_config.json", cfg)
+    if trainer_cfg.provenance.save_git_diff:
+        diff = _run_git(repo, "diff", "--no-ext-diff")
+        if diff:
+            (output_dir / "git_diff.patch").write_text(diff)
+
+
+def _normalise_checkpoint_mode(value: Any) -> str | bool | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in {"true", "yes", "1"}:
+        return True
+    if isinstance(value, str) and value.lower() in {"false", "no", "0", "none", "null"}:
+        return None
+    return str(value)
+
+
+def _load_model_weights_only(model: torch.nn.Module, checkpoint: str | Path) -> None:
+    checkpoint_path = Path(checkpoint)
+    if checkpoint_path.is_file():
+        weight_path = checkpoint_path
+    else:
+        safetensors_path = checkpoint_path / "model.safetensors"
+        bin_path = checkpoint_path / "pytorch_model.bin"
+        if safetensors_path.exists():
+            weight_path = safetensors_path
+        elif bin_path.exists():
+            weight_path = bin_path
+        else:
+            raise FileNotFoundError(
+                f"No model weights found in {checkpoint_path}; expected model.safetensors "
+                "or pytorch_model.bin"
+            )
+
+    if weight_path.suffix == ".safetensors":
+        from safetensors.torch import load_file
+
+        state_dict = load_file(str(weight_path), device="cpu")
+    else:
+        state_dict = torch.load(weight_path, map_location="cpu")
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if unexpected:
+        raise RuntimeError(f"Unexpected checkpoint keys when warm-starting: {unexpected[:10]}")
+    if missing:
+        raise RuntimeError(f"Missing checkpoint keys when warm-starting: {missing[:10]}")
 
 
 def _seed_everything(seed: int) -> None:
@@ -212,7 +414,11 @@ def _build_loss_fn(
 
 
 class TrainerCompatibleModel(torch.nn.Module):
-    def __init__(self, model: HeadedSequenceModel, loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]):
+    def __init__(
+        self,
+        model: HeadedSequenceModel,
+        loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    ):
         super().__init__()
         self.model = model
         self.loss_fn = loss_fn
@@ -364,25 +570,54 @@ def _apply_freeze_policy(model: HeadedSequenceModel, trainer_cfg: TrainerConfig)
     )
 
 
-def _build_optimizer(model: HeadedSequenceModel, trainer_cfg: TrainerConfig) -> torch.optim.Optimizer:
+def _build_optimizer(
+    model: HeadedSequenceModel, trainer_cfg: TrainerConfig
+) -> torch.optim.Optimizer:
     lr = trainer_cfg.learning_rate
     backbone_lr = trainer_cfg.backbone_learning_rate or lr
-    head_params = [parameter for parameter in model.head_parameters() if parameter.requires_grad]
-    trunk_params = [parameter for parameter in model.trunk_parameters() if parameter.requires_grad]
+
+    head_ids = {id(parameter) for parameter in model.head_parameters()}
+    trunk_ids = {id(parameter) for parameter in model.trunk_parameters()}
+    no_decay_terms = ("bias", "norm", "ln", "embedding", "scale", "shift")
+    grouped: dict[tuple[str, bool], list[torch.nn.Parameter]] = {
+        ("backbone", True): [],
+        ("backbone", False): [],
+        ("head", True): [],
+        ("head", False): [],
+    }
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if id(parameter) in trunk_ids:
+            family = "backbone"
+        elif id(parameter) in head_ids:
+            family = "head"
+        else:
+            family = "head"
+        use_decay = parameter.ndim > 1 and not any(term in name.lower() for term in no_decay_terms)
+        grouped[(family, use_decay)].append(parameter)
 
     param_groups: list[dict[str, Any]] = []
-    if trunk_params:
-        param_groups.append({"params": trunk_params, "lr": backbone_lr})
-    if head_params:
-        param_groups.append({"params": head_params, "lr": lr})
+    for family, group_lr in (("backbone", backbone_lr), ("head", lr)):
+        decay_params = grouped[(family, True)]
+        no_decay_params = grouped[(family, False)]
+        if decay_params:
+            param_groups.append(
+                {"params": decay_params, "lr": group_lr, "weight_decay": trainer_cfg.weight_decay}
+            )
+        if no_decay_params:
+            param_groups.append({"params": no_decay_params, "lr": group_lr, "weight_decay": 0.0})
     if not param_groups:
         param_groups.append(
             {
-                "params": [parameter for parameter in model.parameters() if parameter.requires_grad],
+                "params": [
+                    parameter for parameter in model.parameters() if parameter.requires_grad
+                ],
                 "lr": lr,
+                "weight_decay": trainer_cfg.weight_decay,
             }
         )
-    return AdamW(param_groups, weight_decay=trainer_cfg.weight_decay)
+    return AdamW(param_groups)
 
 
 def _build_training_arguments(
@@ -398,7 +633,7 @@ def _build_training_arguments(
 
     save_strategy = "steps" if trainer_cfg.checkpoint_every_n_steps else "no"
     logging_strategy = "steps"
-    metric_for_best_model = "eval_loss" if has_eval else None
+    metric_for_best_model = trainer_cfg.metric_for_best_model if has_eval else None
     load_best_model_at_end = has_eval and save_strategy != "no"
 
     return TrainingArguments(
@@ -407,8 +642,12 @@ def _build_training_arguments(
         per_device_train_batch_size=trainer_cfg.batch_size,
         per_device_eval_batch_size=trainer_cfg.resolved_eval_batch_size(),
         dataloader_num_workers=trainer_cfg.num_workers,
-        dataloader_persistent_workers=trainer_cfg.num_workers > 0 and trainer_cfg.persistent_workers,
-        dataloader_prefetch_factor=trainer_cfg.prefetch_factor if trainer_cfg.num_workers > 0 else None,
+        dataloader_persistent_workers=(
+            trainer_cfg.num_workers > 0 and trainer_cfg.persistent_workers
+        ),
+        dataloader_prefetch_factor=(
+            trainer_cfg.prefetch_factor if trainer_cfg.num_workers > 0 else None
+        ),
         learning_rate=trainer_cfg.learning_rate,
         weight_decay=trainer_cfg.weight_decay,
         num_train_epochs=float(trainer_cfg.max_epochs),
@@ -436,7 +675,9 @@ def _build_training_arguments(
         disable_tqdm=True,
         load_best_model_at_end=load_best_model_at_end,
         metric_for_best_model=metric_for_best_model,
-        greater_is_better=False if metric_for_best_model is not None else None,
+        greater_is_better=(
+            trainer_cfg.greater_is_better if metric_for_best_model is not None else None
+        ),
         max_grad_norm=trainer_cfg.gradient_clip_norm or 0.0,
     )
 
@@ -460,7 +701,9 @@ def _build_scheduler_for_trainer(
             1,
         )
         total_train_steps = trainer_cfg.max_steps or max(
-            steps_per_epoch * trainer_cfg.max_epochs // max(trainer_cfg.gradient_accumulation_steps, 1),
+            steps_per_epoch
+            * trainer_cfg.max_epochs
+            // max(trainer_cfg.gradient_accumulation_steps, 1),
             1,
         )
     return get_scheduler(
@@ -469,6 +712,319 @@ def _build_scheduler_for_trainer(
         num_warmup_steps=trainer_cfg.warmup_steps,
         num_training_steps=total_train_steps,
     )
+
+
+def _safe_corr(x: np.ndarray, y: np.ndarray) -> float:
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+    if x.size < 2 or np.std(x) < 1e-8 or np.std(y) < 1e-8:
+        return float("nan")
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def _safe_spearman(x: np.ndarray, y: np.ndarray) -> float:
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+    if x.size < 2 or np.std(x) < 1e-8 or np.std(y) < 1e-8:
+        return float("nan")
+    result = spearmanr(x, y)
+    statistic = result.statistic if hasattr(result, "statistic") else result[0]
+    return float(statistic)
+
+
+def _summarise_values(prefix: str, values: np.ndarray) -> dict[str, float]:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return {
+            f"{prefix}_mean": float("nan"),
+            f"{prefix}_median": float("nan"),
+            f"{prefix}_q10": float("nan"),
+        }
+    return {
+        f"{prefix}_mean": float(np.mean(finite)),
+        f"{prefix}_median": float(np.median(finite)),
+        f"{prefix}_q10": float(np.quantile(finite, 0.10)),
+    }
+
+
+def _record_label(record: Mapping[str, Any], track_index: int) -> str:
+    for key in ("track_name", "name", "display_name", "samplename", "sample", "target"):
+        value = record.get(key)
+        if value is not None:
+            return str(value)
+    return f"track_{track_index}"
+
+
+def _track_metrics_frame(
+    *,
+    pred_totals: np.ndarray,
+    target_totals: np.ndarray,
+    records: Sequence[Mapping[str, Any]],
+    high_signal_quantile: float,
+) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    n_tracks = target_totals.shape[1]
+    rows: list[dict[str, Any]] = []
+    for track_idx in range(n_tracks):
+        pred = pred_totals[:, track_idx]
+        target = target_totals[:, track_idx]
+        high_threshold = np.nanquantile(target, high_signal_quantile)
+        high_mask = target >= high_threshold
+        record = dict(records[track_idx]) if track_idx < len(records) else {}
+        rows.append(
+            {
+                "track_index": int(track_idx),
+                "track_label": _record_label(record, track_idx),
+                "pearson": _safe_corr(pred, target),
+                "spearman": _safe_spearman(pred, target),
+                "high_signal_pearson": _safe_corr(pred[high_mask], target[high_mask]),
+                "total_signal_ratio": float(np.nansum(pred) / max(np.nansum(target), 1e-8)),
+                "mae_total_signal": float(np.nanmean(np.abs(pred - target))),
+                **{
+                    key: value
+                    for key, value in record.items()
+                    if isinstance(value, (str, int, float, bool)) or value is None
+                },
+            }
+        )
+
+    pearson = np.asarray([float(row["pearson"]) for row in rows], dtype=np.float64)
+    spearman = np.asarray([float(row["spearman"]) for row in rows], dtype=np.float64)
+    high = np.asarray([float(row["high_signal_pearson"]) for row in rows], dtype=np.float64)
+    ratio = np.asarray([float(row["total_signal_ratio"]) for row in rows], dtype=np.float64)
+    aggregate = {
+        **_summarise_values("fit/pearson", pearson),
+        **_summarise_values("fit/spearman", spearman),
+        **_summarise_values("fit/high_signal_pearson", high),
+        "fit/total_signal_ratio_median": float(np.nanmedian(ratio)),
+        "fit/total_signal_ratio_mad": float(np.nanmedian(np.abs(ratio - np.nanmedian(ratio)))),
+    }
+    return rows, aggregate
+
+
+def _save_table(rows: list[dict[str, Any]], path_prefix: Path) -> None:
+    path_prefix.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import pandas as pd
+
+        frame = pd.DataFrame(rows)
+        frame.to_parquet(path_prefix.with_suffix(".parquet"), index=False)
+        frame.to_csv(path_prefix.with_suffix(".csv"), index=False)
+    except Exception:
+        _write_json(path_prefix.with_suffix(".json"), {"rows": rows})
+
+
+def _group_metric_summary(
+    rows: list[dict[str, Any]],
+    group_by: Sequence[str],
+) -> list[dict[str, Any]]:
+    grouped: list[dict[str, Any]] = []
+    for field in group_by:
+        values = sorted({row.get(field) for row in rows if row.get(field) is not None})
+        for value in values:
+            subset = [row for row in rows if row.get(field) == value]
+            pearson = np.asarray([float(row["pearson"]) for row in subset], dtype=np.float64)
+            grouped.append(
+                {
+                    "field": field,
+                    "value": value,
+                    "n_tracks": len(subset),
+                    "pearson_median": float(np.nanmedian(pearson)),
+                    "pearson_q10": float(np.nanquantile(pearson, 0.10)),
+                }
+            )
+    return grouped
+
+
+def _plot_examples(
+    *,
+    examples: list[dict[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+    step: int,
+    tracks_per_example: int,
+    seed: int,
+) -> list[dict[str, Any]]:
+    if not examples:
+        return []
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rng = np.random.default_rng(seed)
+    step_dir = output_dir / "fit" / "examples" / f"step_{step:06d}"
+    step_dir.mkdir(parents=True, exist_ok=True)
+    manifest: list[dict[str, Any]] = []
+    n_tracks = examples[0]["pred"].shape[0]
+    for example_idx, example in enumerate(examples):
+        track_count = min(tracks_per_example, n_tracks)
+        track_indices = rng.choice(n_tracks, size=track_count, replace=False)
+        for track_idx in sorted(int(idx) for idx in track_indices):
+            pred = example["pred"][track_idx]
+            target = example["target"][track_idx]
+            record = dict(records[track_idx]) if track_idx < len(records) else {}
+            label = _record_label(record, track_idx)
+            fig, ax = plt.subplots(figsize=(9, 3), dpi=120)
+            ax.plot(target, label="real", linewidth=1.2)
+            ax.plot(pred, label="predicted", linewidth=1.0, alpha=0.85)
+            ax.set_title(f"{label} (track {track_idx})")
+            ax.set_xlabel("bin")
+            ax.set_ylabel("signal")
+            ax.legend(loc="upper right", frameon=False)
+            fig.tight_layout()
+            filename = f"example_{example_idx:02d}_track_{track_idx:04d}.png"
+            path = step_dir / filename
+            fig.savefig(path)
+            plt.close(fig)
+            manifest.append(
+                {
+                    "eval_step": step,
+                    "example_ordinal": int(example["ordinal"]),
+                    "reservoir_slot": example_idx,
+                    "track_index": track_idx,
+                    "track_label": label,
+                    "path": str(path),
+                    "track_metadata": {
+                        key: value
+                        for key, value in record.items()
+                        if isinstance(value, (str, int, float, bool)) or value is None
+                    },
+                }
+            )
+    _write_json(step_dir / "manifest.json", {"plots": manifest})
+    return manifest
+
+
+class RegulonadoTrainer(Trainer):
+    def __init__(
+        self,
+        *args: Any,
+        records: Sequence[Mapping[str, Any]],
+        fit_metrics: FitMetricsConfig,
+        fit_examples: FitExamplesConfig,
+        seed: int,
+        **kwargs: Any,
+    ):
+        super().__init__(*args, **kwargs)
+        self._records = list(records)
+        self._fit_metrics_cfg = fit_metrics
+        self._fit_examples_cfg = fit_examples
+        self._seed = seed
+
+    def evaluate(
+        self,
+        eval_dataset: Any | None = None,
+        ignore_keys: list[str] | None = None,
+        metric_key_prefix: str = "eval",
+    ) -> dict[str, float]:
+        metrics = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
+        if self.is_world_process_zero() and (
+            self._fit_metrics_cfg.enabled or self._fit_examples_cfg.enabled
+        ):
+            extra_metrics = self._write_fit_diagnostics(eval_dataset, ignore_keys)
+            if extra_metrics:
+                self.log(extra_metrics)
+                metrics.update(extra_metrics)
+        return metrics
+
+    def _write_fit_diagnostics(
+        self,
+        eval_dataset: Any | None,
+        ignore_keys: list[str] | None,
+    ) -> dict[str, float]:
+        dataloader = self.get_eval_dataloader(eval_dataset)
+        pred_chunks: list[np.ndarray] = []
+        target_chunks: list[np.ndarray] = []
+        reservoir: list[dict[str, Any]] = []
+        seen_examples = 0
+        step = int(self.state.global_step)
+        rng = np.random.default_rng(self._seed + self._fit_examples_cfg.seed_offset + step)
+
+        self.model.eval()
+        for batch in dataloader:
+            with torch.no_grad():
+                loss, logits, labels = self.prediction_step(
+                    self.model,
+                    batch,
+                    prediction_loss_only=False,
+                    ignore_keys=ignore_keys,
+                )
+            del loss
+            if logits is None or labels is None:
+                continue
+            if isinstance(logits, tuple):
+                logits = logits[0]
+            logits = logits.detach().float().cpu()
+            labels = labels.detach().float().cpu()
+            pred_chunks.append(logits.sum(dim=-1).numpy())
+            target_chunks.append(labels.sum(dim=-1).numpy())
+
+            if self._fit_examples_cfg.enabled:
+                for item_idx in range(logits.shape[0]):
+                    example = {
+                        "ordinal": seen_examples,
+                        "pred": logits[item_idx].numpy(),
+                        "target": labels[item_idx].numpy(),
+                    }
+                    if len(reservoir) < self._fit_examples_cfg.num_examples:
+                        reservoir.append(example)
+                    else:
+                        replace_idx = int(rng.integers(0, seen_examples + 1))
+                        if replace_idx < self._fit_examples_cfg.num_examples:
+                            reservoir[replace_idx] = example
+                    seen_examples += 1
+
+        if not pred_chunks or not target_chunks:
+            return {}
+
+        output_dir = Path(self.args.output_dir)
+        pred_totals = np.concatenate(pred_chunks, axis=0)
+        target_totals = np.concatenate(target_chunks, axis=0)
+        rows, aggregate = _track_metrics_frame(
+            pred_totals=pred_totals,
+            target_totals=target_totals,
+            records=self._records,
+            high_signal_quantile=self._fit_metrics_cfg.high_signal_quantile,
+        )
+        step_prefix = output_dir / "fit" / f"step_{step:06d}" / "per_track_metrics"
+        if self._fit_metrics_cfg.enabled and self._fit_metrics_cfg.save_per_track:
+            _save_table(rows, step_prefix)
+            grouped = _group_metric_summary(rows, self._fit_metrics_cfg.group_by)
+            if grouped:
+                _save_table(grouped, step_prefix.with_name("group_metrics"))
+            _write_json(
+                step_prefix.with_name("summary.json"),
+                {"step": step, "metrics": aggregate, "n_tracks": len(rows)},
+            )
+
+        if self._fit_examples_cfg.enabled:
+            manifest = _plot_examples(
+                examples=reservoir,
+                records=self._records,
+                output_dir=output_dir,
+                step=step,
+                tracks_per_example=self._fit_examples_cfg.tracks_per_example,
+                seed=self._seed + self._fit_examples_cfg.seed_offset + step,
+            )
+            if (
+                self._fit_examples_cfg.log_to_wandb
+                and "wandb" in self.args.report_to
+                and manifest
+            ):
+                try:
+                    import wandb
+
+                    images = [
+                        wandb.Image(item["path"], caption=item["track_label"])
+                        for item in manifest[: self._fit_examples_cfg.max_wandb_images]
+                    ]
+                    wandb.log({"fit/example_predictions": images, "trainer/global_step": step})
+                except Exception:
+                    pass
+
+        return aggregate
 
 
 def run_training(
@@ -573,7 +1129,25 @@ def run_training(
         ),
         unfreeze_module_names=tuple(cfg["trainer"].get("unfreeze_module_names", [])),
         report_to=list(cfg["trainer"].get("report_to", [])),
+        resume_from_checkpoint=_normalise_checkpoint_mode(
+            cfg["trainer"].get("resume_from_checkpoint")
+        ),
+        init_weights_from_checkpoint=(
+            str(cfg["trainer"].get("init_weights_from_checkpoint"))
+            if cfg["trainer"].get("init_weights_from_checkpoint") not in (None, "")
+            else None
+        ),
+        metric_for_best_model=str(cfg["trainer"].get("metric_for_best_model", "eval_loss")),
+        greater_is_better=bool(cfg["trainer"].get("greater_is_better", False)),
+        provenance=nested_config(cfg["trainer"].get("provenance"), ProvenanceConfig),
+        fit_metrics=nested_config(cfg["trainer"].get("fit_metrics"), FitMetricsConfig),
+        fit_examples=nested_config(cfg["trainer"].get("fit_examples"), FitExamplesConfig),
     )
+    if trainer_cfg.resume_from_checkpoint and trainer_cfg.init_weights_from_checkpoint:
+        raise ValueError(
+            "Set only one of trainer.resume_from_checkpoint or "
+            "trainer.init_weights_from_checkpoint"
+        )
 
     # Persistent workers with HF IterableDataset accumulate Arrow file handles and
     # shuffle-buffer state between iterator cycles — workers never restart to clear them.
@@ -591,6 +1165,20 @@ def run_training(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     _apply_freeze_policy(model, trainer_cfg)
+    trainer_model = TrainerCompatibleModel(model, loss_fn)
+    if trainer_cfg.init_weights_from_checkpoint:
+        _load_model_weights_only(trainer_model, trainer_cfg.init_weights_from_checkpoint)
+
+    _write_provenance(
+        output_dir=output_dir,
+        cfg=cfg,
+        data_path=data_path,
+        dataset_dict=dataset_dict,
+        metadata=metadata,
+        records=records,
+        trainer_cfg=trainer_cfg,
+    )
+
     optimizer = _build_optimizer(model, trainer_cfg)
     train_size = None if streaming else len(dataset_dict["train"])
     scheduler = _build_scheduler_for_trainer(
@@ -603,8 +1191,7 @@ def run_training(
         trainer_cfg,
         has_eval="validation" in dataset_dict,
     )
-    trainer_model = TrainerCompatibleModel(model, loss_fn)
-    trainer = Trainer(
+    trainer = RegulonadoTrainer(
         model=trainer_model,
         args=training_args,
         train_dataset=dataset_dict["train"],
@@ -612,14 +1199,20 @@ def run_training(
         data_collator=collate_fn,
         optimizers=(optimizer, scheduler),
         callbacks=[_LRLogCallback()],
+        records=records,
+        fit_metrics=trainer_cfg.fit_metrics,
+        fit_examples=trainer_cfg.fit_examples,
+        seed=seed,
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=trainer_cfg.resume_from_checkpoint)
     train_losses = [
         float(entry["loss"])
         for entry in trainer.state.log_history
         if "loss" in entry and "eval_loss" not in entry
     ]
-    eval_losses = [float(entry["eval_loss"]) for entry in trainer.state.log_history if "eval_loss" in entry]
+    eval_losses = [
+        float(entry["eval_loss"]) for entry in trainer.state.log_history if "eval_loss" in entry
+    ]
     if not train_losses:
         train_losses = [
             float(entry["train_loss"])
@@ -635,6 +1228,8 @@ def run_training(
         "n_tracks": len(records),
         "backbone": cfg["backbone"]["name"],
         "head": cfg["head"]["type"],
+        "resume_from_checkpoint": trainer_cfg.resume_from_checkpoint,
+        "init_weights_from_checkpoint": trainer_cfg.init_weights_from_checkpoint,
         "history": history,
     }
     (output_dir / "training_summary.json").write_text(json.dumps(summary, indent=2))

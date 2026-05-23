@@ -1,6 +1,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(slots=True)
+class ProvenanceConfig:
+    enabled: bool = True
+    save_git_diff: bool = True
+
+
+@dataclass(slots=True)
+class FitMetricsConfig:
+    enabled: bool = True
+    save_per_track: bool = True
+    log_per_track_to_wandb: bool = False
+    group_by: tuple[str, ...] = ("assay_type", "cell_line")
+    high_signal_quantile: float = 0.95
+
+
+@dataclass(slots=True)
+class FitExamplesConfig:
+    enabled: bool = True
+    num_examples: int = 4
+    tracks_per_example: int = 3
+    log_to_wandb: bool = True
+    max_wandb_images: int = 8
+    seed_offset: int = 10_000
 
 
 @dataclass(slots=True)
@@ -56,6 +82,16 @@ class TrainerConfig:
     prefetch_factor: int | None = 2
     # Logging backends passed to TrainingArguments report_to. Use ["wandb"] to enable W&B.
     report_to: list[str] = field(default_factory=list)
+    # Full Trainer resume: restores model, optimizer, scheduler, RNG, and Trainer state.
+    resume_from_checkpoint: str | bool | None = None
+    # Warm start: loads model weights only and creates a fresh optimizer/scheduler.
+    init_weights_from_checkpoint: str | None = None
+    # Best-model selection metric passed to TrainingArguments.
+    metric_for_best_model: str = "eval_loss"
+    greater_is_better: bool = False
+    provenance: ProvenanceConfig = field(default_factory=ProvenanceConfig)
+    fit_metrics: FitMetricsConfig = field(default_factory=FitMetricsConfig)
+    fit_examples: FitExamplesConfig = field(default_factory=FitExamplesConfig)
 
     @property
     def unfreeze_backbone_blocks_from_end(self) -> int:
@@ -67,3 +103,7 @@ class TrainerConfig:
 
     def resolved_eval_batch_size(self) -> int:
         return self.eval_batch_size or self.batch_size
+
+
+def nested_config(mapping: dict[str, Any] | None, cls: type[Any]) -> Any:
+    return cls(**(mapping or {}))

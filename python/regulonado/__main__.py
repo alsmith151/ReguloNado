@@ -1,11 +1,143 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
 app = typer.Typer(no_args_is_help=True)
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def train(
+    ctx: typer.Context,
+    dataset: Annotated[
+        Path,
+        typer.Argument(help="Saved Regulonado/Hugging Face dataset directory"),
+    ],
+    output_dir: Annotated[
+        Optional[Path],
+        typer.Option("--output-dir", "-o", help="Run directory for checkpoints and diagnostics"),
+    ] = None,
+    experiment: Annotated[
+        str,
+        typer.Option("--experiment", "-e", help="Hydra experiment config to launch"),
+    ] = "condition_agnostic_borzoi",
+    nproc_per_node: Annotated[
+        int,
+        typer.Option(
+            "--nproc-per-node",
+            help="Use torchrun with this many local processes when >1",
+        ),
+    ] = 1,
+    resume_from_checkpoint: Annotated[
+        Optional[str],
+        typer.Option(
+            "--resume-from-checkpoint",
+            help="Full Trainer resume from a checkpoint dir, or 'true' for latest in output-dir",
+        ),
+    ] = None,
+    init_weights_from_checkpoint: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--init-weights-from-checkpoint",
+            help="Warm start from model weights only with a fresh optimizer/scheduler",
+        ),
+    ] = None,
+    max_steps: Annotated[
+        Optional[int],
+        typer.Option("--max-steps", help="Override trainer.max_steps"),
+    ] = None,
+    batch_size: Annotated[
+        Optional[int],
+        typer.Option("--batch-size", help="Override per-device train batch size"),
+    ] = None,
+    eval_batch_size: Annotated[
+        Optional[int],
+        typer.Option("--eval-batch-size", help="Override per-device eval batch size"),
+    ] = None,
+    learning_rate: Annotated[
+        Optional[float],
+        typer.Option("--learning-rate", "--lr", help="Override head learning rate"),
+    ] = None,
+    backbone_lr: Annotated[
+        Optional[float],
+        typer.Option("--backbone-lr", help="Override backbone learning rate"),
+    ] = None,
+    num_workers: Annotated[
+        Optional[int],
+        typer.Option("--num-workers", help="Override DataLoader worker count"),
+    ] = None,
+    no_wandb: Annotated[
+        bool,
+        typer.Option("--no-wandb", help="Disable W&B reporting for this run"),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print the resolved command without running it"),
+    ] = False,
+) -> None:
+    """Train a model with friendly options plus optional raw Hydra overrides.
+
+    Extra arguments after the options are passed directly to Hydra, for example:
+
+    regulonado train dataset/ --max-steps 1000 trainer.fit_examples.num_examples=8
+    """
+    if resume_from_checkpoint and init_weights_from_checkpoint:
+        typer.echo(
+            "Set only one of --resume-from-checkpoint or --init-weights-from-checkpoint.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    overrides = [
+        f"+experiment={experiment}",
+        f"data.path={dataset}",
+    ]
+    if output_dir is not None:
+        overrides.append(f"output_dir={output_dir}")
+    if resume_from_checkpoint is not None:
+        overrides.append(f"trainer.resume_from_checkpoint={resume_from_checkpoint}")
+    if init_weights_from_checkpoint is not None:
+        overrides.append(
+            f"trainer.init_weights_from_checkpoint={init_weights_from_checkpoint}"
+        )
+    if max_steps is not None:
+        overrides.append(f"trainer.max_steps={max_steps}")
+    if batch_size is not None:
+        overrides.append(f"trainer.batch_size={batch_size}")
+    if eval_batch_size is not None:
+        overrides.append(f"trainer.eval_batch_size={eval_batch_size}")
+    if learning_rate is not None:
+        overrides.append(f"trainer.learning_rate={learning_rate}")
+    if backbone_lr is not None:
+        overrides.append(f"trainer.backbone_learning_rate={backbone_lr}")
+    if num_workers is not None:
+        overrides.append(f"trainer.num_workers={num_workers}")
+    if no_wandb:
+        overrides.append("trainer.report_to=[]")
+        overrides.append("trainer.fit_examples.log_to_wandb=false")
+    overrides.extend(ctx.args)
+
+    if nproc_per_node > 1:
+        command = [
+            "torchrun",
+            f"--nproc_per_node={nproc_per_node}",
+            "-m",
+            "regulonado.train",
+            *overrides,
+        ]
+    else:
+        command = [sys.executable, "-m", "regulonado.train", *overrides]
+
+    typer.echo(" ".join(command))
+    if dry_run:
+        return
+    raise typer.Exit(subprocess.run(command).returncode)
 
 
 @app.command()
