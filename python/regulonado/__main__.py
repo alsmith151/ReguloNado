@@ -371,6 +371,37 @@ def calculate_tmm_scaling(
 
 
 @app.command()
+def recompress_dataset(
+    src: Annotated[Path, typer.Argument(help="Source saved dataset directory")],
+    dst: Annotated[Path, typer.Argument(help="Destination directory; must not exist")],
+    level: Annotated[int, typer.Option("--level", help="ZSTD compression level")] = 3,
+    workers: Annotated[int, typer.Option("--workers", "-w", help="Parallel shard workers")] = 4,
+    max_batch_size: Annotated[
+        Optional[int],
+        typer.Option(
+            "--max-batch-size",
+            help="Split Arrow record batches into sub-batches of at most this many rows",
+        ),
+    ] = None,
+    remove_src: Annotated[
+        bool,
+        typer.Option("--remove-src", help="Delete source dataset after successful recompression"),
+    ] = False,
+) -> None:
+    """Rechunk/recompress a saved Arrow DatasetDict with ZSTD IPC compression."""
+    from regulonado.recompress import recompress_dataset as _recompress_dataset
+
+    _recompress_dataset(
+        src,
+        dst,
+        level=level,
+        workers=workers,
+        max_batch_size=max_batch_size,
+        remove_src=remove_src,
+    )
+
+
+@app.command()
 def enrich_metadata(
     metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json to update in-place")],
     scale_factors: Annotated[Path, typer.Argument(help="Parquet (or CSV) produced by calculate-original-scaling")],

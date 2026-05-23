@@ -50,8 +50,8 @@ ARROW_BATCH_SIZE="${ARROW_BATCH_SIZE:-512}"
 ARROW_COMPRESSION="${ARROW_COMPRESSION:-lz4}"
 
 # --- rechunk / recompress parameters -----------------------------------------
-# Run recompress_dataset.py after building to rechunk into small batches and
-# recompress with ZSTD.  Output lands at RECHUNK_DST (distinct from OUTPUT_DIR).
+# Run `regulonado recompress-dataset` after building to rechunk into small
+# batches and recompress with ZSTD. Output lands at RECHUNK_DST.
 RECHUNK="${RECHUNK:-true}"
 RECHUNK_DST="${RECHUNK_DST:-${OUTPUT_DIR}-rechunked}"
 ZSTD_LEVEL="${ZSTD_LEVEL:-3}"
@@ -82,8 +82,8 @@ source "$REPO_DIR/.venv/bin/activate"
 
 mkdir -p "$REPO_DIR/logs" "$OUTPUT_DIR" "$SLURM_TMPDIR"
 
-if [[ ! -f "$REPO_DIR/python/regulonado/_rs.cpython-313-x86_64-linux-gnu.so" ]]; then
-    echo "Missing compiled Rust extension. Rebuild with: uv pip install -e $REPO_DIR" >&2
+if ! compgen -G "$REPO_DIR/python/regulonado/_rs*.so" > /dev/null; then
+    echo "Missing compiled Rust extension. Rebuild with: uv sync" >&2
     exit 1
 fi
 
@@ -164,5 +164,5 @@ if [[ "$RECHUNK" == "true" ]]; then
     )
     [[ "$RECHUNK_REMOVE_SRC" == "true" ]] && RECOMPRESS_ARGS+=(--remove-src)
 
-    python "$REPO_DIR/scripts/recompress_dataset.py" "${RECOMPRESS_ARGS[@]}"
+    python -m regulonado recompress-dataset "${RECOMPRESS_ARGS[@]}"
 fi

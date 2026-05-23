@@ -23,7 +23,7 @@ fi
 # --- required inputs ---------------------------------------------------------
 # Path to a regulonado_metadata.json written by `regulonado build`.
 # The dataset splits (train/, validation/, test/) must live in the same directory.
-# Run calculate_original_scaling.sh first to produce scale_factors.parquet.
+# Run calculate_original_scaling_slurm.sh first to produce scale_factors.parquet.
 METADATA="${METADATA:-}"
 
 if [[ -z "$METADATA" ]]; then

@@ -23,13 +23,13 @@ python/regulonado/
   dataset.py                build_dataset / build_dataset_fast orchestration
   __main__.py               Typer CLI  →  regulonado build / scale
   scaling.py                BigWig scale-factor inference
-  _rs.cpython-313-...so     compiled extension (do not edit)
+  _rs.cpython-...so         compiled extension (do not edit)
 tests/
   test_chrom_pass.py        chrom_pass parity + HF loadability coverage
   test_dataset_staging.py   staging and BigWig dedupe coverage
 configs/                    Hydra YAML configs
 scripts/
-  create_dataset.sh         SLURM dataset build entry point
+  build_dataset_slurm.sh   SLURM dataset build entry point
   smoketest_chrom_pass.sh   small chrom_pass smoke run
 ```
 
@@ -50,10 +50,10 @@ does not exist in this version of maturin; use `VIRTUAL_ENV` instead.
 
 After any change to `src/*.rs`, run `maturin develop --release` before testing Python code.
 
-If the extension has not been rebuilt, the SLURM wrapper in `scripts/create_dataset.sh` will fail
-fast when `python/regulonado/_rs.cpython-313-x86_64-linux-gnu.so` is missing.
+If the extension has not been rebuilt, the SLURM wrapper in `scripts/build_dataset_slurm.sh` will fail
+fast when no `python/regulonado/_rs*.so` extension is present.
 
-For editable reinstalls, `uv pip install -e .` also rebuilds the extension in the repo venv.
+For editable reinstalls, `uv sync` also rebuilds the extension in the repo venv.
 
 ## Common workflows
 
@@ -75,7 +75,7 @@ Build a dataset with the default chrom-pass strategy:
 Run the SLURM build wrapper with environment overrides:
 
 ```bash
-OVERWRITE=true PROFILE=true sbatch scripts/create_dataset.sh
+OVERWRITE=true PROFILE=true sbatch scripts/build_dataset_slurm.sh
 ```
 
 ## Running tests

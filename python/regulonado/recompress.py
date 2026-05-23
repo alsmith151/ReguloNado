@@ -5,11 +5,10 @@ Reads each shard one at a time (stream, no full-dataset RAM spike), rewrites
 with ZSTD, then copies all non-Arrow metadata files verbatim so the output
 directory is a drop-in replacement for load_from_disk().
 
-Usage:
-    python scripts/recompress_dataset.py <src> <dst> [--level 3] [--workers 4]
+Use through the CLI:
+    regulonado recompress-dataset <src> <dst> --level 3 --workers 4
 """
 
-import argparse
 import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -83,30 +82,17 @@ def recompress_split(
     )
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("src", help="Source dataset directory (load_from_disk path)")
-    ap.add_argument("dst", help="Destination directory (must not exist)")
-    ap.add_argument("--level", type=int, default=3, help="ZSTD compression level (default 3)")
-    ap.add_argument("--workers", type=int, default=4, help="Parallel shard workers per split")
-    ap.add_argument(
-        "--max-batch-size",
-        type=int,
-        default=None,
-        dest="max_batch_size",
-        help=(
-            "Split each Arrow record batch into sub-batches of at most this many rows. "
-            "Recommended: 4–8. Reduces peak worker RAM from O(batch_rows × sample_size) "
-            "to O(max_batch_size × sample_size) — critical for large-track datasets "
-            "where 200+ row batches decompress to tens of GB per DataLoader worker."
-        ),
-    )
-    ap.add_argument("--remove-src", action="store_true", help="Delete source dataset after successful recompression")
-    args = ap.parse_args()
-
-    src = Path(args.src).resolve()
-    dst = Path(args.dst).resolve()
-
+def recompress_dataset(
+    src: Path,
+    dst: Path,
+    *,
+    level: int = 3,
+    workers: int = 4,
+    max_batch_size: int | None = None,
+    remove_src: bool = False,
+) -> None:
+    src = src.resolve()
+    dst = dst.resolve()
     if not src.exists():
         sys.exit(f"Source not found: {src}")
     if dst.exists():
@@ -124,15 +110,11 @@ def main() -> None:
     splits = [d for d in src.iterdir() if d.is_dir()]
     for split in sorted(splits):
         print(f"\n=== {split.name} ===")
-        recompress_split(split, dst / split.name, args.level, args.workers, args.max_batch_size)
+        recompress_split(split, dst / split.name, level, workers, max_batch_size)
 
     print(f"\nDone. Output: {dst}")
 
-    if args.remove_src:
+    if remove_src:
         print(f"\nRemoving source: {src}")
         shutil.rmtree(src)
         print("Source removed.")
-
-
-if __name__ == "__main__":
-    main()
