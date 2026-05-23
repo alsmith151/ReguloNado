@@ -13,7 +13,8 @@ entrypoint is the friendly `regulonado train` CLI, backed by the Hugging Face
 - `python/regulonado/train.py`: supported training entrypoint.
 - `python/regulonado/model/`: backbone adapters and prediction heads.
 - `python/configs/`: Hydra configs for backbones, heads, losses, and experiments.
-- `scripts/`: thin local/Slurm wrappers for common workflows.
+- `scripts/`: thin local/Slurm wrappers for common workflows; see
+  `scripts/README.md`.
 - `tests/`: model, dataset, and smoke coverage.
 
 `python/regulonado/training/accelerate_trainer.py` has been removed; use the
@@ -38,14 +39,14 @@ source .venv/bin/activate
 For GPU installs with FlashAttention support:
 
 ```bash
-sbatch scripts/install_gpu_env.sh
+sbatch scripts/install_gpu_env_slurm.sh
 ```
 
 That wrapper loads the CUDA module, sets `CUDA_HOME`, pins the host compiler for
 `nvcc`, and then runs the GPU-extra sync. For GPU development with tests:
 
 ```bash
-INSTALL_EXTRAS="--extra dev --extra gpu" sbatch scripts/install_gpu_env.sh
+INSTALL_EXTRAS="--extra dev --extra gpu" sbatch scripts/install_gpu_env_slurm.sh
 ```
 
 After Rust changes, rebuild the extension:
@@ -67,13 +68,19 @@ regulonado enrich-metadata dataset/regulonado_metadata.json dataset/scale_factor
 Builds are usually launched through:
 
 ```bash
-sbatch scripts/create_dataset.sh
+sbatch scripts/build_dataset_slurm.sh
 ```
 
 Compressed datasets can be rechunked for training with:
 
 ```bash
-sbatch scripts/rechunk_dataset.sh
+sbatch scripts/rechunk_dataset_slurm.sh
+```
+
+The underlying package command is:
+
+```bash
+regulonado recompress-dataset /path/to/src /path/to/dst --max-batch-size 4
 ```
 
 ## Training
@@ -93,7 +100,7 @@ head/backbone learning rates.
 For Slurm:
 
 ```bash
-DATA_DIR=/path/to/dataset sbatch scripts/train_condition_agnostic.sh
+DATA_DIR=/path/to/dataset sbatch scripts/train_condition_agnostic_slurm.sh
 ```
 
 The Slurm wrapper intentionally accepts only run-specific environment variables:
@@ -134,7 +141,7 @@ the job command and provenance:
 
 ```bash
 DATA_DIR=/path/to/dataset \
-sbatch scripts/train_condition_agnostic.sh trainer.max_steps=2000 trainer.batch_size=8
+sbatch scripts/train_condition_agnostic_slurm.sh trainer.max_steps=2000 trainer.batch_size=8
 ```
 
 For a real experiment, prefer copying
@@ -144,7 +151,7 @@ after the run, and launching it explicitly:
 ```bash
 EXPERIMENT=condition_agnostic_borzoi_lr2e4 \
 DATA_DIR=/path/to/dataset \
-sbatch scripts/train_condition_agnostic.sh
+sbatch scripts/train_condition_agnostic_slurm.sh
 ```
 
 ## Checkpoint Reuse

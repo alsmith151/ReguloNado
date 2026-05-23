@@ -5,8 +5,8 @@
 # avoid nvcc picking up nvc++ from the NVHPC suite in the same module.
 #
 # Usage:
-#   sbatch scripts/install_gpu_env.sh              # batch submission
-#   bash scripts/install_gpu_env.sh                # interactive node
+#   sbatch scripts/install_gpu_env_slurm.sh              # batch submission
+#   bash scripts/install_gpu_env_slurm.sh                # interactive node
 #   CUDA_MODULE=cuda/12.3 sbatch ...               # override CUDA version
 #SBATCH --job-name=regulonado-install-gpu
 #SBATCH --output=logs/install-gpu-%j.out

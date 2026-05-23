@@ -35,7 +35,7 @@ mkdir -p "$REPO_DIR/logs"
 
 source "$REPO_DIR/.venv/bin/activate"
 
-python "$REPO_DIR/scripts/recompress_dataset.py" \
+python -m regulonado recompress-dataset \
     "$SRC" \
     "$DST" \
     --max-batch-size "$MAX_BATCH_SIZE" \
