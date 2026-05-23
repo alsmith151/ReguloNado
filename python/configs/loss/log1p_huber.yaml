@@ -1,0 +1,4 @@
+# Loss family name interpreted by the training entrypoint.
+name: log1p_huber
+# Huber delta applied after log1p-transforming predictions and targets.
+delta: 1.0

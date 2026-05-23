@@ -49,6 +49,17 @@ ARROW_WRITE_THREADS="${ARROW_WRITE_THREADS:-4}"
 ARROW_BATCH_SIZE="${ARROW_BATCH_SIZE:-512}"
 ARROW_COMPRESSION="${ARROW_COMPRESSION:-lz4}"
 
+# --- rechunk / recompress parameters -----------------------------------------
+# Run recompress_dataset.py after building to rechunk into small batches and
+# recompress with ZSTD.  Output lands at RECHUNK_DST (distinct from OUTPUT_DIR).
+RECHUNK="${RECHUNK:-true}"
+RECHUNK_DST="${RECHUNK_DST:-${OUTPUT_DIR}-rechunked}"
+ZSTD_LEVEL="${ZSTD_LEVEL:-3}"
+MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-4}"
+RECHUNK_WORKERS="${RECHUNK_WORKERS:-${SLURM_CPUS_PER_TASK:-8}}"
+# Set to true to delete the raw build output after successful recompression.
+RECHUNK_REMOVE_SRC="${RECHUNK_REMOVE_SRC:-false}"
+
 # --- I/O flags ---------------------------------------------------------------
 # STAGE=true copies FASTA + BigWigs to SLURM_TMPDIR before building.
 # Strongly recommended on Ceph: profiling shows read_bin is I/O-bound on Ceph
@@ -105,6 +116,14 @@ echo "Shift max bp      : $SHIFT_MAX_BP"
 echo "Arrow batch       : $ARROW_BATCH_SIZE (auto-capped if tracks×bins exceeds i32)"
 echo "Arrow compression : $ARROW_COMPRESSION"
 echo "Profile           : $PROFILE"
+echo "Rechunk           : $RECHUNK"
+if [[ "$RECHUNK" == "true" ]]; then
+echo "Rechunk dst       : $RECHUNK_DST"
+echo "ZSTD level        : $ZSTD_LEVEL"
+echo "Max batch size    : $MAX_BATCH_SIZE"
+echo "Rechunk workers   : $RECHUNK_WORKERS"
+echo "Remove src        : $RECHUNK_REMOVE_SRC"
+fi
 echo ""
 
 ARGS=(
@@ -129,3 +148,21 @@ ARGS=(
 [[ "$PROFILE"      == "true" ]] && ARGS+=(--profile)
 
 python -m regulonado build "${ARGS[@]}"
+
+if [[ "$RECHUNK" == "true" ]]; then
+    echo ""
+    echo "=== Rechunking / recompressing to ZSTD ==="
+    echo "  src : $OUTPUT_DIR"
+    echo "  dst : $RECHUNK_DST"
+
+    RECOMPRESS_ARGS=(
+        "$OUTPUT_DIR"
+        "$RECHUNK_DST"
+        --level   "$ZSTD_LEVEL"
+        --workers "$RECHUNK_WORKERS"
+        --max-batch-size "$MAX_BATCH_SIZE"
+    )
+    [[ "$RECHUNK_REMOVE_SRC" == "true" ]] && RECOMPRESS_ARGS+=(--remove-src)
+
+    python "$REPO_DIR/scripts/recompress_dataset.py" "${RECOMPRESS_ARGS[@]}"
+fi

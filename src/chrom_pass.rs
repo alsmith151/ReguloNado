@@ -25,7 +25,7 @@ use pyo3::prelude::*;
 use rayon::prelude::*;
 
 use crate::bigwig_io::{open_bigwig_handles, BwHandle};
-use crate::binning::bin_region_into;
+use crate::binning::{bin_region_into, BinningScratch, BinningUsage};
 use crate::fasta::{load_fasta_index, read_one_hot_sequence};
 use crate::io_utils::{ipc_write_options, maybe_log_progress};
 use crate::schema::{hf_arrow_schema, make_2d_f32_array, make_2d_i8_array};
@@ -288,6 +288,7 @@ pub(crate) fn write_arrow_split_chrom_pass(
         .map_err(PyRuntimeError::new_err)?;
 
     let mut prof_chrom_scan_s: Vec<f64> = Vec::new();
+    let mut prof_binning = BinningUsage::default();
     let valid_chroms: Vec<bool> = chrom_order
         .iter()
         .map(|(chrom, chrom_len_bp)| {
@@ -340,25 +341,19 @@ pub(crate) fn write_arrow_split_chrom_pass(
         let mut chrom_signals: Vec<f32> = vec![0.0; n_tracks * n_chrom_bins];
         let chrom_str: &str = chrom.as_str();
 
-        py.allow_threads(|| {
+        let scan_usage: Vec<BinningUsage> = py.allow_threads(|| {
             chrom_signals
                 .par_chunks_mut(n_chrom_bins)
                 .zip(handles.par_iter_mut())
                 .enumerate()
-                .for_each(|(track_idx, (out_row, reader))| {
-                    let mut sums = vec![0.0f64; n_chrom_bins];
-                    let mut covered = vec![0u64; n_chrom_bins];
-                    let mut values_buf: Vec<f32> = Vec::new();
-
-                    bin_region_into(
+                .map_init(BinningScratch::default, |scratch, (track_idx, (out_row, reader))| {
+                    let usage = bin_region_into(
                         reader,
                         chrom_str,
                         0,
                         region_end,
                         out_row,
-                        &mut sums,
-                        &mut covered,
-                        &mut values_buf,
+                        scratch,
                     );
 
                     // Minus-strand correction: if 80%+ of non-zero values are
@@ -383,11 +378,16 @@ pub(crate) fn write_arrow_split_chrom_pass(
                             }
                         }
                     }
-                });
+                    usage
+                })
+                .collect()
         });
         let scan_s = t_scan.elapsed().as_secs_f64();
         if profile {
             prof_chrom_scan_s.push(scan_s);
+            for usage in scan_usage {
+                prof_binning.add(usage);
+            }
         }
 
         // --- Phase 2: write row-block Arrow shards for this chrom in parallel ---
@@ -455,6 +455,7 @@ pub(crate) fn write_arrow_split_chrom_pass(
         eprintln!(
             "[regulonado_rs] chrom_pass profile chroms={n_chroms_used}\n  \
              chrom_scan: total_wall_s={:.1}\n  \
+             binner:     direct_calls={} dense_calls={} direct_intervals={} dense_intervals={}\n  \
              writer:     total_wall_s={:.1} summed_worker_s={:.1} threads={}\n  \
              slice:      total_worker_s={:.1}\n  \
              fasta:      total_worker_s={:.1}\n  \
@@ -464,6 +465,10 @@ pub(crate) fn write_arrow_split_chrom_pass(
              throughput: {:.2} samples/s\n  \
              total_wall_s={:.1}",
             sum(&prof_chrom_scan_s),
+            prof_binning.direct_calls,
+            prof_binning.dense_calls,
+            prof_binning.direct_intervals,
+            prof_binning.dense_intervals,
             sum(&prof_writer_wall_s),
             prof_write.wall_ns as f64 / 1e9,
             write_threads,
@@ -675,6 +680,7 @@ pub(crate) fn write_arrow_splits_chrom_pass(
         .map_err(PyRuntimeError::new_err)?;
 
     let mut prof_chrom_scan_s: Vec<f64> = Vec::new();
+    let mut prof_binning = BinningUsage::default();
     let mut prof_writer_wall_s: Vec<f64> = Vec::new();
     let mut prof_write = WriteShardProfile::default();
 
@@ -717,25 +723,19 @@ pub(crate) fn write_arrow_splits_chrom_pass(
         let mut chrom_signals: Vec<f32> = vec![0.0; n_tracks * n_chrom_bins];
         let chrom_str: &str = chrom.as_str();
 
-        py.allow_threads(|| {
+        let scan_usage: Vec<BinningUsage> = py.allow_threads(|| {
             chrom_signals
                 .par_chunks_mut(n_chrom_bins)
                 .zip(handles.par_iter_mut())
                 .enumerate()
-                .for_each(|(track_idx, (out_row, reader))| {
-                    let mut sums = vec![0.0f64; n_chrom_bins];
-                    let mut covered = vec![0u64; n_chrom_bins];
-                    let mut values_buf: Vec<f32> = Vec::new();
-
-                    bin_region_into(
+                .map_init(BinningScratch::default, |scratch, (track_idx, (out_row, reader))| {
+                    let usage = bin_region_into(
                         reader,
                         chrom_str,
                         0,
                         region_end,
                         out_row,
-                        &mut sums,
-                        &mut covered,
-                        &mut values_buf,
+                        scratch,
                     );
 
                     let is_minus = minus_flags.get(track_idx).copied().unwrap_or(false);
@@ -756,10 +756,15 @@ pub(crate) fn write_arrow_splits_chrom_pass(
                             }
                         }
                     }
-                });
+                    usage
+                })
+                .collect()
         });
         if profile {
             prof_chrom_scan_s.push(t_scan.elapsed().as_secs_f64());
+            for usage in scan_usage {
+                prof_binning.add(usage);
+            }
         }
 
         let t_writer = Instant::now();
@@ -830,6 +835,7 @@ pub(crate) fn write_arrow_splits_chrom_pass(
         eprintln!(
             "[regulonado_rs] chrom_pass(all_splits) profile chroms={}\n  \
              chrom_scan: total_wall_s={:.1}\n  \
+             binner:     direct_calls={} dense_calls={} direct_intervals={} dense_intervals={}\n  \
              writer:     total_wall_s={:.1} summed_worker_s={:.1} threads={}\n  \
              slice:      total_worker_s={:.1}\n  \
              fasta:      total_worker_s={:.1}\n  \
@@ -840,6 +846,10 @@ pub(crate) fn write_arrow_splits_chrom_pass(
              total_wall_s={:.1}",
             chrom_order.len(),
             sum(&prof_chrom_scan_s),
+            prof_binning.direct_calls,
+            prof_binning.dense_calls,
+            prof_binning.direct_intervals,
+            prof_binning.dense_intervals,
             sum(&prof_writer_wall_s),
             prof_write.wall_ns as f64 / 1e9,
             write_threads,

@@ -94,6 +94,15 @@ def _rsync_one(src: Path, scratch: Path, companion_suffixes: tuple[str, ...]) ->
     return str(dest)
 
 
+def _rsync_tree(src: Path, dest: Path, *, delete: bool) -> None:
+    """Copy one directory tree into another via rsync."""
+    args = ["rsync", "-a"]
+    if delete:
+        args.append("--delete")
+    args.extend([f"{src}/", f"{dest}/"])
+    subprocess.run(args, check=True)
+
+
 def _stage_files(
     paths: Sequence[str | Path],
     scratch_dir: str | Path,
@@ -725,7 +734,8 @@ def build_dataset(
     overwrite: bool = False,
     drop_missing: bool = False,
     dedupe_tracks: str = "none",
-) -> DatasetDict:
+    return_dataset: bool = True,
+) -> object | None:
     """Build and save an HF Arrow DatasetDict from genomic sources.
 
     Args:
@@ -756,7 +766,8 @@ def build_dataset(
             same-size candidates and drops byte-identical duplicates.
 
     Returns:
-        The loaded DatasetDict (also saved to disk at output_dir).
+        The loaded DatasetDict (also saved to disk at output_dir), or None
+        when ``return_dataset`` is False.
     """
     if splits is None:
         splits = DEFAULT_SPLITS
@@ -862,10 +873,7 @@ def build_dataset(
     output_dir.mkdir(parents=True, exist_ok=True)
     # Trailing slash on source: copy contents, not the directory itself.
     # --delete keeps output_dir in sync if overwriting a previous build.
-    subprocess.run(
-        ["rsync", "-a", "--delete", f"{scratch_out}/", f"{output_dir}/"],
-        check=True,
-    )
+    _rsync_tree(scratch_out, output_dir, delete=True)
     shutil.rmtree(scratch_out)
 
     metadata = {
@@ -881,6 +889,9 @@ def build_dataset(
     (output_dir / "regulonado_metadata.json").write_text(json.dumps(metadata, indent=2))
 
     logger.info(f"Dataset saved to {output_dir}")
+    if not return_dataset:
+        logger.info("Skipping final DatasetDict.load_from_disk(); caller can reopen output_dir if needed")
+        return None
     return DatasetDict.load_from_disk(str(output_dir))
 
 
@@ -911,7 +922,8 @@ def build_dataset_fast(
     profile: bool = False,
     strategy: str = "chrom_pass",
     chrom_filter: list[str] | None = None,
-) -> DatasetDict:
+    return_dataset: bool = True,
+) -> object | None:
     """Fast low-scratch dataset build using the Rust extension.
 
     Each split is written directly from BigWig + FASTA sources into compressed
@@ -933,6 +945,10 @@ def build_dataset_fast(
         ``bed_rows`` is *not* renumbered — the ``index`` column on every
         output row remains the absolute row position in the input BED
         file. Useful for smoke tests on a single chromosome.
+    return_dataset : bool
+        If False, skip reopening the saved DatasetDict from ``output_dir``.
+        This avoids an expensive post-build reload when the caller only
+        needs the on-disk dataset.
     """
     if splits is None:
         splits = DEFAULT_SPLITS
@@ -1015,7 +1031,7 @@ def build_dataset_fast(
             default=0,
         )
         chrom_matrix_gb = n_tracks * largest_chrom_bins * 4 / 1e9
-        binning_scratch_gb = n_extract_threads * largest_chrom_bins * (8 + 8 + bin_size * 4) / 1e9
+        binning_scratch_gb = n_extract_threads * largest_chrom_bins * (8 + 8) / 1e9
     else:
         chrom_matrix_gb = 0.0
         binning_scratch_gb = 0.0
@@ -1067,6 +1083,9 @@ def build_dataset_fast(
 
     split_datasets: dict[str, Dataset] = {}
     if not splits_to_build:
+        if not return_dataset:
+            logger.info("All splits already exist; skipping load because return_dataset=False")
+            return None
         logger.info("All splits already exist; loading from disk")
         for split in splits:
             split_datasets[split] = Dataset.load_from_disk(str(output_dir / split))
@@ -1090,8 +1109,9 @@ def build_dataset_fast(
         for split in splits:
             split_out = output_dir / split
             if not overwrite and (split_out / "dataset_info.json").exists():
-                logger.info(f"Split '{split}' exists; loading from disk")
-                split_datasets[split] = Dataset.load_from_disk(str(split_out))
+                logger.info(f"Split '{split}' exists; skipping rebuild")
+                if return_dataset:
+                    split_datasets[split] = Dataset.load_from_disk(str(split_out))
                 continue
 
             sample_indices = split_indices[split]
@@ -1147,13 +1167,15 @@ def build_dataset_fast(
             _write_hf_split_metadata(
                 split_scratch, features=features, arrow_filenames=arrow_filenames
             )
-            split_datasets[split] = Dataset.load_from_disk(str(split_scratch))
+            if return_dataset:
+                split_datasets[split] = Dataset.load_from_disk(str(split_scratch))
     else:
         for split, folds in splits.items():
             split_out = output_dir / split
             if not overwrite and (split_out / "dataset_info.json").exists():
-                logger.info(f"Split '{split}' exists; loading from disk")
-                split_datasets[split] = Dataset.load_from_disk(str(split_out))
+                logger.info(f"Split '{split}' exists; skipping rebuild")
+                if return_dataset:
+                    split_datasets[split] = Dataset.load_from_disk(str(split_out))
                 continue
 
             sample_indices = split_indices[split]
@@ -1192,17 +1214,15 @@ def build_dataset_fast(
             _write_hf_split_metadata(
                 split_scratch, features=features, arrow_filenames=arrow_filenames
             )
-            split_datasets[split] = Dataset.load_from_disk(str(split_scratch))
+            if return_dataset:
+                split_datasets[split] = Dataset.load_from_disk(str(split_scratch))
     logger.info(f"Arrow writing completed in {time.perf_counter() - t_arrow_total:.1f}s")
 
     (scratch_out / "dataset_dict.json").write_text(json.dumps({"splits": list(splits)}, indent=2))
     logger.info(f"Rsyncing dataset from scratch to {output_dir}")
     t_rsync = time.perf_counter()
     output_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["rsync", "-a", f"{scratch_out}/", f"{output_dir}/"],
-        check=True,
-    )
+    _rsync_tree(scratch_out, output_dir, delete=True)
     logger.info(f"Rsync completed in {time.perf_counter() - t_rsync:.1f}s")
     shutil.rmtree(scratch_out)
 
@@ -1221,6 +1241,9 @@ def build_dataset_fast(
     (output_dir / "regulonado_metadata.json").write_text(json.dumps(metadata, indent=2))
 
     logger.info(f"Dataset saved to {output_dir}")
+    if not return_dataset:
+        logger.info("Skipping final DatasetDict.load_from_disk(); caller can reopen output_dir if needed")
+        return None
     return DatasetDict.load_from_disk(str(output_dir))
 
 
@@ -1270,11 +1293,13 @@ def make_transform(
     context_length: int = _DEFAULT_CONTEXT,
     n_pred_bins: int = _DEFAULT_PRED_BINS,
     bin_size: int = _DEFAULT_BIN_SIZE,
+    center_crop: bool = False,
 ) -> Callable[[dict], dict]:
     """Return a transform compatible with ``dataset.set_transform()``.
 
     Applied per batch:
-        1. Random shift crop  (if shift_max_bins > 0)
+        1. Shift crop: random offset when center_crop=False, center offset when center_crop=True.
+           Always applied when shift_max_bins > 0.
         2. RC augmentation    (if enable_rc_aug)
         3. Signal transform   (scale → squash → clip)
         4. Cast input_ids to float32
@@ -1289,6 +1314,7 @@ def make_transform(
         bin_size: Sequence positions per signal bin.
         enable_rc_aug: Apply random reverse-complement augmentation.
         rc_permutation: Per-track permutation for swapping strand pairs on RC aug.
+        center_crop: If True, always crop from the center (s=shift_max_bins). Use for eval/test.
     """
     sf = np.asarray(scale_factors, dtype=np.float32).reshape(-1)
     n_tracks = sf.size
@@ -1338,9 +1364,9 @@ def make_transform(
         for seq, sig in zip(ids_list, lbl_list):
             _sf, _cs, _ch = sf, cs, ch
 
-            # --- shift crop (random offset into the wider stored arrays)
+            # --- shift crop (always applied when shift buffer was stored)
             if shift_max_bins > 0:
-                s = int(np.random.randint(0, 2 * shift_max_bins + 1))
+                s = shift_max_bins if center_crop else int(np.random.randint(0, 2 * shift_max_bins + 1))
                 if seq is not None:
                     seq = seq[:, s * bin_size : s * bin_size + context_length]
                 if sig is not None:

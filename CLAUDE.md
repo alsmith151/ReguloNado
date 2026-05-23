@@ -6,19 +6,35 @@ Mixed Rust/Python package that builds Arrow `DatasetDict`s for training sequence
 genomics models (Borzoi, Enformer etc.). The hot path reads BigWig + FASTA sources and writes
 HuggingFace-compatible Arrow IPC shards without materialising a dense signal intermediate.
 
+The default production path is the Rust `chrom_pass` writer, which scans one chromosome at a
+time and writes one Arrow shard per chromosome. The older sample-batched fast path is still
+available as a fallback for parity checks and benchmarking.
+
 ## Layout
 
-```
-src/lib.rs                  Rust hot path (PyO3 extension, installed as regulonado._rs)
+```text
+src/lib.rs                  PyO3 module registration for regulonado._rs
+src/chrom_pass.rs           Production chromosome-pass Arrow writer
+src/writers.rs              Legacy sample-batched Arrow writers and helpers
+src/bigwig_io.rs            BigWig extraction and binning helpers
+src/fasta.rs                FASTA sequence loading / one-hot encoding
+src/schema.rs               Arrow / dataset schema helpers
 python/regulonado/
-  dataset.py                build_dataset / build_dataset_fast (main Python API)
+  dataset.py                build_dataset / build_dataset_fast orchestration
   __main__.py               Typer CLI  →  regulonado build / scale
   scaling.py                BigWig scale-factor inference
   _rs.cpython-313-...so     compiled extension (do not edit)
-tests/                      pytest suite
+tests/
+  test_chrom_pass.py        chrom_pass parity + HF loadability coverage
+  test_dataset_staging.py   staging and BigWig dedupe coverage
 configs/                    Hydra YAML configs
-scripts/                    SLURM job scripts (e.g. create_dataset.sh)
+scripts/
+  create_dataset.sh         SLURM dataset build entry point
+  smoketest_chrom_pass.sh   small chrom_pass smoke run
 ```
+
+`python -m regulonado build ...` is the main entry point for dataset creation. It accepts either
+`--bigwig` repeated per track or `--bigwig-dir`, and defaults to `--strategy chrom_pass`.
 
 ## Building the Rust extension
 
@@ -32,7 +48,35 @@ export VIRTUAL_ENV=/ceph/project/milne_group/asmith/software/Regulonado/.venv
 Omitting `VIRTUAL_ENV` causes maturin to pick up a macOS interpreter and fail. The `-i` flag
 does not exist in this version of maturin; use `VIRTUAL_ENV` instead.
 
-After any change to `src/lib.rs`, run `maturin develop --release` before testing Python code.
+After any change to `src/*.rs`, run `maturin develop --release` before testing Python code.
+
+If the extension has not been rebuilt, the SLURM wrapper in `scripts/create_dataset.sh` will fail
+fast when `python/regulonado/_rs.cpython-313-x86_64-linux-gnu.so` is missing.
+
+For editable reinstalls, `uv pip install -e .` also rebuilds the extension in the repo venv.
+
+## Common workflows
+
+Scale BigWigs:
+
+```bash
+.venv/bin/python -m regulonado scale /path/to/bigwigs --output scale-factors.parquet
+```
+
+Build a dataset with the default chrom-pass strategy:
+
+```bash
+.venv/bin/python -m regulonado build intervals.bed genome.fa out/ \
+  --bigwig-dir bw/ \
+  --stage \
+  --profile
+```
+
+Run the SLURM build wrapper with environment overrides:
+
+```bash
+OVERWRITE=true PROFILE=true sbatch scripts/create_dataset.sh
+```
 
 ## Running tests
 
@@ -40,62 +84,12 @@ After any change to `src/lib.rs`, run `maturin develop --release` before testing
 .venv/bin/pytest tests/
 ```
 
-## Key entry points
+Useful narrower checks:
 
-| Symbol | File | Purpose |
-|---|---|---|
-| `build_dataset_fast` | dataset.py:632 | main dataset builder; prefer over legacy path |
-| `write_arrow_split_from_bigwigs` | lib.rs:1283 | Rust core: BigWig→Arrow per split |
-| `extract_bigwig_labels_batch` | lib.rs:939 | Rayon-parallel BigWig read for one batch |
-| `bin_region_into` | lib.rs:51 | binning kernel |
-
-## Profiling (added 2026-05-21)
-
-Pass `--profile` to the CLI (or `profile=True` to `build_dataset_fast`) to emit a per-phase
-timing summary to stderr after each split:
-
+```bash
+.venv/bin/pytest tests/test_chrom_pass.py
+.venv/bin/pytest tests/test_dataset_staging.py
 ```
-[regulonado_rs] profile batches=275
-  opens:    total_thread_s=X.X  per_batch_ms p50=Y p95=Z
-  read_bin: total_thread_s=...  ...
-  assemble: total_wall_s=...    ...
-  fasta:    total_wall_s=...    ...
-  arrow:    total_wall_s=...    ...
-```
-
-`opens` and `read_bin` are **summed thread-time** across Rayon cores; `assemble`, `fasta`, and
-`arrow` are wall-clock. When profiling is off the instrumentation is entirely zero-cost (no
-atomics, no branches in the hot loop).
-
-Decision table for the next optimisation phase:
-
-| Phase dominates | Likely fix |
-|---|---|
-| `opens` | Hoist BigWigRead handles above the batch loop |
-| `read_bin` high thread/wall ratio | CPU-bound on binning — SIMD / zoom levels |
-| `read_bin` low thread/wall ratio | Ceph I/O wait — sort intervals or use `--stage` |
-| `arrow` | Drop to `zstd-1` / `lz4`; confirm output is on local scratch |
-| `fasta` | Cache FASTA index; mmap |
-
-## Scratch paths and Ceph I/O
-
-The builder logs a warning if `scratch_out` or `output_dir` resolves under `/ceph` or
-`/project`, because Arrow I/O to Ceph is ~10× slower than to `$SLURM_TMPDIR`.
-
-Set `$SLURM_TMPDIR` (automatically set on SLURM nodes) to get fast local scratch. When unset,
-`/tmp` is used. Pass `--stage` to also copy FASTA and BigWigs to local scratch before building.
-
-## Arrow batch size cap
-
-The builder automatically caps `arrow_batch_size` to avoid Arrow i32 offset overflow
-(`batch × n_tracks × n_bins > 2^31`). A warning is logged when the cap fires. For typical
-builds (2295 tracks, 6144 bins) the safe limit is 152 samples/batch.
-
-## Shift augmentation
-
-`shift_max_bp` must be a multiple of `bin_size`. When non-zero, the stored interval is
-`context_length + 2 × shift_max_bp` bp wide and `stored_n_bins = n_pred_bins + 2 × shift_bins`.
-The model then samples random sub-windows at training time.
 
 ## Ruff / code style
 
@@ -104,6 +98,10 @@ Line length 100. Linting: `E`, `F`, `I`. Run `ruff check python/` before committ
 ## Cargo / Rust notes
 
 - Uses PyO3 0.23, Rayon, bigtools (BigWig), arrow2 ecosystem.
-- `src/lib.rs` is a single file; all PyO3 functions are registered in the `#[pymodule]` at the
-  bottom.
-- `Instant::now()` / `Duration` are already imported at the top of lib.rs.
+- `src/lib.rs` is now a thin module-registration layer; implementation lives in the sibling Rust
+  modules under `src/`.
+- The `#[pymodule]` registers both debug helpers and the production writers, including
+  `chrom_pass::write_arrow_split_chrom_pass` and
+  `chrom_pass::write_arrow_splits_chrom_pass`.
+- When changing the Rust writer path, validate both numerical parity (`tests/test_chrom_pass.py`)
+  and Python-side staging / metadata behavior (`tests/test_dataset_staging.py`).

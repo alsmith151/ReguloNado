@@ -31,3 +31,9 @@ python/regulonado/_rs*.so
 # Backups from manual refactors
 *.bak
 src/*.bak
+
+# CCB artifacts
+sps*
+
+# Notebooks for now
+notebooks/

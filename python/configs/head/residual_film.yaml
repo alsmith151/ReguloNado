@@ -1,0 +1,8 @@
+# Head family selected by build_perturb_head.
+type: residual_film
+# Hidden channel width inside the head.
+hidden: 768
+# Dropout applied inside the head projection stack.
+dropout: 0.0
+# Kernel width for the local refinement block used only by residual_film.
+refinement_kernel: 9

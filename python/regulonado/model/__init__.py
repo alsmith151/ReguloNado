@@ -1,29 +1,28 @@
-from regulonado import metrics, training, viz
-from regulonado.model import (
-    ActivationType,
-    BackboneAdapter,
+from regulonado.model.adapters import (
     BackboneSpec,
     BackboneType,
     BorzoiBackboneAdapter,
     EnformerBackboneAdapter,
+    build_backbone_adapter,
+)
+from regulonado.model.heads import (
+    ActivationType,
     FiLMPerturbHead,
-    FreezePolicy,
-    HeadedSequenceModel,
     HeadType,
     LogFiLMPerturbHead,
     PerturbHead,
     ResidualFiLMPerturbHead,
     TrackMetadataEncoder,
     TransferMLPPerturbHead,
-    build_backbone_adapter,
     build_condition_shared_track_index,
     build_perturb_head,
 )
+from regulonado.model.wrapper import BackboneAdapter, FreezePolicy, HeadedSequenceModel
 
 __all__ = [
     "ActivationType",
-    "BackboneAdapter",
     "BackboneSpec",
+    "BackboneAdapter",
     "BackboneType",
     "BorzoiBackboneAdapter",
     "EnformerBackboneAdapter",
@@ -39,7 +38,4 @@ __all__ = [
     "build_backbone_adapter",
     "build_condition_shared_track_index",
     "build_perturb_head",
-    "metrics",
-    "training",
-    "viz",
 ]

@@ -24,9 +24,8 @@ INTERVAL_BP = N_PRED_BINS * BIN_SIZE
 CONTEXT_LEN = INTERVAL_BP  # no shift augmentation
 
 
-@pytest.fixture(scope="module")
-def synth_dataset(tmp_path_factory):
-    root = tmp_path_factory.mktemp("synth")
+def _build_synth_dataset(tmp_path_factory, *, segmented: bool):
+    root = tmp_path_factory.mktemp("synth_segmented" if segmented else "synth")
     chroms = [("chrA", CHROM_LEN), ("chrB", CHROM_LEN)]
 
     # FASTA: deterministic "A" with periodic markers so one-hot encoding is non-trivial.
@@ -44,20 +43,40 @@ def synth_dataset(tmp_path_factory):
 
     # BigWigs: each track is a different deterministic sinusoid-like pattern.
     bw_paths: list[str] = []
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(0 if not segmented else 7)
     for t in range(N_TRACKS):
         path = root / f"track_{t}.bw"
         chromsize_map = {name: n for name, n in chroms}
         entries: list[tuple[str, int, int, float]] = []
-        for name, n in chroms:
-            xs = np.arange(n)
-            vals = (
-                np.sin(2 * np.pi * (xs + 17 * t) / 256.0) * 5.0
-                + 10.0
-                + t * 2.0
-                + rng.normal(0, 0.1, size=n)
-            ).astype(np.float32)
-            entries.extend((name, int(i), int(i + 1), float(v)) for i, v in enumerate(vals))
+        for chrom_idx, (name, n) in enumerate(chroms):
+            if segmented:
+                pos = 0
+                step = 0
+                while pos < n:
+                    gap = [0, 3, 7, 11][(step + chrom_idx + t) % 4]
+                    pos += gap
+                    if pos >= n:
+                        break
+                    seg_len = [5, 13, 29, 61, 97][(step * 2 + chrom_idx + t) % 5]
+                    end = min(pos + seg_len, n)
+                    value = float(
+                        np.sin((pos + 19 * t + 23 * chrom_idx) / 91.0) * 4.5
+                        + 8.0
+                        + t * 1.75
+                        + rng.normal(0, 0.05)
+                    )
+                    entries.append((name, int(pos), int(end), value))
+                    pos = end
+                    step += 1
+            else:
+                xs = np.arange(n)
+                vals = (
+                    np.sin(2 * np.pi * (xs + 17 * t) / 256.0) * 5.0
+                    + 10.0
+                    + t * 2.0
+                    + rng.normal(0, 0.1, size=n)
+                ).astype(np.float32)
+                entries.extend((name, int(i), int(i + 1), float(v)) for i, v in enumerate(vals))
         w = pybigtools.open(str(path), "w")
         w.write(chromsize_map, iter(entries))
         bw_paths.append(str(path))
@@ -83,6 +102,16 @@ def synth_dataset(tmp_path_factory):
     }
 
 
+@pytest.fixture(scope="module")
+def synth_dataset(tmp_path_factory):
+    return _build_synth_dataset(tmp_path_factory, segmented=False)
+
+
+@pytest.fixture(scope="module")
+def segmented_synth_dataset(tmp_path_factory):
+    return _build_synth_dataset(tmp_path_factory, segmented=True)
+
+
 def _load_arrow_files(split_dir: Path) -> dict[str, list[np.ndarray]]:
     """Read every Arrow shard in a split dir and return columns as Python lists."""
     cols: dict[str, list[np.ndarray]] = {
@@ -105,21 +134,20 @@ def _load_arrow_files(split_dir: Path) -> dict[str, list[np.ndarray]]:
     return cols
 
 
-def test_chrom_pass_matches_direct_bigwig(synth_dataset):
-    """chrom_pass output must be numerically equal to direct-bigwig output."""
+def _assert_chrom_pass_matches_direct_bigwig(dataset):
     from regulonado._rs import (  # type: ignore[import-not-found]
         write_arrow_split_chrom_pass,
         write_arrow_split_from_bigwigs,
     )
 
-    root = synth_dataset["root"]
-    bw_paths = synth_dataset["bw_paths"]
+    root = dataset["root"]
+    bw_paths = dataset["bw_paths"]
     bed_rows_tuples = [
-        (c, int(s), int(e), "fold0") for (c, s, e) in synth_dataset["bed_rows"]
+        (c, int(s), int(e), "fold0") for (c, s, e) in dataset["bed_rows"]
     ]
     sample_indices = list(range(len(bed_rows_tuples)))
     # signal_intervals == bed intervals (no shift augmentation)
-    signal_intervals = [(c, int(s), int(e)) for (c, s, e) in synth_dataset["bed_rows"]]
+    signal_intervals = [(c, int(s), int(e)) for (c, s, e) in dataset["bed_rows"]]
     minus_flags = [False] * N_TRACKS
 
     # --- direct-bigwig (single shard) ---
@@ -132,7 +160,7 @@ def test_chrom_pass_matches_direct_bigwig(synth_dataset):
         str(fast_dir / "data-00000-of-00001.arrow"),
         sample_indices,
         bed_rows_tuples,
-        synth_dataset["fasta"],
+        dataset["fasta"],
         N_PRED_BINS,
         CONTEXT_LEN,
         batch_size=4,
@@ -150,7 +178,7 @@ def test_chrom_pass_matches_direct_bigwig(synth_dataset):
         str(cp_dir),
         sample_indices,
         bed_rows_tuples,
-        synth_dataset["fasta"],
+        dataset["fasta"],
         N_PRED_BINS,
         CONTEXT_LEN,
         BIN_SIZE,
@@ -190,6 +218,16 @@ def test_chrom_pass_matches_direct_bigwig(synth_dataset):
         np.testing.assert_array_equal(
             fi, ci, err_msg=f"input_ids mismatch at global index {gid}"
         )
+
+
+def test_chrom_pass_matches_direct_bigwig(synth_dataset):
+    """chrom_pass output must be numerically equal to direct-bigwig output."""
+    _assert_chrom_pass_matches_direct_bigwig(synth_dataset)
+
+
+def test_chrom_pass_matches_direct_bigwig_segmented_intervals(segmented_synth_dataset):
+    """Segmented BigWig intervals must match the direct per-sample writer exactly."""
+    _assert_chrom_pass_matches_direct_bigwig(segmented_synth_dataset)
 
 
 def test_chrom_pass_loads_via_datasets(synth_dataset, tmp_path):

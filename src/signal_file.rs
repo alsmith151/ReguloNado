@@ -1,4 +1,4 @@
-use crate::binning::bin_region_into;
+use crate::binning::{bin_region_into, BinningScratch};
 use bigtools::{BBIFileRead, BigWigRead};
 use std::io::{BufWriter, Write};
 
@@ -64,9 +64,7 @@ pub(crate) fn write_track_rows<R: BBIFileRead, W: Write>(
 ) -> Result<(usize, usize), String> {
     // Single row reused across all intervals — peak allocation is 24 KB, not 1 GB.
     let mut row = vec![0.0f32; n_bins];
-    let mut sums = vec![0.0f64; n_bins];
-    let mut covered = vec![0u64; n_bins];
-    let mut values_buf: Vec<f32> = Vec::new();
+    let mut scratch = BinningScratch::default();
 
     // Minus-strand stats accumulated during write to avoid a second BigWig read.
     let mut neg = 0usize;
@@ -79,9 +77,7 @@ pub(crate) fn write_track_rows<R: BBIFileRead, W: Write>(
             *start,
             *end,
             &mut row,
-            &mut sums,
-            &mut covered,
-            &mut values_buf,
+            &mut scratch,
         );
 
         if is_minus {

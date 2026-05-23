@@ -1,4 +1,4 @@
-use crate::binning::bin_region_into;
+use crate::binning::{bin_region_into, BinningScratch};
 use bigtools::{utils::file::reopen::ReopenableFile, BigWigRead};
 use rayon::prelude::*;
 
@@ -37,9 +37,7 @@ pub(crate) fn extract_bigwig_labels_batch(
         .enumerate()
         .map(|(track_idx, reader)| {
             let mut values = vec![0.0f32; rows * n_bins];
-            let mut sums = vec![0.0f64; n_bins];
-            let mut covered = vec![0u64; n_bins];
-            let mut values_buf: Vec<f32> = Vec::new();
+            let mut scratch = BinningScratch::default();
             let mut neg = 0usize;
             let mut nz = 0usize;
             let is_minus = minus_flags.get(track_idx).copied().unwrap_or(false);
@@ -53,9 +51,7 @@ pub(crate) fn extract_bigwig_labels_batch(
                     *start,
                     *end,
                     row,
-                    &mut sums,
-                    &mut covered,
-                    &mut values_buf,
+                    &mut scratch,
                 );
 
                 if is_minus {

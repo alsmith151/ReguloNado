@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 
+from typer.testing import CliRunner
+
 
 def test_stage_files_avoids_basename_collisions(tmp_path):
     from regulonado.dataset import _stage_files
@@ -125,3 +127,110 @@ def test_track_dedupe_content_keeps_same_basename_different_content(tmp_path):
     assert metadata["n_final_tracks"] == 2
     assert metadata["n_dropped_duplicate_tracks"] == 0
     assert [r["track_index"] for r in metadata["final_track_records"]] == [0, 1]
+
+
+def test_rsync_tree_can_delete_destination_entries(tmp_path, monkeypatch):
+    from regulonado.dataset import _rsync_tree
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, check):
+        assert check is True
+        calls.append(list(args))
+
+    monkeypatch.setattr("regulonado.dataset.subprocess.run", fake_run)
+
+    _rsync_tree(tmp_path / "src", tmp_path / "dst", delete=True)
+
+    assert calls == [["rsync", "-a", "--delete", f"{tmp_path / 'src'}/", f"{tmp_path / 'dst'}/"]]
+
+
+def test_rsync_tree_can_preserve_destination_entries(tmp_path, monkeypatch):
+    from regulonado.dataset import _rsync_tree
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, check):
+        assert check is True
+        calls.append(list(args))
+
+    monkeypatch.setattr("regulonado.dataset.subprocess.run", fake_run)
+
+    _rsync_tree(tmp_path / "src", tmp_path / "dst", delete=False)
+
+    assert calls == [["rsync", "-a", f"{tmp_path / 'src'}/", f"{tmp_path / 'dst'}/"]]
+
+
+def test_build_cli_skips_final_reload_for_fast_path(tmp_path, monkeypatch):
+    from regulonado.__main__ import app
+
+    runner = CliRunner()
+    captured: dict[str, object] = {}
+
+    bed = tmp_path / "intervals.bed"
+    fasta = tmp_path / "genome.fa"
+    bigwig_dir = tmp_path / "bw"
+    output_dir = tmp_path / "out"
+    bigwig_dir.mkdir()
+    bed.write_text("")
+    fasta.write_text("")
+    (bigwig_dir / "track.bw").write_text("")
+
+    def fake_build_dataset_fast(*args, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr("regulonado.dataset.build_dataset_fast", fake_build_dataset_fast)
+
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            str(bed),
+            str(fasta),
+            str(output_dir),
+            "--bigwig-dir",
+            str(bigwig_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert captured["return_dataset"] is False
+
+
+def test_build_cli_skips_final_reload_for_legacy_path(tmp_path, monkeypatch):
+    from regulonado.__main__ import app
+
+    runner = CliRunner()
+    captured: dict[str, object] = {}
+
+    bed = tmp_path / "intervals.bed"
+    fasta = tmp_path / "genome.fa"
+    bigwig_dir = tmp_path / "bw"
+    output_dir = tmp_path / "out"
+    bigwig_dir.mkdir()
+    bed.write_text("")
+    fasta.write_text("")
+    (bigwig_dir / "track.bw").write_text("")
+
+    def fake_build_dataset(*args, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr("regulonado.dataset.build_dataset", fake_build_dataset)
+
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            str(bed),
+            str(fasta),
+            str(output_dir),
+            "--bigwig-dir",
+            str(bigwig_dir),
+            "--no-fast-path",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert captured["return_dataset"] is False

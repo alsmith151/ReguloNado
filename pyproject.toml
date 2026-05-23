@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "regulonado"
 version = "0.1.0"
 description = "Generic sequence-to-function model finetuning"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 
 dependencies = [
     "accelerate",
@@ -31,16 +31,17 @@ dependencies = [
     "seaborn",
     "plotly",
     "tangermeme>=0.4.0",
-    "torch>=2.5",
+    "torch>=2.5,<2.7",
     "tqdm>=4.65",
     "transformers>=4.40",
     "typer",
     "wandb>=0.16",
+    "ruff>=0.15.13",
 ]
 
 [project.optional-dependencies]
 gpu = [
-    "flash_attn<2.8",
+    "flash_attn>=2.6,<2.8",
 ]
 jupyter = [
     "ipykernel",
@@ -56,6 +57,7 @@ dev = [
 
 [project.scripts]
 regulonado = "regulonado.__main__:main"
+regulonado-train = "regulonado.train:main"
 
 [tool.maturin]
 # Modern maturin mixed layout:
@@ -69,6 +71,14 @@ include = ["python/configs/**/*.yaml"]
 
 [tool.uv]
 extra-build-dependencies = { flash-attn = ["torch", "psutil", "ninja"] }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
 
 [tool.ruff]
 line-length = 100

@@ -1,0 +1,4 @@
+# Loss family name interpreted by the training entrypoint.
+name: poisson_multinomial
+# Relative weight on the Poisson total-count term.
+poisson_weight: 0.2

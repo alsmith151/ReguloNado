@@ -1,0 +1,6 @@
+# Head family selected by build_perturb_head.
+type: film
+# Hidden channel width inside the head.
+hidden: 512
+# Dropout applied inside the head projection stack.
+dropout: 0.0
