@@ -97,6 +97,9 @@ trainer:
   # Warm start from model weights only; creates fresh optimizer/scheduler/RNG state.
   init_weights_from_checkpoint: null
   # Best-model selection metric.
+  # Available: eval_loss (greater_is_better: false),
+  #            pearson_bin_median, pearson_total_median (greater_is_better: true),
+  #            pearson_top<K>_median (e.g. pearson_top128_median; greater_is_better: true).
   metric_for_best_model: eval_loss
   greater_is_better: false
   # Logging backends: [] for none, ["wandb"] to enable Weights & Biases.

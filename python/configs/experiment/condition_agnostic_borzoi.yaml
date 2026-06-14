@@ -32,5 +32,5 @@ trainer:
   freeze_backbone: true
   unfreeze_backbone_stages_from_output_end: 2
   report_to: [wandb]
-  metric_for_best_model: eval_loss
-  greater_is_better: false
+  metric_for_best_model: pearson_bin_median
+  greater_is_better: true
