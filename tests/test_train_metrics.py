@@ -51,14 +51,14 @@ class TestPreprocess:
         preprocess = _make_preprocess_logits_for_metrics(topk_bins=8)
         logits, labels = _make_batch(B=3, T=5, L=20, labels_transposed=False)
         out = preprocess(logits, labels)
-        assert out.shape == (3, 5, 12), out.shape
+        assert out.shape == (3, 5, 18), out.shape
 
     def test_output_shape_transposed_labels(self):
         """HF datasets loads labels as [B, L, T]; preprocess must handle it."""
         preprocess = _make_preprocess_logits_for_metrics(topk_bins=8)
         logits, labels_lt = _make_batch(B=3, T=5, L=20, labels_transposed=True)
         out = preprocess(logits, labels_lt)
-        assert out.shape == (3, 5, 12), out.shape
+        assert out.shape == (3, 5, 18), out.shape
 
     def test_transposed_labels_same_stats(self):
         """Stats must be identical regardless of whether labels are transposed."""
@@ -82,7 +82,7 @@ class TestPreprocess:
         preprocess = _make_preprocess_logits_for_metrics(topk_bins=1000)
         logits, labels = _make_batch(B=2, T=3, L=16)
         out = preprocess(logits, labels)
-        assert out.shape == (2, 3, 12)
+        assert out.shape == (2, 3, 18)
 
     def test_n_column_values(self):
         """Col 5 (n for all bins) must equal L; col 11 (n for topk) must equal min(k, L)."""
@@ -110,20 +110,22 @@ class TestComputeMetrics:
             stats = preprocess(logits, labels)
             all_stats.append(stats.numpy())
 
-        stacked = np.stack(all_stats, axis=0)  # [n_batches, B, T, 12] — mimic HF accumulation
+        stacked = np.stack(all_stats, axis=0)  # [n_batches, B, T, 18] — mimic HF accumulation
 
         from transformers import EvalPrediction
-        eval_pred = EvalPrediction(predictions=stacked.reshape(-1, T, 12), label_ids=None)
+        eval_pred = EvalPrediction(predictions=stacked.reshape(-1, T, 18), label_ids=None)
         return compute_metrics(eval_pred)
 
     def test_returns_expected_keys(self):
         metrics = self._run()
         assert "pearson_bin_median" in metrics
+        assert "pearson_total_median" in metrics
         assert any("pearson_top" in k for k in metrics)
 
     def test_pearson_in_range(self):
         metrics = self._run()
         assert -1.0 <= metrics["pearson_bin_median"] <= 1.0
+        assert -1.0 <= metrics["pearson_total_median"] <= 1.0
         topk_key = next(k for k in metrics if "pearson_top" in k)
         assert -1.0 <= metrics[topk_key] <= 1.0
 

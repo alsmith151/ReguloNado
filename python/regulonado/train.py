@@ -1,14 +1,9 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
-import importlib.metadata
 import json
 import os
-import platform
 import random
-import subprocess
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -22,11 +17,8 @@ from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
 from transformers import (
     EarlyStoppingCallback,
-    EvalPrediction,
     Trainer,
     TrainerCallback,
-    TrainerControl,
-    TrainerState,
     TrainingArguments,
     get_scheduler,
 )
@@ -39,6 +31,11 @@ from regulonado.model import (
     build_backbone_adapter,
     build_condition_shared_track_index,
     build_perturb_head,
+)
+from regulonado.training.callbacks import (
+    _EvalPlotCallback,
+    _LRLogCallback,
+    _WandbConfigCallback,
 )
 from regulonado.training.config import (
     ProvenanceConfig,
@@ -54,202 +51,11 @@ from regulonado.training.losses import (
     topk_reweight_loss,
     transfer_calibration_loss,
 )
-
-
-class _WandbConfigCallback(TrainerCallback):
-    """Push the full resolved Hydra config to wandb.config on the first log event.
-
-    HF Trainer only syncs TrainingArguments; backbone/head/loss/data settings
-    are invisible in the W&B UI without this.
-
-    We use on_log (not on_train_begin) because HF's WandbCallback calls wandb.init()
-    inside its own on_train_begin handler, which runs after ours.  By the time the
-    first on_log fires, wandb.run is guaranteed to exist.
-    """
-
-    def __init__(self, cfg: Mapping[str, Any]) -> None:
-        self._cfg = cfg
-        self._uploaded = False
-
-    def on_log(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs: Any,
-    ) -> None:
-        if self._uploaded or not state.is_world_process_zero:
-            return
-        self._uploaded = True
-        try:
-            import wandb
-
-            if wandb.run is not None:
-                wandb.config.update({"regulonado": self._cfg}, allow_val_change=True)
-        except Exception:
-            pass
-
-
-class _LRLogCallback(TrainerCallback):
-    """Log per-param-group learning rates so head and backbone LRs are both visible."""
-
-    def on_log(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs: Any,
-    ) -> None:
-        optimizer = kwargs.get("optimizer")
-        if optimizer is None or not state.is_world_process_zero:
-            return
-        logs: dict[str, float] = {}
-        names = ["backbone", "head"]
-        for i, group in enumerate(optimizer.param_groups):
-            label = names[i] if i < len(names) else f"group{i}"
-            logs[f"learning_rate/{label}"] = group["lr"]
-        if state.log_history:
-            state.log_history[-1].update(logs)
-
-
-def _json_default(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    return str(value)
-
-
-def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=_json_default))
-
-
-def _run_git(repo: Path, *args: str) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), *args],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        return None
-    return result.stdout.strip()
-
-
-def _file_sha256(path: Path) -> str | None:
-    if not path.exists():
-        return None
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _split_summary(dataset_dict: Mapping[str, Any]) -> dict[str, Any]:
-    summary: dict[str, Any] = {}
-    for split_name, split in dataset_dict.items():
-        try:
-            summary[split_name] = {"num_rows": len(split)}
-        except TypeError:
-            summary[split_name] = {"num_rows": None, "streaming": True}
-    return summary
-
-
-def _package_version(name: str) -> str | None:
-    try:
-        return importlib.metadata.version(name)
-    except importlib.metadata.PackageNotFoundError:
-        return None
-
-
-def _environment_summary() -> dict[str, Any]:
-    slurm_keys = [
-        "SLURM_JOB_ID",
-        "SLURM_JOB_NAME",
-        "SLURM_SUBMIT_DIR",
-        "SLURM_NODELIST",
-        "SLURM_CPUS_PER_TASK",
-        "SLURM_GPUS",
-        "CUDA_VISIBLE_DEVICES",
-    ]
-    return {
-        "python": sys.version,
-        "platform": platform.platform(),
-        "torch": {
-            "version": torch.__version__,
-            "cuda_available": torch.cuda.is_available(),
-            "cuda": torch.version.cuda,
-            "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
-            "devices": [
-                torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())
-            ]
-            if torch.cuda.is_available()
-            else [],
-        },
-        "packages": {
-            name: _package_version(name)
-            for name in ("transformers", "datasets", "accelerate", "wandb", "numpy", "torch")
-        },
-        "slurm": {key: os.environ[key] for key in slurm_keys if key in os.environ},
-    }
-
-
-def _write_provenance(
-    *,
-    output_dir: Path,
-    cfg: Mapping[str, Any],
-    data_path: Path,
-    dataset_dict: Mapping[str, Any],
-    metadata: Mapping[str, Any],
-    records: Sequence[Mapping[str, Any]],
-    trainer_cfg: TrainerConfig,
-) -> None:
-    if not trainer_cfg.provenance.enabled:
-        return
-
-    repo = Path.cwd()
-    metadata_candidates = [
-        data_path / "regulonado_metadata.json",
-        data_path / "track_metadata.json",
-    ]
-    metadata_path = next((path for path in metadata_candidates if path.exists()), None)
-    git_status = _run_git(repo, "status", "--short")
-    provenance = {
-        "config": cfg,
-        "command": " ".join(sys.argv),
-        "git": {
-            "branch": _run_git(repo, "rev-parse", "--abbrev-ref", "HEAD"),
-            "commit": _run_git(repo, "rev-parse", "HEAD"),
-            "dirty": bool(git_status),
-            "status_short": git_status,
-        },
-        "dataset": {
-            "path": str(data_path),
-            "metadata_path": str(metadata_path) if metadata_path is not None else None,
-            "metadata_sha256": _file_sha256(metadata_path) if metadata_path is not None else None,
-            "n_tracks": len(records),
-            "splits": _split_summary(dataset_dict),
-            "context_length": metadata.get("context_length"),
-            "n_pred_bins": metadata.get("n_pred_bins"),
-            "bin_size": metadata.get("bin_size"),
-        },
-        "checkpoint_reuse": {
-            "resume_from_checkpoint": trainer_cfg.resume_from_checkpoint,
-            "init_weights_from_checkpoint": trainer_cfg.init_weights_from_checkpoint,
-        },
-        "environment": _environment_summary(),
-    }
-    _write_json(output_dir / "provenance.json", provenance)
-    _write_json(output_dir / "resolved_config.json", cfg)
-    if trainer_cfg.provenance.save_git_diff:
-        diff = _run_git(repo, "diff", "--no-ext-diff")
-        if diff:
-            (output_dir / "git_diff.patch").write_text(diff)
+from regulonado.training.metrics import (
+    _make_compute_metrics,
+    _make_preprocess_logits_for_metrics,
+)
+from regulonado.training.provenance import _write_provenance
 
 
 def _normalise_checkpoint_mode(value: Any) -> str | bool | None:
@@ -802,168 +608,6 @@ def _build_scheduler_for_trainer(
     )
 
 
-def _safe_corr(x: np.ndarray, y: np.ndarray) -> float:
-    finite = np.isfinite(x) & np.isfinite(y)
-    x = x[finite]
-    y = y[finite]
-    if x.size < 2 or np.std(x) < 1e-8 or np.std(y) < 1e-8:
-        return float("nan")
-    with np.errstate(invalid="ignore"):
-        r = float(np.corrcoef(x, y)[0, 1])
-    return float("nan") if not np.isfinite(r) else r
-
-
-def _inverse_signal_transform(
-    x: np.ndarray,
-    scale_factors: np.ndarray | None,
-    apply_squash: bool,
-    apply_scale: bool,
-) -> np.ndarray:
-    """Reverse the squash and/or scale applied by make_transform.
-
-    Squash inverse: ``(x + 1)^(4/3) - 1``  (inverse of ``(x+1)^0.75 - 1``).
-    Scale inverse:  divide by per-track scale factor to go from raw counts → normalised coverage.
-
-    After unsquash only (apply_scale=False) the result is in raw read-count units.
-    After both steps the result is in the original normalised BigWig units (RPKM).
-    """
-    y = np.maximum(np.asarray(x, dtype=np.float32), 0.0)
-    if apply_squash:
-        y = np.power(y + 1.0, 4.0 / 3.0) - 1.0
-        np.maximum(y, 0.0, out=y)
-    if apply_scale and scale_factors is not None:
-        sf = np.asarray(scale_factors, dtype=np.float32).reshape(-1, 1)
-        y = y / np.maximum(sf, 1e-8)
-    return y
-
-
-def _make_preprocess_logits_for_metrics(topk_bins: int) -> Callable:
-    """Return a preprocess_logits_for_metrics function that accumulates Pearson sufficient stats.
-
-    Returns [B, T, 12] per batch:
-      cols 0-5:  (sum_p, sum_t, sum_pt, sum_p², sum_t², n)  over all bins
-      cols 6-11: same statistics restricted to the top-K bins by target signal
-    """
-    def preprocess(logits: torch.Tensor | tuple, labels: torch.Tensor) -> torch.Tensor:
-        if isinstance(logits, tuple):
-            logits = logits[0]
-        p = logits
-        # Labels may be loaded as [B, L, T] by the HF datasets library; align to [B, T, L].
-        t = labels if labels.shape[-2:] == p.shape[-2:] else labels.transpose(-2, -1)
-        B, T, L = p.shape
-        k = min(topk_bins, L)
-
-        sp   = p.sum(-1)
-        st   = t.sum(-1)
-        spt  = (p * t).sum(-1)
-        sp2  = (p * p).sum(-1)
-        st2  = (t * t).sum(-1)
-        n    = torch.full((B, T), float(L), dtype=p.dtype, device=p.device)
-
-        topk_idx = t.topk(k, dim=-1).indices  # [B, T, k]
-        p_k = p.gather(-1, topk_idx)
-        t_k = t.gather(-1, topk_idx)
-        sp_k  = p_k.sum(-1)
-        st_k  = t_k.sum(-1)
-        spt_k = (p_k * t_k).sum(-1)
-        sp2_k = (p_k * p_k).sum(-1)
-        st2_k = (t_k * t_k).sum(-1)
-        n_k   = torch.full((B, T), float(k), dtype=p.dtype, device=p.device)
-
-        return torch.stack([sp, st, spt, sp2, st2, n, sp_k, st_k, spt_k, sp2_k, st2_k, n_k], dim=-1)
-    return preprocess
-
-
-def _make_compute_metrics(
-    n_tracks: int,
-) -> Callable[[EvalPrediction], dict[str, float]]:
-    def _pearson_from_stats(
-        sp: np.ndarray, st: np.ndarray, spt: np.ndarray,
-        sp2: np.ndarray, st2: np.ndarray, n: np.ndarray,
-    ) -> np.ndarray:
-        num   = n * spt - sp * st
-        denom = np.sqrt(
-            np.maximum(n * sp2 - sp ** 2, 0.0) * np.maximum(n * st2 - st ** 2, 0.0)
-        )
-        return np.where(denom > 0, num / denom, np.nan)
-
-    def compute_metrics(eval_pred: EvalPrediction) -> dict[str, float]:
-        # predictions: [N, T, 12] — sufficient stats accumulated over the full eval set
-        stats = np.asarray(eval_pred.predictions, dtype=np.float64)
-        s = stats.sum(axis=0)  # [T, 12] global sums
-
-        r_all  = _pearson_from_stats(s[:,0], s[:,1], s[:,2], s[:,3], s[:,4],  s[:,5])
-        r_topk = _pearson_from_stats(s[:,6], s[:,7], s[:,8], s[:,9], s[:,10], s[:,11])
-
-        fin_all  = r_all[np.isfinite(r_all)]
-        fin_topk = r_topk[np.isfinite(r_topk)]
-        topk_n   = int(round(float(stats[0, 0, 11]))) if stats.shape[0] > 0 else 0
-
-        return {
-            "pearson_bin_median": float(np.median(fin_all)) if fin_all.size else float("nan"),
-            f"pearson_top{topk_n}_median": (
-                float(np.median(fin_topk)) if fin_topk.size else float("nan")
-            ),
-        }
-    return compute_metrics
-
-
-def _plot_examples(
-    preds: np.ndarray,
-    targets: np.ndarray,
-    intervals: list[str],
-    output_dir: Path,
-    step: int,
-    tracks_per_example: int = 3,
-    track_names: list[str] | None = None,
-) -> None:
-    """Plot prediction vs target for a batch of examples.
-
-    Args:
-        preds: shape [B, n_tracks, n_bins]
-        targets: shape [B, n_tracks, n_bins]
-        intervals: interval strings for each example, e.g. "chr1:1000-2000"
-    """
-    if preds.shape[0] == 0:
-        return
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    step_dir = output_dir / "examples" / f"step_{step:06d}"
-    step_dir.mkdir(parents=True, exist_ok=True)
-    n_tracks = preds.shape[1]
-    n_pick = min(tracks_per_example, n_tracks)
-    track_indices = random.sample(range(n_tracks), n_pick)
-    for example_idx in range(preds.shape[0]):
-        interval = (
-            intervals[example_idx] if example_idx < len(intervals) else f"example_{example_idx}"
-        )
-        for track_idx in track_indices:
-            pred = preds[example_idx, track_idx]
-            target = targets[example_idx, track_idx]
-            ymax = max(float(pred.max()), float(target.max()), 0.0)
-            ymin = min(float(pred.min()), float(target.min()), 0.0)
-            pad = (ymax - ymin) * 0.05 or 0.1
-            track_name = (
-                track_names[track_idx]
-                if track_names and track_idx < len(track_names)
-                else f"track {track_idx}"
-            )
-            fig, ax = plt.subplots(figsize=(9, 3), dpi=120)
-            ax.plot(target, label="real", linewidth=1.2)
-            ax.plot(pred, label="predicted", linewidth=1.0, alpha=0.85)
-            ax.set_ylim(ymin - pad, ymax + pad)
-            ax.set_title(f"{track_name}  |  {interval}")
-            ax.set_xlabel("bin")
-            ax.set_ylabel("signal")
-            ax.legend(loc="upper right", frameon=False)
-            fig.tight_layout()
-            fig.savefig(step_dir / f"example_{example_idx:02d}_track_{track_idx:04d}.png")
-            plt.close(fig)
-
-
 class RegulonadoTrainer(Trainer):
     """Trainer subclass that applies preprocess_logits_for_metrics inside prediction_step
     (with raw labels) and then reduces labels to [B, T] before accumulation to avoid OOM.
@@ -995,89 +639,6 @@ class RegulonadoTrainer(Trainer):
                 bin_dim = -1 if labels.shape[-1] > labels.shape[-2] else -2
                 labels = labels.sum(dim=bin_dim)
         return loss, logits, labels
-
-
-class _EvalPlotCallback(TrainerCallback):
-    """After each validation run, plot a handful of pred-vs-target examples.
-
-    Runs the model directly on raw dataset items so predictions are the full
-    [n_tracks, n_bins] signal — not reduced by preprocess_logits_for_metrics.
-    The 'interval' field present on each dataset item is used in the plot title.
-    """
-
-    def __init__(
-        self,
-        *,
-        dataset: Any,
-        collate_fn: Callable,
-        num_examples: int,
-        output_dir: Path,
-        track_names: list[str] | None,
-        scale_factors: np.ndarray | None = None,
-        apply_squash: bool = True,
-        apply_scale: bool = True,
-    ) -> None:
-        self._dataset = dataset
-        self._collate_fn = collate_fn
-        self._num_examples = num_examples
-        self._output_dir = output_dir
-        self._track_names = track_names
-        self._scale_factors = scale_factors
-        self._apply_squash = apply_squash
-        self._apply_scale = apply_scale
-
-    def on_evaluate(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        model: torch.nn.Module,
-        **kwargs: Any,
-    ) -> None:
-        if not state.is_world_process_zero or self._num_examples <= 0:
-            return
-
-        raw_items: list[dict] = []
-        for item in self._dataset:
-            raw_items.append(item)
-            if len(raw_items) >= self._num_examples:
-                break
-        if not raw_items:
-            return
-
-        batch = self._collate_fn(raw_items)
-        device = next(model.parameters()).device
-        labels_tensor = batch["labels"].to(device)
-        inputs = {
-            k: v.to(device) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-            if k != "labels"
-        }
-
-        model.eval()
-        with torch.no_grad():
-            out = model(**inputs)
-        preds_raw = (out["logits"] if isinstance(out, dict) else out).float().cpu().numpy()
-        labels_raw = labels_tensor.float().cpu().numpy()
-
-        # Both pred and target are in squash-transformed space; reverse to signal space
-        # so the y-axis shows interpretable per-track signal magnitudes.
-        def _inv(x: np.ndarray) -> np.ndarray:
-            return _inverse_signal_transform(
-                x, self._scale_factors, self._apply_squash, self._apply_scale
-            )
-        preds_plot  = np.stack([_inv(preds_raw[i])  for i in range(preds_raw.shape[0])])
-        labels_plot = np.stack([_inv(labels_raw[i]) for i in range(labels_raw.shape[0])])
-
-        intervals = [item.get("interval", f"example_{i}") for i, item in enumerate(raw_items)]
-        _plot_examples(
-            preds_plot,
-            labels_plot,
-            intervals,
-            self._output_dir,
-            int(state.global_step),
-            track_names=self._track_names,
-        )
 
 
 def _estimate_shuffle_buffer(
