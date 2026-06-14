@@ -1,4 +1,4 @@
-# Regulonado — developer notes for Claude
+# ReguloNado — developer notes for Claude
 
 ## What this repo is
 

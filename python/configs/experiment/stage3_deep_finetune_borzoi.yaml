@@ -1,0 +1,70 @@
+# @package _global_
+# Phase 3 — deep fine-tuning: unfreeze the four output-end backbone stages
+# with reverse-complement augmentation and a conservative LR schedule.
+#
+# RC augmentation roughly doubles the effective training-set size at no I/O
+# cost and consistently improves per-track correlations.  The deeper unfreeze
+# (4 stages = final_joined_convs + 3 transformer blocks) allows the backbone
+# to adapt its attention patterns to the new cell-type / assay distribution
+# without disturbing early convolutional feature detectors.
+#
+# LR is reduced to 25% of phase-2 values and warmup is extended to compensate
+# for fresh Adam second moments accumulated under the deeper parameter set.
+#
+# Usage:
+#   EXPERIMENT=stage3_deep_finetune_borzoi \
+#   INIT_WEIGHTS_FROM_CHECKPOINT=/path/to/stage2/checkpoint-NNNN \
+#   DATA_DIR=... sbatch scripts/train_slurm.sh
+
+defaults:
+  - override /backbone: borzoi
+  - override /head: transfer_mlp
+  - override /loss: poisson_multinomial
+
+data:
+  streaming: true
+  # RC augmentation: each training sequence is randomly reverse-complemented.
+  # Doubles effective epoch length; disable for quick smoke checks.
+  enable_rc_aug: true
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+trainer:
+  batch_size: 4
+  eval_batch_size: 4
+  num_workers: 8
+
+  # 25% of phase-2 LR; 100× ratio maintained to protect earlier backbone layers.
+  learning_rate: 5.0e-5
+  backbone_learning_rate: 5.0e-7
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  # Extended warmup: more parameters are unfrozen so Adam needs longer to
+  # accumulate reliable second-moment estimates across all new param groups.
+  warmup_steps: 500
+  max_steps: 15000
+
+  gradient_accumulation_steps: 1
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+
+  log_every_n_steps: 10
+  eval_every_n_steps: 500
+  checkpoint_every_n_steps: 500
+
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 4
+
+  report_to: [wandb]
+  metric_for_best_model: pearson_bin_median
+  greater_is_better: true
+
+  max_eval_samples: 500
+
+  # Allow 5 evals (2500 steps) without improvement before stopping.
+  early_stopping_patience: 5
+
+  # Warm start: set INIT_WEIGHTS_FROM_CHECKPOINT to a phase-2 checkpoint.
+  init_weights_from_checkpoint: ${oc.env:INIT_WEIGHTS_FROM_CHECKPOINT,""}

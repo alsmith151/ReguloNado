@@ -23,10 +23,10 @@ else
 fi
 
 # --- required inputs ---------------------------------------------------------
-BED_FILE="${BED_FILE:-/project/milne_group/asmith/Projects/2025-07-19-myeloid-specific-enhancer-identification/data/external/sequences_human.bed.gz}"
-FASTA_FILE="${FASTA_FILE:-/ceph/project/milne_group/shared/seqnado_reference/hg38/UCSC/sequence/hg38.fa}"
-OUTPUT_DIR="${OUTPUT_DIR:-/ceph/project/milne_group/asmith/software/Regulonado/dataset/2026-05-21-regulonado-v1}"
-BIGWIG_LIST="${BIGWIG_LIST:-$REPO_DIR/notebooks/2026-05-20-dataset-paths.txt}"
+: "${BED_FILE:?BED_FILE must be set — path to the intervals BED file}"
+: "${FASTA_FILE:?FASTA_FILE must be set — path to the reference FASTA}"
+: "${OUTPUT_DIR:?OUTPUT_DIR must be set — path for the output Arrow dataset}"
+: "${BIGWIG_LIST:?BIGWIG_LIST must be set — path to a newline-delimited list of BigWig paths}"
 
 # --- build parameters --------------------------------------------------------
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-524288}"
@@ -37,15 +37,13 @@ SHIFT_MAX_BP="${SHIFT_MAX_BP:-64}"
 # Rayon thread count for parallel BigWig extraction — set to full CPU allocation.
 N_EXTRACT_THREADS="${N_EXTRACT_THREADS:-${SLURM_CPUS_PER_TASK:-32}}"
 
-# Concurrent Arrow shard writers after each chromosome scan. With 2295 tracks,
-# each full-size writer batch can hold ~9 GB labels+sequence before compression.
-# 4 writers is intended for 256 GB jobs; try 6-8 with 512 GB if profiling helps.
+# Concurrent Arrow shard writers after each chromosome scan.
+# 4 writers suits a 256 GB job; try 6-8 with 512 GB if profiling shows I/O headroom.
 ARROW_WRITE_THREADS="${ARROW_WRITE_THREADS:-4}"
 
 # Arrow record batch size. The builder auto-caps this to avoid i32 offset overflow:
-# safe limit = floor(2^31 / (n_tracks × n_bins)). For a 2295-track full build
-# that cap is ~152 samples/batch. Setting higher is fine; it gets capped with a
-# log warning. Keep it generous so smaller builds stay uncapped.
+# safe limit = floor(2^31 / (n_tracks × n_bins)). Setting higher is fine; it gets
+# capped with a log warning. Keep it generous so smaller builds stay uncapped.
 ARROW_BATCH_SIZE="${ARROW_BATCH_SIZE:-512}"
 ARROW_COMPRESSION="${ARROW_COMPRESSION:-lz4}"
 

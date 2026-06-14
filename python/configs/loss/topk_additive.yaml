@@ -1,0 +1,9 @@
+name: topk_additive
+# Relative weight on the Poisson total-count term (shared by base and peak pass).
+poisson_weight: 0.2
+# Fraction of bins selected per track as "peaks" for the extra loss pass.
+# 0.04 = top 4% ≈ 245 bins out of 6144.
+topk_fraction: 0.04
+# Weight on the additive top-K loss term.  1.0 means peak bins contribute
+# twice as much total loss as they would under the base loss alone.
+topk_weight: 1.0

@@ -1,0 +1,64 @@
+# @package _global_
+# Phase 2 — unfreeze the two output-end backbone stages (final_joined_convs +
+# the last transformer block) while keeping the rest of the backbone frozen.
+#
+# Warm-start from a head_only_borzoi checkpoint so the head is already
+# well-initialised before the backbone sees gradients.  The backbone LR
+# is 100× lower than the head LR; both use a cosine schedule with a short
+# warmup so fresh Adam second moments stabilise before the full LR hits.
+#
+# Usage:
+#   EXPERIMENT=stage2_unfreeze2_borzoi \
+#   INIT_WEIGHTS_FROM_CHECKPOINT=/path/to/head_only/checkpoint-NNNN \
+#   DATA_DIR=... sbatch scripts/train_slurm.sh
+
+defaults:
+  - override /backbone: borzoi
+  - override /head: transfer_mlp
+  - override /loss: poisson_multinomial
+
+data:
+  streaming: true
+  enable_rc_aug: true
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+trainer:
+  batch_size: 12
+  eval_batch_size: 12
+  num_workers: 8
+
+  # 100× LR ratio: backbone LR is low enough to preserve pretrained features
+  # while allowing the output-end stages to adapt to the new data distribution.
+  learning_rate: 2.0e-4
+  backbone_learning_rate: 2.0e-6
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_steps: 200
+  max_steps: 10000
+
+  gradient_accumulation_steps: 1
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+
+  log_every_n_steps: 10
+  eval_every_n_steps: 500
+  checkpoint_every_n_steps: 500
+
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 2
+
+  report_to: [wandb]
+  metric_for_best_model: pearson_bin_median
+  greater_is_better: true
+
+  max_eval_samples: 500
+
+  # Allow 5 evals (2500 steps) without improvement before stopping.
+  early_stopping_patience: 5
+
+  # Warm start: set INIT_WEIGHTS_FROM_CHECKPOINT to a phase-1 checkpoint.
+  # Empty-string default disables warm start when the env var is not set.
+  init_weights_from_checkpoint: ${oc.env:INIT_WEIGHTS_FROM_CHECKPOINT,""}

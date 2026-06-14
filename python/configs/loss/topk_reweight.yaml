@@ -1,0 +1,9 @@
+name: topk_reweight
+# Relative weight on the Poisson total-count term.
+poisson_weight: 0.2
+# Fraction of bins classified as "peaks" and upweighted in the multinomial term.
+# 0.04 = top 4% ≈ 245 bins out of 6144.
+topk_fraction: 0.04
+# Multiplier applied to the multinomial cross-entropy at peak bins.
+# 1.0 = no change; 4.0 means peaks contribute 4× more to the multinomial term.
+topk_weight: 4.0

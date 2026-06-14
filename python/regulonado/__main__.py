@@ -85,7 +85,7 @@ def train(
 
     Extra arguments after the options are passed directly to Hydra, for example:
 
-    regulonado train dataset/ --max-steps 1000 trainer.fit_examples.num_examples=8
+    regulonado train dataset/ --max-steps 1000 trainer.max_eval_samples=200
     """
     if resume_from_checkpoint and init_weights_from_checkpoint:
         typer.echo(

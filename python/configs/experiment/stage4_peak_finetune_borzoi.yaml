@@ -1,0 +1,72 @@
+# @package _global_
+# Phase 4 — peak-sharpening fine-tune.
+#
+# Warm-starts from the phase-3 checkpoint and switches the loss to
+# topk_additive: the base poisson_multinomial loss is preserved for overall
+# calibration while an additive second pass on the top-4% bins by target
+# signal provides extra gradient pressure on genuine accessibility peaks.
+#
+# LR is reduced further (10% of phase-3) so the well-calibrated background
+# signal is not disrupted.  Only the two output-end backbone stages remain
+# unfrozen — the same as phase 2 — because peak sharpening is an output-side
+# correction.
+#
+# topk_additive is the conservative default here; swap loss=topk_reweight
+# to try the in-place reweighting variant instead.
+#
+# Usage:
+#   EXPERIMENT=stage4_peak_finetune_borzoi \
+#   INIT_WEIGHTS_FROM_CHECKPOINT=/path/to/stage3/checkpoint-NNNN \
+#   DATA_DIR=... sbatch scripts/train_slurm.sh
+
+defaults:
+  - override /backbone: borzoi
+  - override /head: transfer_mlp
+  - override /loss: topk_additive
+
+data:
+  streaming: true
+  enable_rc_aug: true
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+loss:
+  topk_fraction: 0.04
+  topk_weight: 1.0
+
+trainer:
+  batch_size: 4
+  eval_batch_size: 4
+  num_workers: 8
+
+  # 10% of phase-3 LR: only fine-grained peak corrections are expected.
+  learning_rate: 5.0e-6
+  backbone_learning_rate: 5.0e-8
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_steps: 200
+  max_steps: 5000
+
+  gradient_accumulation_steps: 1
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+
+  log_every_n_steps: 10
+  eval_every_n_steps: 500
+  checkpoint_every_n_steps: 500
+
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 2
+
+  report_to: [wandb]
+  metric_for_best_model: pearson_bin_median
+  greater_is_better: true
+
+  max_eval_samples: 500
+
+  # Tighter patience: peak sharpening is short and divergence is visible quickly.
+  early_stopping_patience: 3
+
+  init_weights_from_checkpoint: ${oc.env:INIT_WEIGHTS_FROM_CHECKPOINT,""}

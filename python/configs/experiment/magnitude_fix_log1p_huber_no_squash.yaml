@@ -1,0 +1,61 @@
+# @package _global_
+# Magnitude-fix experiment A2 — log1p_huber, no squash.
+#
+# log1p_huber without squash: the loss operates directly in log1p(raw_counts)
+# space.  log1p is less compressive than sqrt-squash at high counts, so peak
+# bins contribute more strongly to gradient updates.  apply_scale converts the
+# stored RPKM signal to raw counts before the loss sees it.
+
+defaults:
+  - override /backbone: borzoi
+  - override /head: transfer_mlp
+  - override /loss: log1p_huber
+
+data:
+  streaming: true
+  enable_rc_aug: true
+  apply_squash: false
+  apply_scale: true
+  apply_clip: true
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+loss:
+  delta: 1.0
+
+trainer:
+  batch_size: 4
+  eval_batch_size: 4
+  num_workers: 8
+
+  # Lower LR than squash variants: without squash the model outputs raw-count-
+  # scale values; the head weights need a gentler update regime to stay stable.
+  learning_rate: 5.0e-6
+  backbone_learning_rate: 5.0e-7
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_steps: 500
+  max_steps: 7500
+
+  gradient_accumulation_steps: 2
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+
+  log_every_n_steps: 10
+  eval_every_n_steps: 500
+  checkpoint_every_n_steps: 500
+
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 2
+
+  report_to: [wandb]
+  metric_for_best_model: pearson_bin_median
+  greater_is_better: true
+
+  max_eval_samples: 500
+  num_plot_examples: 8
+  early_stopping_patience: 5
+
+  init_weights_from_checkpoint: ${oc.env:INIT_WEIGHTS_FROM_CHECKPOINT,""}

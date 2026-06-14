@@ -16,9 +16,17 @@ output_dir: ${hydra:runtime.output_dir}
 data:
   # Path to a saved Hugging Face dataset directory produced by Regulonado.
   path: ???
-  # Apply per-track scale factors stored in dataset metadata before loss computation.
+  # Multiply the stored BigWig signal (normalised coverage / RPKM) by per-track scale factors
+  # before loss computation.  Scale factors are inferred at dataset-build time from library size
+  # and bin width; multiplying by them converts the signal to raw read counts.  Disabling this
+  # trains on normalised coverage instead of counts, which is NOT recommended as it removes the
+  # absolute-magnitude information the Poisson loss depends on.
   apply_scale: true
-  # Apply the Borzoi-style squash transform after optional scaling.
+  # Apply the Borzoi-style squash transform (x+1)^0.75 - 1 after optional scaling.
+  # Squash compresses the raw-count dynamic range so that background bins and peak bins both
+  # contribute meaningfully to gradient updates.  Disable to train on raw count scale — in
+  # that case use a loss that is appropriate for count data (e.g. poisson_nll) rather than
+  # poisson_multinomial, and lower learning_rate to compensate for larger gradient magnitudes.
   apply_squash: true
   # Clamp targets using per-track clip thresholds from metadata or defaults.
   apply_clip: true
@@ -26,6 +34,9 @@ data:
   # Required when Arrow files use LZ4/Zstd compression (mmap is not possible on compressed IPC).
   # When true, trainer.max_steps must be set — epoch counting is unavailable.
   streaming: false
+  # CPU RAM budget for the streaming shuffle buffer. The number of samples held in memory is
+  # estimated from dataset metadata at runtime (sequence + label tensor sizes).
+  shuffle_buffer_ram_gb: 8.0
   # Enable random reverse-complement augmentation on the training split only.
   enable_rc_aug: false
   # Expected cropped sequence length fed to the backbone after any shift crop.
@@ -48,8 +59,8 @@ trainer:
   batch_size: 1
   # Per-device validation batch size.
   eval_batch_size: 1
-  # DataLoader worker count per process.
-  num_workers: 4
+  # DataLoader worker count per process (tune to CPUs-per-rank; 8 suits 32 CPUs / 2 GPUs).
+  num_workers: 8
   # Keep DataLoader workers alive between iterations (no-op when num_workers=0).
   persistent_workers: true
   # Batches prefetched per worker; null uses PyTorch default of 2.
@@ -98,22 +109,19 @@ trainer:
   unfreeze_backbone_stages_from_output_end: 0
   # Explicit adapter-reported module names to unfreeze.
   unfreeze_module_names: []
+  # Flush eval predictions/labels to CPU every N steps. null = accumulate entirely on GPU
+  # (safe because prediction_step reduces labels to [batch, n_tracks] before accumulation).
+  eval_accumulation_steps: null
+  # Subsample validation to at most N examples per eval. null = full validation set.
+  # 500–1000 is enough for stable pearson_bin_median across many tracks and is much faster.
+  max_eval_samples: null
+  # Run a full eval pass before the first training step to establish a baseline.
+  eval_on_start: true
+  # Number of eval examples to save prediction plots for. 0 disables plotting.
+  num_plot_examples: 4
   provenance:
     enabled: true
     save_git_diff: true
-  fit_metrics:
-    enabled: true
-    save_per_track: true
-    log_per_track_to_wandb: false
-    group_by: [assay_type, cell_line]
-    high_signal_quantile: 0.95
-  fit_examples:
-    enabled: true
-    num_examples: 4
-    tracks_per_example: 3
-    log_to_wandb: true
-    max_wandb_images: 8
-    seed_offset: 10000
 
 hydra:
   run:

@@ -1,0 +1,62 @@
+# @package _global_
+# Magnitude-fix experiment B2 — per-bin Poisson NLL, no squash.
+#
+# Per-bin Poisson NLL on raw count targets (apply_squash=false).  This is the
+# most natural formulation for count data: Poisson variance = mean, so
+# high-count peak bins generate proportionally large gradient corrections.
+# apply_scale=true is required to convert stored RPKM to raw counts — without
+# it Poisson NLL would be applied to RPKM values (~100× smaller) and lose the
+# count-scale gradient advantage.
+#
+# gradient_clip_norm is raised to 5.0 because Poisson gradients at badly
+# underpredicted peak bins can be very large (1 - target/pred → -199 when
+# pred=50, target=10000).  Clipping at 1.0 would suppress these corrections.
+
+defaults:
+  - override /backbone: borzoi
+  - override /head: transfer_mlp
+  - override /loss: poisson_nll
+
+data:
+  streaming: true
+  enable_rc_aug: true
+  apply_squash: false
+  apply_scale: true
+  apply_clip: true
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+trainer:
+  batch_size: 4
+  eval_batch_size: 4
+  num_workers: 8
+
+  learning_rate: 5.0e-6
+  backbone_learning_rate: 5.0e-7
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_steps: 500
+  max_steps: 7500
+
+  gradient_accumulation_steps: 2
+  mixed_precision: bf16
+  gradient_clip_norm: 5.0
+
+  log_every_n_steps: 10
+  eval_every_n_steps: 500
+  checkpoint_every_n_steps: 500
+
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 2
+
+  report_to: [wandb]
+  metric_for_best_model: pearson_bin_median
+  greater_is_better: true
+
+  max_eval_samples: 500
+  num_plot_examples: 8
+  early_stopping_patience: 5
+
+  init_weights_from_checkpoint: ${oc.env:INIT_WEIGHTS_FROM_CHECKPOINT,""}
