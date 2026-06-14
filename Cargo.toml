@@ -7,6 +7,9 @@ edition = "2021"
 name = "regulonado_rs"
 crate-type = ["cdylib"]
 
+[features]
+debug-writers = []
+
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
 numpy = "0.23"

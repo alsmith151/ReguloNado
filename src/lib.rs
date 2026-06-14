@@ -36,18 +36,21 @@ use pyo3::prelude::*;
 
 #[pymodule]
 fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(debug::extract_bigwig_to_file, m)?)?;
-    m.add_function(wrap_pyfunction!(debug::extract_bigwig_regions, m)?)?;
-    m.add_function(wrap_pyfunction!(debug::extract_all_tracks_to_dir, m)?)?;
-    m.add_function(wrap_pyfunction!(debug::extract_all_tracks_to_file, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        writers::write_arrow_split_from_sample_major,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        writers::write_arrow_split_from_track_major,
-        m
-    )?)?;
+    #[cfg(feature = "debug-writers")]
+    {
+        m.add_function(wrap_pyfunction!(debug::extract_bigwig_to_file, m)?)?;
+        m.add_function(wrap_pyfunction!(debug::extract_bigwig_regions, m)?)?;
+        m.add_function(wrap_pyfunction!(debug::extract_all_tracks_to_dir, m)?)?;
+        m.add_function(wrap_pyfunction!(debug::extract_all_tracks_to_file, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            writers::write_arrow_split_from_sample_major,
+            m
+        )?)?;
+        m.add_function(wrap_pyfunction!(
+            writers::write_arrow_split_from_track_major,
+            m
+        )?)?;
+    }
     m.add_function(wrap_pyfunction!(
         writers::write_arrow_split_from_bigwigs,
         m
