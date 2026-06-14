@@ -17,6 +17,19 @@ BAMNADO = os.environ.get("BAMNADO", "bamnado")
 log = logging.getLogger(__name__)
 
 
+def _check_bamnado() -> None:
+    """Raise a clear error if the bamnado binary is not on PATH."""
+    import shutil
+    if shutil.which(BAMNADO) is None:
+        raise RuntimeError(
+            f"'{BAMNADO}' binary not found on PATH.\n"
+            "Install it from https://github.com/alsmith151/BamNado/releases or set "
+            "the BAMNADO environment variable to the full path of the binary.\n"
+            "Alternatively, skip this step and set scale_factor=1 manually in the "
+            "metadata if your BigWigs are already in raw-count units."
+        )
+
+
 def infer_scale_factor(bw: Path) -> pd.Series:
     path = bw.resolve()
     cmd = [BAMNADO, "bigwig-infer-scale", "--bigwig", str(path), "--format", "json"]
@@ -39,6 +52,7 @@ def infer_scale_factors(
     bw_files: list[Path],
     max_workers: int = 16,
 ) -> pd.DataFrame:
+    _check_bamnado()
     rows: list[pd.Series] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(infer_scale_factor, bw): bw for bw in bw_files}
