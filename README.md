@@ -53,6 +53,34 @@ After Rust changes, rebuild the extension:
 .venv/bin/maturin develop --release
 ```
 
+## External Dependencies
+
+### BamNado
+
+`regulonado calculate-original-scaling` requires the [BamNado](https://github.com/alsmith151/BamNado)
+binary (`bamnado`) on your `PATH`. It reads BigWig header metadata to infer library
+size and compute RPKM→raw-count scale factors.
+
+Install by downloading the latest release binary:
+
+```bash
+# Linux x86-64 — check https://github.com/alsmith151/BamNado/releases for the latest tag
+wget https://github.com/alsmith151/BamNado/releases/latest/download/bamnado-x86_64-unknown-linux-musl.tar.gz
+tar -xzf bamnado-x86_64-unknown-linux-musl.tar.gz
+mv bamnado ~/.local/bin/   # or any directory on PATH
+```
+
+If the binary is not on `PATH`, point to it with the `BAMNADO` environment variable:
+
+```bash
+BAMNADO=/path/to/bamnado regulonado calculate-original-scaling metadata.json
+```
+
+`calculate-original-scaling` is only required when your BigWigs are in RPKM / normalised
+coverage units and you want the model to train on raw read counts. If your BigWigs are
+already in raw-count units, set `apply_scale: false` in the experiment config and skip
+this step.
+
 ## Dataset Workflow
 
 ### Building a dataset
