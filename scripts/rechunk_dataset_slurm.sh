@@ -17,8 +17,8 @@ else
     REPO_DIR="$(dirname "$SCRIPT_DIR")"
 fi
 
-SRC="${SRC:-/home/a/asmith/project_milne_group/software/Regulonado/dataset/2026-05-21-regulonado-v2-compressed}"
-DST="${DST:-/home/a/asmith/project_milne_group/software/Regulonado/dataset/2026-05-21-regulonado-v2-rechunked}"
+: "${SRC:?SRC must be set — path to the source dataset to recompress}"
+: "${DST:?DST must be set — path to the destination for the rechunked dataset}"
 MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-4}"
 LEVEL="${LEVEL:-3}"
 WORKERS="${WORKERS:-8}"

@@ -1,0 +1,60 @@
+# @package _global_
+# Phase 1 — head-only training with the Borzoi backbone fully frozen.
+#
+# The backbone contributes no gradients here: only the transfer_mlp head
+# learns.  This converges quickly (typically <5000 steps) and produces a
+# strong initialisation for subsequent backbone fine-tuning phases.
+#
+# Recommended two-phase workflow:
+#   Phase 1:  EXPERIMENT=head_only_borzoi      → checkpoint A
+#   Phase 2:  EXPERIMENT=stage2_unfreeze2_borzoi INIT_WEIGHTS_FROM_CHECKPOINT=<A>
+
+defaults:
+  - override /backbone: borzoi
+  - override /head: transfer_mlp
+  - override /loss: poisson_multinomial
+
+data:
+  streaming: true
+  enable_rc_aug: false
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+trainer:
+  batch_size: 12
+  eval_batch_size: 12
+  num_workers: 8
+
+  # Head-only: backbone is frozen so only head params are updated.
+  # 1e-3 is safe at this scale because there is no risk of damaging the backbone.
+  learning_rate: 1.0e-3
+  backbone_learning_rate: 1.0e-3  # irrelevant — backbone is frozen
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_steps: 200
+  max_steps: 5000
+
+  gradient_accumulation_steps: 1
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+
+  log_every_n_steps: 10
+  eval_every_n_steps: 250
+  checkpoint_every_n_steps: 250
+
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 0
+
+  report_to: [wandb]
+  metric_for_best_model: pearson_bin_median
+  greater_is_better: true
+
+  # 500 samples is typically enough for a stable pearson_bin_median estimate and is
+  # much faster than evaluating the full validation set.
+  max_eval_samples: 500
+
+  # Stop if fit/pearson_median has not improved for 3 consecutive eval calls (750 steps).
+  # Head-only convergence is fast; patience beyond this is wasted compute.
+  early_stopping_patience: 3

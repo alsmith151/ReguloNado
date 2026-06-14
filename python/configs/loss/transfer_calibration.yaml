@@ -1,0 +1,12 @@
+name: transfer_calibration
+# Combines three terms:
+#   profile_weight: multinomial cross-entropy (shape, keep low to avoid diluting peaks)
+#   total_weight:   log1p MSE on per-track total counts (magnitude calibration)
+#   bin_weight:     log1p MSE on each individual bin (per-bin shape + magnitude)
+#   topk_bin_weight: Huber loss on the top-K bins by target signal (peak focus)
+profile_weight: 0.05
+total_weight: 0.5
+bin_weight: 2.0
+topk_bin_weight: 1.0
+topk_bin_count: 20
+topk_huber_delta: 1.0

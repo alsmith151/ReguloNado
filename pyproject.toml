@@ -48,6 +48,7 @@ jupyter = [
     "ipywidgets",
     "jupyter",
     "nbformat",
+    "jupyterlab",
 ]
 dev = [
     "pytest>=8.0",

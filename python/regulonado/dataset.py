@@ -1279,6 +1279,91 @@ def build_rc_permutation(
     return perm if not np.all(perm == np.arange(n)) else None
 
 
+def transform_signal(
+    signal: np.ndarray,
+    scale_factors: np.ndarray,
+    clip_soft: np.ndarray | float,
+    clip_hard: np.ndarray | float,
+    *,
+    apply_scale: bool = True,
+    apply_squash: bool = True,
+    apply_clip: bool = True,
+) -> np.ndarray:
+    """Apply scale → clip → squash to a (T, L) signal array.
+
+    The three transforms are applied in order:
+
+    1. **Scale** (``apply_scale``): multiply by per-track scale factors that convert the
+       stored normalised BigWig signal (RPKM / coverage) to *raw read counts*.  Scale
+       factors are inferred at dataset-build time as ``library_size * bin_size_kb / 1e6``.
+    2. **Clip** (``apply_clip``): hard-ceiling at per-track ``clip_hard`` thresholds (in
+       raw-count space before squash).
+    3. **Squash** (``apply_squash``): Borzoi-style ``(x+1)^0.75 - 1`` that compresses the
+       raw-count dynamic range while preserving monotonicity.  Above ``clip_soft`` a softer
+       sqrt compression is applied.
+
+    Mirrors the per-sample signal transform inside ``make_transform``.
+    Returns float32.
+    """
+    sf = np.asarray(scale_factors, dtype=np.float32).reshape(-1, 1)
+    cs = np.broadcast_to(np.asarray(clip_soft,  dtype=np.float32), (sf.shape[0],)).reshape(-1, 1)
+    ch = np.broadcast_to(np.asarray(clip_hard,  dtype=np.float32), (sf.shape[0],)).reshape(-1, 1)
+
+    out = np.asarray(signal, dtype=np.float32).copy()
+    np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+    np.maximum(out, 0.0, out=out)
+    if apply_scale:
+        out *= sf
+    if apply_clip:
+        np.minimum(out, ch, out=out)
+    if apply_squash:
+        out = (np.power(out + 1.0, 0.75) - 1.0).astype(np.float32, copy=False)
+        if apply_clip:
+            cs_sq = (np.power(cs + 1.0, 0.75) - 1.0).astype(np.float32)
+            mask = out > cs_sq
+            if mask.any():
+                out = np.where(
+                    mask,
+                    cs_sq - 1.0 + np.sqrt(np.maximum(out - cs_sq + 1.0, 0.0)),
+                    out,
+                ).astype(np.float32)
+    return out
+
+
+def inverse_transform_signal(
+    signal: np.ndarray,
+    scale_factors: np.ndarray | None = None,
+    *,
+    apply_squash: bool = True,
+    apply_scale: bool = True,
+) -> np.ndarray:
+    """Reverse the squash and/or scale applied by ``transform_signal`` / ``make_transform``.
+
+    Transforms are reversed in the opposite order to ``transform_signal``:
+
+    1. **Unsquash** (``apply_squash``): ``(x + 1)^(4/3) - 1`` (inverse of ``(x+1)^0.75 - 1``).
+    2. **Unscale** (``apply_scale``): divide by per-track scale factors to convert raw read
+       counts back to the original normalised BigWig signal (RPKM / coverage).
+
+    After inversion the signal is in the same units as the original BigWig (typically RPKM).
+    To obtain *raw counts* stop after the unsquash step (pass ``apply_scale=False``).
+
+    Args:
+        signal: (T, L) or (B, T, L) array in transformed (squashed/scaled) space.
+        scale_factors: Per-track scale factors, shape (T,). Required when apply_scale=True.
+    """
+    out = np.maximum(np.asarray(signal, dtype=np.float32), 0.0)
+    if apply_squash:
+        out = np.power(out + 1.0, 4.0 / 3.0) - 1.0
+        np.maximum(out, 0.0, out=out)
+    if apply_scale and scale_factors is not None:
+        sf = np.asarray(scale_factors, dtype=np.float32)
+        # Reshape to broadcast over last two dims regardless of batch dim.
+        sf = sf.reshape(*([1] * (out.ndim - 2)), -1, 1)
+        out = out / np.maximum(sf, 1e-8)
+    return out
+
+
 def make_transform(
     scale_factors: np.ndarray,
     clip_soft: np.ndarray | float,
@@ -1322,25 +1407,12 @@ def make_transform(
     ch = np.broadcast_to(np.asarray(clip_hard, dtype=np.float32), (n_tracks,)).copy()
 
     def _transform_signal(labels: np.ndarray, _sf: np.ndarray, _cs: np.ndarray, _ch: np.ndarray) -> np.ndarray:
-        out = np.asarray(labels, dtype=np.float32).copy()
-        np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
-        np.maximum(out, 0.0, out=out)
-        if apply_scale:
-            out *= _sf.reshape(-1, 1)
-        if apply_clip:
-            np.minimum(out, _ch.reshape(-1, 1), out=out)
-        if apply_squash:
-            out = (np.power(out + 1.0, 0.75) - 1.0).astype(np.float32, copy=False)
-            if apply_clip:
-                cs_squashed = (np.power(_cs.reshape(-1, 1) + 1.0, 0.75) - 1.0).astype(np.float32)
-                mask = out > cs_squashed
-                if mask.any():
-                    out = np.where(
-                        mask,
-                        cs_squashed - 1.0 + np.sqrt(np.maximum(out - cs_squashed + 1.0, 0.0)),
-                        out,
-                    ).astype(np.float32)
-        return out
+        return transform_signal(
+            labels, _sf, _cs, _ch,
+            apply_scale=apply_scale,
+            apply_squash=apply_squash,
+            apply_clip=apply_clip,
+        )
 
     def transform_batch(batch: dict) -> dict:
         batch = dict(batch)

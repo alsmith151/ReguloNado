@@ -2702,6 +2702,7 @@ jupyter = [
     { name = "ipykernel" },
     { name = "ipywidgets" },
     { name = "jupyter" },
+    { name = "jupyterlab" },
     { name = "nbformat" },
 ]
 
@@ -2717,6 +2718,7 @@ requires-dist = [
     { name = "ipykernel", marker = "extra == 'jupyter'" },
     { name = "ipywidgets", marker = "extra == 'jupyter'" },
     { name = "jupyter", marker = "extra == 'jupyter'" },
+    { name = "jupyterlab", marker = "extra == 'jupyter'" },
     { name = "lightning", specifier = ">=2.2,<3" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.0" },

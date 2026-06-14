@@ -1,0 +1,59 @@
+# @package _global_
+# Magnitude-fix experiment D — high Poisson weight baseline.
+#
+# Keeps the existing poisson_multinomial loss but raises poisson_weight from
+# 0.2 to 1.0 (equal weighting with the multinomial term).  The Poisson NLL
+# on the total window sum directly penalises magnitude errors, so increasing
+# its weight is the minimal-disruption fix to compare against the per-bin losses.
+
+defaults:
+  - override /backbone: borzoi
+  - override /head: transfer_mlp
+  - override /loss: poisson_multinomial
+
+data:
+  streaming: true
+  enable_rc_aug: true
+  apply_squash: true
+  apply_scale: true
+  apply_clip: true
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+loss:
+  poisson_weight: 1.0
+
+trainer:
+  batch_size: 4
+  eval_batch_size: 4
+  num_workers: 8
+
+  learning_rate: 2.0e-5
+  backbone_learning_rate: 5.0e-7
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_steps: 500
+  max_steps: 7500
+
+  gradient_accumulation_steps: 2
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+
+  log_every_n_steps: 10
+  eval_every_n_steps: 500
+  checkpoint_every_n_steps: 500
+
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 2
+
+  report_to: [wandb]
+  metric_for_best_model: pearson_bin_median
+  greater_is_better: true
+
+  max_eval_samples: 500
+  num_plot_examples: 8
+  early_stopping_patience: 5
+
+  init_weights_from_checkpoint: ${oc.env:INIT_WEIGHTS_FROM_CHECKPOINT,""}

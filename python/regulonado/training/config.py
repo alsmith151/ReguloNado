@@ -11,25 +11,6 @@ class ProvenanceConfig:
 
 
 @dataclass(slots=True)
-class FitMetricsConfig:
-    enabled: bool = True
-    save_per_track: bool = True
-    log_per_track_to_wandb: bool = False
-    group_by: tuple[str, ...] = ("assay_type", "cell_line")
-    high_signal_quantile: float = 0.95
-
-
-@dataclass(slots=True)
-class FitExamplesConfig:
-    enabled: bool = True
-    num_examples: int = 4
-    tracks_per_example: int = 3
-    log_to_wandb: bool = True
-    max_wandb_images: int = 8
-    seed_offset: int = 10_000
-
-
-@dataclass(slots=True)
 class TrainerConfig:
     """Runtime training knobs shared by the Hydra entrypoint and Trainer wiring.
 
@@ -89,9 +70,22 @@ class TrainerConfig:
     # Best-model selection metric passed to TrainingArguments.
     metric_for_best_model: str = "eval_loss"
     greater_is_better: bool = False
+    # Stop training when eval metric has not improved for this many eval calls.
+    # None disables early stopping.
+    early_stopping_patience: int | None = None
+    # Minimum absolute change in metric to count as an improvement.
+    early_stopping_threshold: float = 0.0
+    # Flush accumulated eval predictions/labels to CPU every N eval batches.
+    # None means accumulate entirely on GPU (safe when labels are pre-reduced to [batch, n_tracks]).
+    eval_accumulation_steps: int | None = None
+    # Subsample the validation split to at most this many examples per eval call.
+    # None = use the full validation set. 500–1000 is enough for stable pearson_median.
+    max_eval_samples: int | None = None
+    # Run a full evaluation pass before the first training step.
+    eval_on_start: bool = True
+    # Number of eval examples to save prediction plots for. 0 disables plotting.
+    num_plot_examples: int = 4
     provenance: ProvenanceConfig = field(default_factory=ProvenanceConfig)
-    fit_metrics: FitMetricsConfig = field(default_factory=FitMetricsConfig)
-    fit_examples: FitExamplesConfig = field(default_factory=FitExamplesConfig)
 
     @property
     def unfreeze_backbone_blocks_from_end(self) -> int:

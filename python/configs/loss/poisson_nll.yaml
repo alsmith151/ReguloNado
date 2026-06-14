@@ -1,0 +1,5 @@
+name: poisson_nll
+# Per-bin Poisson NLL with no multinomial normalisation.
+# Each bin is penalised independently: gradient = 1 - target/pred.
+# Strong magnitude correction at underpredicted peaks.
+# Works with apply_squash: true (default) or false.
