@@ -1,0 +1,65 @@
+# @package _global_
+# Condition-agnostic, magnitude-aware transfer for heterogeneous tracks.
+#
+# Same setup as condition_agnostic_borzoi (Borzoi backbone, no per-track
+# metadata, top 2 stages unfrozen) but with an amplitude-aware objective instead
+# of the profile-only default:
+#   - loss: transfer_calibration → per-bin log1p MSE + total-count log1p MSE +
+#                                  a Huber term on the top peak bins;
+#   - apply_squash: false        → train on the true scaled/clipped range so the
+#                                  head learns real peak heights, not a compressed
+#                                  profile;
+#   - metric_for_best_model: eval_loss → amplitude-aware checkpoint selection.
+#
+# Reach for this over condition_agnostic_borzoi when getting peak *magnitudes*
+# right matters (the default poisson_multinomial loss mostly governs shape). It
+# is the general, target-independent form of the older magnitude_fix sweep.
+
+defaults:
+  - override /backbone: borzoi
+  - override /head: transfer_mlp
+  - override /loss: transfer_calibration
+
+data:
+  streaming: true
+  enable_rc_aug: true
+  apply_scale: true
+  apply_clip: true
+  apply_squash: false
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+loss:
+  profile_weight: 0.05
+  total_weight: 0.5
+  bin_weight: 2.0
+  topk_bin_weight: 2.0
+  topk_bin_count: 32
+  topk_huber_delta: 1.0
+
+trainer:
+  batch_size: 8
+  eval_batch_size: 8
+  num_workers: 8
+  learning_rate: 5.0e-4
+  backbone_learning_rate: 1.0e-5
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_steps: 500
+  max_steps: 10000
+  gradient_accumulation_steps: 2
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+  log_every_n_steps: 10
+  eval_every_n_steps: 500
+  checkpoint_every_n_steps: 500
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 2
+  report_to: [wandb]
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+  max_eval_samples: 500
+  early_stopping_patience: 5
+  init_weights_from_checkpoint: ${oc.env:INIT_WEIGHTS_FROM_CHECKPOINT,""}

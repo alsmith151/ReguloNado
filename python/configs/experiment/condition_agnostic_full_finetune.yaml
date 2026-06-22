@@ -1,0 +1,52 @@
+# @package _global_
+# Condition-agnostic full fine-tune — the whole Borzoi backbone is trainable.
+#
+# The "go big" end of the agnostic ladder:
+#   condition_agnostic_head_only  → backbone frozen, head only
+#   condition_agnostic_borzoi     → frozen backbone, top 2 stages unfrozen
+#   condition_agnostic_full_finetune (this) → every backbone parameter trainable
+#
+# Full fine-tuning has the most capacity but the most risk of drifting away from
+# the pretrained representation, so the backbone learning rate is very low, the
+# warmup is long, and gradient clipping is on. Prefer warm-starting from a
+# head-only or stage-2 checkpoint (INIT_WEIGHTS_FROM_CHECKPOINT) rather than
+# running this cold, and use it when you have a large dataset for the new target.
+
+defaults:
+  - override /backbone: borzoi
+  - override /head: transfer_mlp
+  - override /loss: poisson_multinomial
+
+data:
+  streaming: true
+  enable_rc_aug: true
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+trainer:
+  batch_size: 4
+  eval_batch_size: 4
+  num_workers: 8
+  learning_rate: 2.0e-4
+  backbone_learning_rate: 1.0e-6
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_steps: 1000
+  max_steps: 15000
+  gradient_accumulation_steps: 2
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+  log_every_n_steps: 10
+  eval_every_n_steps: 500
+  checkpoint_every_n_steps: 500
+  # The whole backbone is trainable: no freeze, no selective unfreezing.
+  freeze_backbone: false
+  unfreeze_backbone_stages_from_output_end: 0
+  report_to: [wandb]
+  metric_for_best_model: pearson_bin_median
+  greater_is_better: true
+  max_eval_samples: 500
+  early_stopping_patience: 5
+  init_weights_from_checkpoint: ${oc.env:INIT_WEIGHTS_FROM_CHECKPOINT,""}
