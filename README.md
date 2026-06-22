@@ -287,8 +287,22 @@ DATA_DIR=... PEAK_LOSS=topk_reweight bash scripts/train_pipeline_slurm.sh
 
 ## Experiment & loss configs
 
-All hyperparameters live in Hydra YAML. To start a new experiment, copy the
-nearest config in `python/configs/experiment/` and adjust what matters.
+All hyperparameters live in Hydra YAML. Browse them with `regulonado experiments`
+and inspect one with `regulonado experiments show <name>`. To start a new
+experiment, copy the nearest config in `python/configs/experiment/` and adjust
+what matters.
+
+General-purpose, condition-agnostic recipes (no per-track metadata, good
+starting points for a new dataset):
+
+| Experiment config | Purpose |
+|--------|-------------|
+| `condition_agnostic_borzoi.yaml` | Default: Borzoi, top 2 stages unfrozen, poisson_multinomial |
+| `condition_agnostic_enformer.yaml` | Same recipe on the Enformer backbone |
+| `condition_agnostic_calibrated.yaml` | Magnitude-aware: transfer_calibration loss, no squash |
+| `condition_agnostic_full_finetune.yaml` | Whole backbone trainable at a very low LR |
+
+Progressive Borzoi fine-tuning workflow (each phase warm-starts from the last):
 
 | Experiment config | Phase / purpose |
 |--------|-------------|
@@ -296,7 +310,10 @@ nearest config in `python/configs/experiment/` and adjust what matters.
 | `stage2_unfreeze2_borzoi.yaml` | Phase 2: 2 output-end stages unfrozen, lr=2e-4/2e-6 |
 | `stage3_deep_finetune_borzoi.yaml` | Phase 3: 4 stages + RC augmentation, lr=5e-5/5e-7 |
 | `stage4_peak_finetune_borzoi.yaml` | Phase 4: topk_additive loss for peak sharpening |
-| `magnitude_fix_*.yaml` | Ablation templates for loss-function / squash sweeps |
+
+Older loss/squash ablation templates (`magnitude_fix_*.yaml`) now live in
+`scripts/experiment/`. They are still listed by `regulonado experiments` (tagged
+`(local)`) and runnable both locally and on Slurm.
 
 Loss configs live in `python/configs/loss/`. Select one in an experiment YAML with
 `defaults: - override /loss: <name>`.
