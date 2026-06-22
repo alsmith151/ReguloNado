@@ -55,6 +55,15 @@ fast when no `python/regulonado/_rs*.so` extension is present.
 
 For editable reinstalls, `uv sync` also rebuilds the extension in the repo venv.
 
+The debug entry points (`extract_bigwig_to_file`, `extract_all_tracks_to_dir`, etc.) are gated
+behind the `debug-writers` Cargo feature and are **not** included in a normal build.  To expose
+them for benchmarking individual pipeline stages:
+
+```bash
+VIRTUAL_ENV=/ceph/project/milne_group/asmith/software/Regulonado/.venv \
+  .venv/bin/maturin develop --release --features debug-writers
+```
+
 ## Common workflows
 
 Scale BigWigs:
