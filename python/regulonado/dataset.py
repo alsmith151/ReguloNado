@@ -35,6 +35,7 @@ Example::
 """
 from __future__ import annotations
 
+import concurrent.futures
 import gzip
 import hashlib
 import json
@@ -42,13 +43,15 @@ import os
 import shutil
 import subprocess
 import time
-import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Iterator, Sequence
+from typing import TYPE_CHECKING, Callable, Iterator, Sequence
 
 import numpy as np
 from loguru import logger
+
+if TYPE_CHECKING:
+    from datasets import Features
 
 _DEFAULT_CONTEXT = 524_288
 _DEFAULT_PRED_BINS = 6_144
@@ -128,7 +131,10 @@ def _stage_files(
     else:
         logger.info(f"Staging {n} file(s) → {scratch} (workers={workers})")
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = {pool.submit(_rsync_one, src, scratch, companion_suffixes): src for src in unique_srcs}
+        futs = {
+            pool.submit(_rsync_one, src, scratch, companion_suffixes): src
+            for src in unique_srcs
+        }
         staged_map: dict[str, str] = {}
         for done, fut in enumerate(concurrent.futures.as_completed(futs), 1):
             src = futs[fut]
@@ -229,7 +235,9 @@ def _resolve_bigwig_tracks(
             identity_canonical[source_index] = source_index
             survivors.append(rec)
 
-    content_canonical: dict[int, int] = {int(rec["source_index"]): int(rec["source_index"]) for rec in survivors}
+    content_canonical: dict[int, int] = {
+        int(rec["source_index"]): int(rec["source_index"]) for rec in survivors
+    }
     content_hash_by_source: dict[int, str] = {}
     n_hashed = 0
     n_content_dropped = 0
@@ -263,7 +271,9 @@ def _resolve_bigwig_tracks(
         final_canonical[source_index] = content_canonical.get(identity_source, identity_source)
 
     final_source_indices = {
-        source_index for source_index, canonical in final_canonical.items() if source_index == canonical
+        source_index
+        for source_index, canonical in final_canonical.items()
+        if source_index == canonical
     }
     final_records: list[dict] = []
     final_track_index_by_source: dict[int, int] = {}
@@ -278,7 +288,9 @@ def _resolve_bigwig_tracks(
         dedupe_method = "content" if content_hash is not None else (
             "identity" if dedupe_tracks in {"identity", "content"} else "none"
         )
-        dedupe_key = f"content:{content_hash}" if content_hash is not None else str(rec["identity_key"])
+        dedupe_key = (
+            f"content:{content_hash}" if content_hash is not None else str(rec["identity_key"])
+        )
         out = {
             "track_index": track_index,
             "source_index": source_index,
@@ -326,7 +338,8 @@ def _resolve_bigwig_tracks(
         logger.info(
             f"Track dedupe mode={dedupe_tracks}: {len(final_paths)} final track(s) from "
             f"{len(requested)} requested; dropped {len(dropped_records)} duplicate(s) "
-            f"({n_identity_dropped} identity, {n_content_dropped} content); hashed {n_hashed} file(s)"
+            f"({n_identity_dropped} identity, {n_content_dropped} content); "
+            f"hashed {n_hashed} file(s)"
         )
 
     provenance = {
@@ -655,7 +668,9 @@ def sample_generator(
     filter_fn = None
     if dataset_folds:
         folds = set(dataset_folds)
-        filter_fn = lambda df: df.filter(pl.col("column_4").is_in(folds))
+
+        def filter_fn(df):
+            return df.filter(pl.col("column_4").is_in(folds))
 
     gid = GenomeIntervalDataset(
         str(bed_file),
@@ -772,7 +787,9 @@ def build_dataset(
     if splits is None:
         splits = DEFAULT_SPLITS
     if shift_max_bp % bin_size != 0:
-        raise ValueError(f"shift_max_bp ({shift_max_bp}) must be a multiple of bin_size ({bin_size})")
+        raise ValueError(
+            f"shift_max_bp ({shift_max_bp}) must be a multiple of bin_size ({bin_size})"
+        )
 
     output_dir = Path(output_dir)
     bw_paths, track_metadata = _resolve_bigwig_tracks(
@@ -839,7 +856,10 @@ def build_dataset(
         filter_fn = None
         if folds:
             folds_set = set(folds)
-            filter_fn = lambda df, f=folds_set: df.filter(pl.col("column_4").is_in(f))
+
+            def filter_fn(df, f=folds_set):
+                return df.filter(pl.col("column_4").is_in(f))
+
         gid_probe = GenomeIntervalDataset(
             active_bed,
             fasta_file=active_fasta,
@@ -856,7 +876,11 @@ def build_dataset(
 
         split_datasets[split] = Dataset.from_generator(
             sample_generator,
-            gen_kwargs={**gen_kwargs_base, "indices": list(range(n_samples)), "dataset_folds": tuple(folds)},
+            gen_kwargs={
+                **gen_kwargs_base,
+                "indices": list(range(n_samples)),
+                "dataset_folds": tuple(folds),
+            },
             features=features,
             cache_dir=cache_dir,
             num_proc=num_proc,
@@ -890,7 +914,9 @@ def build_dataset(
 
     logger.info(f"Dataset saved to {output_dir}")
     if not return_dataset:
-        logger.info("Skipping final DatasetDict.load_from_disk(); caller can reopen output_dir if needed")
+        logger.info(
+            "Skipping final DatasetDict.load_from_disk(); caller can reopen output_dir if needed"
+        )
         return None
     return DatasetDict.load_from_disk(str(output_dir))
 
@@ -953,7 +979,9 @@ def build_dataset_fast(
     if splits is None:
         splits = DEFAULT_SPLITS
     if shift_max_bp % bin_size != 0:
-        raise ValueError(f"shift_max_bp ({shift_max_bp}) must be a multiple of bin_size ({bin_size})")
+        raise ValueError(
+            f"shift_max_bp ({shift_max_bp}) must be a multiple of bin_size ({bin_size})"
+        )
 
     bed_file = Path(bed_file)
     output_dir = Path(output_dir)
@@ -982,7 +1010,7 @@ def build_dataset_fast(
         active_bed = _stage_files([bed_file], stage_dir)[0]
         active_bw_paths = _stage_files(bw_paths, stage_dir)
 
-    bed_rows = _load_bed_rows(bed_file)
+    bed_rows = _load_bed_rows(active_bed)
     n_all_samples = len(bed_rows)
     signal_intervals = _signal_intervals(bed_rows, n_pred_bins, bin_size, shift_max_bp)
     logger.info(
@@ -992,11 +1020,13 @@ def build_dataset_fast(
     )
     if _is_remote_fs(scratch_out):
         logger.warning(
-            f"scratch_out resolves to {str(scratch_out.resolve())!r} — Arrow I/O will hit remote storage"
+            f"scratch_out resolves to {str(scratch_out.resolve())!r} — "
+            f"Arrow I/O will hit remote storage"
         )
     if _is_remote_fs(output_dir):
         logger.info(
-            f"output_dir resolves to {str(output_dir.resolve())!r}; only the final rsync should hit remote storage"
+            f"output_dir resolves to {str(output_dir.resolve())!r}; "
+            f"only the final rsync should hit remote storage"
         )
     # Arrow ListArray uses i32 offsets; batch * n_tracks * n_bins must fit.
     _i32_max = 2_147_483_647
@@ -1076,7 +1106,8 @@ def build_dataset_fast(
         splits_to_build.append(split)
         if chrom_filter_set is not None:
             logger.info(
-                f"Split '{split}': {len(idx)} samples (filtered to chroms {sorted(chrom_filter_set)})"
+                f"Split '{split}': {len(idx)} samples "
+                f"(filtered to chroms {sorted(chrom_filter_set)})"
             )
         else:
             logger.info(f"Split '{split}': {len(idx)} samples")
@@ -1094,8 +1125,8 @@ def build_dataset_fast(
     if strategy not in {"chrom_pass", "fast"}:
         raise ValueError(f"strategy must be 'chrom_pass' or 'fast', got {strategy!r}")
     from regulonado._rs import (  # type: ignore[import]
-        write_arrow_splits_chrom_pass,
         write_arrow_split_from_bigwigs,
+        write_arrow_splits_chrom_pass,
     )
 
     scratch_out.mkdir(parents=True, exist_ok=True)
@@ -1242,7 +1273,9 @@ def build_dataset_fast(
 
     logger.info(f"Dataset saved to {output_dir}")
     if not return_dataset:
-        logger.info("Skipping final DatasetDict.load_from_disk(); caller can reopen output_dir if needed")
+        logger.info(
+            "Skipping final DatasetDict.load_from_disk(); caller can reopen output_dir if needed"
+        )
         return None
     return DatasetDict.load_from_disk(str(output_dir))
 
@@ -1253,7 +1286,9 @@ def build_dataset_fast(
 
 def build_rc_permutation(
     track_records: list[dict],
-    pairing_fields: tuple[str, ...] = ("condition_id", "cell_line_id", "assay_type_id", "target_id"),
+    pairing_fields: tuple[str, ...] = (
+        "condition_id", "cell_line_id", "assay_type_id", "target_id",
+    ),
 ) -> np.ndarray | None:
     """Return per-track permutation that swaps paired +/- strand channels for RC aug."""
     if not track_records:
@@ -1406,7 +1441,9 @@ def make_transform(
     cs = np.broadcast_to(np.asarray(clip_soft, dtype=np.float32), (n_tracks,)).copy()
     ch = np.broadcast_to(np.asarray(clip_hard, dtype=np.float32), (n_tracks,)).copy()
 
-    def _transform_signal(labels: np.ndarray, _sf: np.ndarray, _cs: np.ndarray, _ch: np.ndarray) -> np.ndarray:
+    def _transform_signal(
+        labels: np.ndarray, _sf: np.ndarray, _cs: np.ndarray, _ch: np.ndarray
+    ) -> np.ndarray:
         return transform_signal(
             labels, _sf, _cs, _ch,
             apply_scale=apply_scale,
@@ -1438,7 +1475,11 @@ def make_transform(
 
             # --- shift crop (always applied when shift buffer was stored)
             if shift_max_bins > 0:
-                s = shift_max_bins if center_crop else int(np.random.randint(0, 2 * shift_max_bins + 1))
+                s = (
+                    shift_max_bins
+                    if center_crop
+                    else int(np.random.randint(0, 2 * shift_max_bins + 1))
+                )
                 if seq is not None:
                     seq = seq[:, s * bin_size : s * bin_size + context_length]
                 if sig is not None:

@@ -174,12 +174,16 @@ def topk_additive_loss(
     L = pred.shape[-1]
     k = max(1, int(round(topk_fraction * L)))
 
-    base_loss = poisson_multinomial_loss(pred, target, poisson_weight=poisson_weight, epsilon=epsilon)
+    base_loss = poisson_multinomial_loss(
+        pred, target, poisson_weight=poisson_weight, epsilon=epsilon
+    )
 
     topk_idx = target.topk(k, dim=-1).indices          # [B, T, k]
     pred_k   = pred.gather(-1, topk_idx)
     target_k = target.gather(-1, topk_idx)
-    peak_loss = poisson_multinomial_loss(pred_k, target_k, poisson_weight=poisson_weight, epsilon=epsilon)
+    peak_loss = poisson_multinomial_loss(
+        pred_k, target_k, poisson_weight=poisson_weight, epsilon=epsilon
+    )
 
     return base_loss + topk_weight * peak_loss
 
