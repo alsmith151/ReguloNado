@@ -87,6 +87,22 @@ Run the SLURM build wrapper with environment overrides:
 OVERWRITE=true PROFILE=true sbatch scripts/build_dataset_slurm.sh
 ```
 
+Discover and launch training. Experiment discovery lives in
+`python/regulonado/experiments.py` and is shared by the `experiments` command,
+the `train --interactive` picker, and `train`'s did-you-mean validation:
+
+```bash
+.venv/bin/regulonado experiments                       # list experiments + summaries
+.venv/bin/regulonado experiments show <name>           # description + effective settings
+.venv/bin/regulonado train DATASET -e <name> --slurm   # submit scripts/train_slurm.sh via sbatch
+.venv/bin/regulonado train --interactive               # guided picker
+```
+
+`train --slurm` shells out to `scripts/train_slurm.sh`, passing `EXPERIMENT` /
+`DATA_DIR` / `REPO_DIR` / `RUN_DIR` / `NPROC_PER_NODE` via the environment and
+appending friendly/raw Hydra overrides after the script (forwarded by `"$@"`).
+The local path keeps passing `+experiment=` / `data.path=` as Hydra args.
+
 ## Running tests
 
 ```bash
