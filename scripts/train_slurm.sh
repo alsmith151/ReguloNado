@@ -43,11 +43,13 @@ set -euo pipefail
 
 if [[ -n "${REPO_DIR:-}" ]]; then
     REPO_DIR="$(cd "$REPO_DIR" && pwd)"
-elif [[ -n "${SLURM_SUBMIT_DIR:-}" && -d "$SLURM_SUBMIT_DIR/python/regulonado" ]]; then
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
     REPO_DIR="$(cd "$SLURM_SUBMIT_DIR" && pwd)"
 else
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    REPO_DIR="$(dirname "$SCRIPT_DIR")"
+    # BASH_SOURCE[0] is unreliable under SLURM (script is copied to spool dir).
+    # Require REPO_DIR to be set explicitly in that case.
+    echo "ERROR: cannot determine REPO_DIR — set it explicitly before sbatch" >&2
+    exit 1
 fi
 
 SCRIPTS_DIR="${REPO_DIR}/scripts"
@@ -56,7 +58,6 @@ WANDB_PROJECT="${WANDB_PROJECT:-regulonado}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-${EXPERIMENT}-${SLURM_JOB_ID:-local}}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
 
-source "$REPO_DIR/.venv/bin/activate"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-${RUN_DIR}/matplotlib}"
 mkdir -p "$REPO_DIR/logs" "$RUN_DIR" "$MPLCONFIGDIR"
 
