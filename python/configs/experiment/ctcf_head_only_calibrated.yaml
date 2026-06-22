@@ -1,0 +1,110 @@
+# @package _global_
+# CTCF head-only training — magnitude-calibrated.
+#
+# Purpose: train a transfer_mlp head on a sharp, sparse single-factor signal
+# (CTCF ChIP) with a frozen Borzoi backbone, without the amplitude collapse seen
+# under the default head_only_borzoi recipe.
+#
+# Why head_only_borzoi collapses to a flat prediction on CTCF:
+#   1. apply_squash flattens the multinomial *target*. The multinomial term is
+#      cross-entropy against the normalised target profile; (x+1)^0.75-1
+#      compresses the peak:background ratio before normalisation, so the head is
+#      trained toward a flatter profile than the truth.
+#   2. poisson_multinomial only governs shape, and its one magnitude term
+#      (the total-count Poisson NLL) is down-weighted to 0.2 — far too weak to
+#      pull amplitude up on data this sparse.
+#   3. metric_for_best_model: pearson_bin_median is scale-invariant, so even
+#      checkpoint selection is blind to amplitude — a peak predicted at 1/20th
+#      height scores almost as well as a perfect one.
+#
+# This config fixes all three:
+#   - apply_squash: false      → train on the true (scaled, clipped) dynamic range.
+#   - loss: transfer_calibration → per-bin log1p MSE (bin_weight) + total-count
+#                                  log1p MSE (total_weight) + explicit top-K peak
+#                                  Huber (topk_bin_weight); the small profile term
+#                                  retains a little shape pressure. Every term is
+#                                  magnitude-aware, unlike the multinomial loss.
+#   - metric_for_best_model: eval_loss → the composite loss is amplitude-sensitive,
+#                                  so eval_loss now selects for peak height.
+#     pearson_top128_median is still logged (trainer.topk_bins) for monitoring
+#     peak-position tracking alongside the amplitude-aware selection metric.
+#
+# Backbone stays frozen: this isolates the objective fix as a clean A/B against
+# the current head_only_borzoi run. Once peaks appear, warm-start a backbone
+# fine-tune to sharpen them:
+#   EXPERIMENT=stage2_unfreeze2_borzoi \
+#   INIT_WEIGHTS_FROM_CHECKPOINT=<this run's best checkpoint> ...
+#
+# Usage:
+#   DATA_DIR=/ceph/.../2026-06-22-regulonado-ctcf-test \
+#   EXPERIMENT=ctcf_head_only_calibrated sbatch scripts/train_slurm.sh
+
+defaults:
+  - override /backbone: borzoi
+  - override /head: transfer_mlp
+  - override /loss: transfer_calibration
+
+data:
+  streaming: true
+  enable_rc_aug: false
+  # Keep scale + clip (absolute magnitude, outlier control); drop squash so the
+  # head learns the real peak prominence rather than a compressed profile.
+  apply_scale: true
+  apply_clip: true
+  apply_squash: false
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+loss:
+  # profile (multinomial) kept low — shape is mostly carried by the per-bin term.
+  profile_weight: 0.05
+  # total-count log1p MSE: calibrates per-track magnitude.
+  total_weight: 0.5
+  # per-bin log1p MSE: the main driver of peak height across all bins.
+  bin_weight: 2.0
+  # explicit Huber on the strongest bins per track — sharpens CTCF peaks.
+  # Slightly stronger / wider than the loss default (1.0 / 20) for sparse sharp signal.
+  topk_bin_weight: 2.0
+  topk_bin_count: 32
+  topk_huber_delta: 1.0
+
+trainer:
+  batch_size: 12
+  eval_batch_size: 12
+  num_workers: 8
+
+  # Head-only: backbone frozen, so a high head LR is safe (no backbone to damage).
+  learning_rate: 1.0e-3
+  backbone_learning_rate: 1.0e-3  # irrelevant — backbone is frozen
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_steps: 200
+  max_steps: 5000
+
+  gradient_accumulation_steps: 1
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+
+  log_every_n_steps: 10
+  eval_every_n_steps: 250
+  checkpoint_every_n_steps: 250
+
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 0
+
+  report_to: [wandb]
+  # Amplitude-aware selection: the calibration loss penalises peak-height error,
+  # so eval_loss is the right best-model criterion here (pearson is scale-free).
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+  # Also log pearson_top128_median to watch peak-position tracking during the run.
+  topk_bins: 128
+
+  max_eval_samples: 500
+  num_plot_examples: 8
+  # Calibration loss can plateau more slowly than a pure profile loss.
+  early_stopping_patience: 5
+
+  init_weights_from_checkpoint: ${oc.env:INIT_WEIGHTS_FROM_CHECKPOINT,""}

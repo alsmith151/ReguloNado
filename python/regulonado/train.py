@@ -402,6 +402,7 @@ def _make_backbone_spec(
         pretrained_name=backbone_cfg.get("pretrained_name"),
         target_length=backbone_cfg.get("target_length") or target_length,
         config_overrides=dict(backbone_cfg.get("config_overrides") or {}),
+        allow_random_init=bool(backbone_cfg.get("allow_random_init", False)),
     )
 
 
@@ -619,7 +620,9 @@ class RegulonadoTrainer(Trainer):
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self._metrics_preprocess: Callable | None = kwargs.pop("preprocess_logits_for_metrics", None)
+        self._metrics_preprocess: Callable | None = kwargs.pop(
+            "preprocess_logits_for_metrics", None
+        )
         super().__init__(*args, **kwargs)
 
     def prediction_step(

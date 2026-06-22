@@ -1,0 +1,111 @@
+# @package _global_
+# Sharp transfer learning — adapt a pretrained Borzoi backbone to a new, sparse,
+# high-dynamic-range target (TF ChIP such as CTCF, sharp histone marks, etc.).
+#
+# This is the general-purpose recipe for "sharp" signals, where most of the
+# window is near-baseline and signal is concentrated in a few tall, narrow peaks.
+# The defaults (poisson_multinomial + squash + a scale-free selection metric) are
+# tuned for *broad* coverage and collapse to a flat prediction on sharp data,
+# because every part of that pipeline is amplitude-blind:
+#   - squash compresses the peak:background ratio the head must learn;
+#   - the multinomial loss only governs profile shape, with a weak (0.2) total term;
+#   - pearson_bin_median selection ignores amplitude entirely.
+#
+# This recipe makes the whole pipeline magnitude-aware and gives the model the
+# output-side capacity to actually resolve sharp peaks:
+#   - apply_squash: false        → train on the true scaled/clipped dynamic range.
+#   - loss: transfer_calibration → per-bin log1p MSE + total-count log1p MSE +
+#                                  an explicit Huber term on the top peak bins.
+#   - unfreeze top 2 backbone stages at a low LR → lets the output-side conv/
+#                                  transformer blocks sharpen peaks the frozen
+#                                  features can only approximate, without
+#                                  disturbing the pretrained representation.
+#   - metric_for_best_model: eval_loss → amplitude-aware checkpoint selection.
+#
+# Recommended two-phase use (most robust):
+#   Phase 1:  EXPERIMENT=ctcf_head_only_calibrated   → checkpoint A (head warms up,
+#             backbone frozen, no risk of damaging pretrained weights).
+#   Phase 2:  EXPERIMENT=sharp_transfer_learning INIT_WEIGHTS_FROM_CHECKPOINT=<A>
+#
+# Running cold (no warm-start) is also safe here: the long warmup + low backbone
+# LR + gradient clipping keep early head gradients from corrupting the backbone.
+#
+# Usage:
+#   DATA_DIR=/ceph/.../<sharp-target-dataset> \
+#   EXPERIMENT=sharp_transfer_learning \
+#   [INIT_WEIGHTS_FROM_CHECKPOINT=<head-only checkpoint>] \
+#   sbatch scripts/train_slurm.sh
+
+defaults:
+  - override /backbone: borzoi
+  - override /head: transfer_mlp
+  - override /loss: transfer_calibration
+
+data:
+  streaming: true
+  # Reverse-complement augmentation: cheap regulariser that helps transfer onto a
+  # new target, especially for strand-symmetric factors like CTCF.
+  enable_rc_aug: true
+  # Keep scale + clip (absolute magnitude, outlier control); drop squash so the
+  # head learns true peak prominence rather than a compressed profile.
+  apply_scale: true
+  apply_clip: true
+  apply_squash: false
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+loss:
+  # profile (multinomial) kept low — shape is mostly carried by the per-bin term.
+  profile_weight: 0.05
+  # total-count log1p MSE: calibrates per-track magnitude.
+  total_weight: 0.5
+  # per-bin log1p MSE: the main driver of peak height across all bins.
+  bin_weight: 2.0
+  # explicit Huber on the strongest bins per track — sharpens peaks.
+  topk_bin_weight: 2.0
+  topk_bin_count: 32
+  topk_huber_delta: 1.0
+
+trainer:
+  batch_size: 8
+  eval_batch_size: 8
+  num_workers: 8
+
+  # Head trains fast; backbone is nudged gently to protect the pretrained features.
+  learning_rate: 5.0e-4
+  backbone_learning_rate: 1.0e-5
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  # Long warmup lets the head settle before backbone gradients ramp up — the key
+  # safety margin when running cold without a head-only warm-start.
+  warmup_steps: 500
+  max_steps: 10000
+
+  gradient_accumulation_steps: 2
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+
+  log_every_n_steps: 10
+  eval_every_n_steps: 500
+  checkpoint_every_n_steps: 500
+
+  # Unfreeze the final 2 backbone stages (output-side conv/transformer blocks) so
+  # the model can resolve sharp peaks; everything deeper stays frozen.
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 2
+
+  report_to: [wandb]
+  # Amplitude-aware selection: the calibration loss penalises peak-height error,
+  # so eval_loss is the right best-model criterion (pearson is scale-free).
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+  # Also log pearson_top128_median to watch peak-position tracking during the run.
+  topk_bins: 128
+
+  max_eval_samples: 500
+  num_plot_examples: 8
+  early_stopping_patience: 5
+
+  init_weights_from_checkpoint: ${oc.env:INIT_WEIGHTS_FROM_CHECKPOINT,""}
