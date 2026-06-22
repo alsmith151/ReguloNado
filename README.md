@@ -6,6 +6,57 @@ main data path is a Rust-backed chromosome-pass writer; the usual training
 entrypoint is the friendly `regulonado train` CLI, backed by the Hugging Face
 `Trainer`.
 
+## Installation
+
+### CLI only (no ML dependencies)
+
+```bash
+pip install regulonado
+```
+
+### Dataset building
+
+```bash
+pip install "regulonado[data]"
+```
+
+### Full training stack (includes data deps)
+
+```bash
+pip install "regulonado[train]"
+```
+
+### GPU training with FlashAttention
+
+```bash
+pip install "regulonado[gpu]"
+```
+
+Requires `nvcc` and a matching CUDA toolkit. `ninja` is pulled in automatically
+to compile the `flash_attn` extension.
+
+### Visualisation
+
+```bash
+pip install "regulonado[viz]"
+```
+
+### Development
+
+```bash
+pip install "regulonado[dev]"
+maturin develop --release
+```
+
+### With uv (recommended for local development)
+
+```bash
+uv sync                      # core deps
+uv sync --extra train        # adds torch + full training stack
+uv sync --extra dev          # adds ruff, pytest, maturin
+source .venv/bin/activate
+```
+
 ## Repository Layout
 
 - `src/`: Rust/PyO3 data readers and Arrow writers.

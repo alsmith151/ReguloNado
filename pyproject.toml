@@ -6,55 +6,89 @@ build-backend = "maturin"
 name = "regulonado"
 version = "0.1.0"
 description = "Generic sequence-to-function model finetuning"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.12,<3.14"
 
+# Core: minimum to import the package and run the CLI without any ML deps.
 dependencies = [
-    "accelerate",
-    "borzoi-pytorch",
-    "datasets>=3.0",
-    "enformer-pytorch",
-    "hydra-core>=1.3",
-    "hydra-submitit-launcher>=1.2",
-    "lightning>=2.2,<3",
     "loguru>=0.7",
-    "ninja",
-    "numpy>=1.24",
-    "pandas>=2.0",
-    "peft",
-    "polars",
-    "psutil",
+    "numpy>=2",
     "pydantic>=2.0",
-    "pyranges1",
-    "pybigtools",
-    "pysam",
-    "scipy",
-    "seaborn",
-    "plotly",
-    "tangermeme>=0.4.0",
-    "torch>=2.5,<2.7",
-    "tqdm>=4.65",
-    "transformers>=4.40",
     "typer",
-    "wandb>=0.16",
-    "ruff>=0.15.13",
 ]
 
 [project.optional-dependencies]
-gpu = [
-    "flash_attn>=2.6,<2.8",
+# ── data pipeline (BigWig / Arrow / FASTA) ────────────────────────────────────
+data = [
+    "datasets>=3.0",
+    "pandas>=2",
+    "polars",
+    "psutil",
+    "pybigtools",
+    "pyranges1>=1.0",
+    "pysam>=0.23",
+    "scipy",
+    "tangermeme>=0.4.0",
+    "tqdm>=4.65",
 ]
+
+# ── full training stack (includes data) ───────────────────────────────────────
+train = [
+    "regulonado[data]",
+    "accelerate",
+    "borzoi-pytorch",
+    "enformer-pytorch",
+    "hydra-core>=1.3",
+    "hydra-submitit-launcher>=1.2",
+    "lightning>=2.2",
+    "peft",
+    "torch>=2.5",
+    "transformers>=4.40",
+    "wandb>=0.16",
+]
+
+# ── GPU / FlashAttention ──────────────────────────────────────────────────────
+gpu = [
+    "regulonado[train]",
+    "ninja",
+    "flash_attn>=2.6",
+]
+
+# ── visualisation ─────────────────────────────────────────────────────────────
+viz = [
+    "plotly",
+    "seaborn",
+]
+
+# ── Jupyter notebooks ─────────────────────────────────────────────────────────
 jupyter = [
     "ipykernel",
     "ipywidgets",
     "jupyter",
-    "nbformat",
     "jupyterlab",
+    "nbformat",
 ]
+
+# ── development ───────────────────────────────────────────────────────────────
 dev = [
+    "maturin>=1.0",
+    "ninja",
     "pytest>=8.0",
     "ruff>=0.4",
-    "maturin>=1.0",
 ]
+
+# ── CI test suite (no torch/GPU needed) ───────────────────────────────────────
+test = [
+    "regulonado[data]",
+    "pyarrow",
+    "pyfaidx",
+    "pytest>=8.0",
+]
+
+# ── convenience meta-extra ────────────────────────────────────────────────────
+all = ["regulonado[data,train,viz]"]
+
+[project.urls]
+Repository = "https://github.com/alsmith151/ReguloNado"
 
 [project.scripts]
 regulonado = "regulonado.__main__:main"
