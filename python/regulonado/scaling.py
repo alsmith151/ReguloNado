@@ -41,7 +41,9 @@ def infer_scale_factor(bw: Path) -> pd.Series:
             proc.returncode,
             proc.stderr.strip(),
         )
-        return pd.Series({"scale_factor": 1.0, "library_size": 0, "samplename": bw.stem, "path": str(path)})
+        return pd.Series(
+            {"scale_factor": 1.0, "library_size": 0, "samplename": bw.stem, "path": str(path)}
+        )
     result = json.loads(proc.stdout)
     result["samplename"] = bw.stem
     result["path"] = str(path)
@@ -56,7 +58,9 @@ def infer_scale_factors(
     rows: list[pd.Series] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(infer_scale_factor, bw): bw for bw in bw_files}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Inferring scale factors"):
+        for future in tqdm(
+            as_completed(futures), total=len(futures), desc="Inferring scale factors"
+        ):
             rows.append(future.result())
     return pd.concat(rows, axis=1).T.reset_index(drop=True)
 
