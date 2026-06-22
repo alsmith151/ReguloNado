@@ -143,13 +143,18 @@ def resolve_experiment(name: str) -> dict:
 
     config_dir = str((_package_root().parent / "configs").resolve())
     overrides = [f"+experiment={name}"]
+    return_hydra = False
     extra = repo_root()
     if extra is not None and (extra / "scripts" / "experiment").is_dir():
         # Mirror scripts/train_slurm.sh so run-specific experiments resolve too.
-        overrides.insert(0, f"+hydra.searchpath=[file://{extra / 'scripts'}]")
+        # hydra.searchpath is a built-in field, so it is set (no leading '+') and
+        # requires return_hydra_config=True to take effect under the Compose API.
+        overrides.insert(0, f"hydra.searchpath=[file://{extra / 'scripts'}]")
+        return_hydra = True
 
     with initialize_config_dir(version_base=None, config_dir=config_dir):
-        cfg = compose(config_name="train", overrides=overrides)
+        cfg = compose(config_name="train", overrides=overrides, return_hydra_config=return_hydra)
     resolved = OmegaConf.to_container(cfg, resolve=False)
     assert isinstance(resolved, dict)
+    resolved.pop("hydra", None)  # drop the hydra node when return_hydra_config was set
     return resolved

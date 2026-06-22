@@ -332,7 +332,15 @@ def train(
         )
         return
 
-    local_overrides = [f"+experiment={experiment}", f"data.path={dataset}"]
+    local_overrides = []
+    # Mirror scripts/train_slurm.sh: add scripts/ to Hydra's searchpath so
+    # run-specific experiments under scripts/experiment/ resolve locally too.
+    from regulonado.experiments import repo_root
+
+    root = repo_root()
+    if root is not None and (root / "scripts" / "experiment").is_dir():
+        local_overrides.append(f"+hydra.searchpath=[file://{root / 'scripts'}]")
+    local_overrides += [f"+experiment={experiment}", f"data.path={dataset}"]
     if output_dir is not None:
         local_overrides.append(f"output_dir={output_dir}")
     if init_weights_from_checkpoint is not None:

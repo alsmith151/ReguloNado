@@ -28,6 +28,36 @@ def test_suggest_experiments_handles_typo():
     assert "sharp_transfer_learning" in suggest_experiments("sharp_transfer")
 
 
+def test_general_agnostic_configs_present_and_resolve():
+    from regulonado.experiments import resolve_experiment
+
+    exps = discover_experiments()
+    for name in (
+        "condition_agnostic_enformer",
+        "condition_agnostic_full_finetune",
+        "condition_agnostic_calibrated",
+    ):
+        assert name in exps, f"missing general config {name}"
+
+    cfg = resolve_experiment("condition_agnostic_full_finetune")
+    # Full fine-tune means the whole backbone is trainable.
+    assert cfg["trainer"]["freeze_backbone"] is False
+    assert resolve_experiment("condition_agnostic_enformer")["backbone"]["name"] == "enformer"
+
+
+def test_moved_configs_listed_as_local_and_resolvable():
+    from regulonado.experiments import resolve_experiment
+
+    exps = discover_experiments()
+    # The older magnitude_fix sweep was moved to scripts/experiment/, so it is
+    # discovered but flagged non-builtin (listed as "(local)").
+    name = "magnitude_fix_poisson_nll"
+    assert name in exps
+    assert exps[name].builtin is False
+    # It must still resolve via the scripts/ search path.
+    assert resolve_experiment(name)["loss"]["name"] == "poisson_nll"
+
+
 def test_experiments_list_command_lists_all():
     result = runner.invoke(app, ["experiments"])
     assert result.exit_code == 0
