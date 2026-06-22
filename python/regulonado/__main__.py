@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,167 @@ import typer
 
 app = typer.Typer(no_args_is_help=True)
 
+experiments_app = typer.Typer(
+    no_args_is_help=False,
+    help="List and inspect the Hydra experiment configs you can train with.",
+)
+app.add_typer(experiments_app, name="experiments")
+
+
+def _validate_experiment(name: str) -> None:
+    """Exit with a helpful message if ``name`` is not a known experiment."""
+    from regulonado.experiments import discover_experiments, suggest_experiments
+
+    known = discover_experiments()
+    if name in known:
+        return
+
+    typer.echo(f"Unknown experiment: {name!r}", err=True)
+    suggestions = suggest_experiments(name)
+    if suggestions:
+        typer.echo("Did you mean: " + ", ".join(suggestions) + "?", err=True)
+    typer.echo("\nAvailable experiments:", err=True)
+    for exp_name, info in known.items():
+        typer.echo(f"  {exp_name:<34}  {info.summary}", err=True)
+    typer.echo("\nList them anytime with: regulonado experiments", err=True)
+    raise typer.Exit(1)
+
+
+@experiments_app.callback(invoke_without_command=True)
+def experiments_default(ctx: typer.Context) -> None:
+    """Default to listing experiments when no subcommand is given."""
+    if ctx.invoked_subcommand is None:
+        _list_experiments()
+
+
+def _list_experiments() -> None:
+    from regulonado.experiments import discover_experiments
+
+    known = discover_experiments()
+    if not known:
+        typer.echo("No experiment configs found.", err=True)
+        raise typer.Exit(1)
+
+    width = max(len(name) for name in known)
+    for name, info in known.items():
+        tag = "" if info.builtin else "  (local)"
+        summary = info.summary or "(no description)"
+        typer.echo(f"{name:<{width}}  {summary}{tag}")
+    typer.echo("")
+    typer.echo("Inspect one with : regulonado experiments show <name>")
+    typer.echo("Run one with     : regulonado train <dataset> -e <name>")
+
+
+@experiments_app.command("list")
+def experiments_list() -> None:
+    """List every available experiment config with a one-line summary."""
+    _list_experiments()
+
+
+@experiments_app.command("show")
+def experiments_show(
+    name: Annotated[str, typer.Argument(help="Experiment config name (without .yaml)")],
+) -> None:
+    """Show an experiment's description and its effective key settings."""
+    _validate_experiment(name)
+    from regulonado.experiments import discover_experiments, resolve_experiment
+
+    info = discover_experiments()[name]
+    typer.echo(f"# {name}" + ("" if info.builtin else "  (local override)"))
+    typer.echo(f"# {info.path}")
+    typer.echo("")
+    if info.description:
+        typer.echo(info.description)
+        typer.echo("")
+
+    try:
+        cfg = resolve_experiment(name)
+    except Exception as exc:  # noqa: BLE001 — surface a readable message, not a trace
+        typer.echo(f"(could not resolve effective settings: {exc})", err=True)
+        return
+
+    backbone = cfg.get("backbone", {})
+    head = cfg.get("head", {})
+    loss = cfg.get("loss", {})
+    trainer = cfg.get("trainer", {})
+
+    typer.echo("Effective settings")
+    typer.echo("------------------")
+    typer.echo(f"  backbone : {backbone.get('name')} ({backbone.get('pretrained_name')})")
+    typer.echo(f"  head     : {head.get('type')}")
+    typer.echo(f"  loss     : {loss.get('name')}")
+    for key in (
+        "learning_rate",
+        "backbone_learning_rate",
+        "max_steps",
+        "freeze_backbone",
+        "unfreeze_backbone_stages_from_output_end",
+        "metric_for_best_model",
+    ):
+        if key in trainer:
+            typer.echo(f"  trainer.{key} = {trainer[key]}")
+    typer.echo("")
+    typer.echo(f"Run it with: regulonado train <dataset> -e {name}")
+
+
+def _submit_slurm(
+    *,
+    experiment: str,
+    dataset: Path,
+    output_dir: Optional[Path],
+    nproc_per_node: int,
+    init_weights_from_checkpoint: Optional[Path],
+    overrides: list[str],
+    slurm_gpus: Optional[int],
+    slurm_time: Optional[str],
+    slurm_partition: Optional[str],
+    dry_run: bool,
+) -> None:
+    """Submit scripts/train_slurm.sh via sbatch with the env it expects."""
+    from regulonado.experiments import repo_root
+
+    root = repo_root()
+    if root is None:
+        typer.echo(
+            "Could not locate the repo root (scripts/train_slurm.sh). "
+            "Run --slurm from a Regulonado source checkout.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    script = root / "scripts" / "train_slurm.sh"
+    if not script.is_file():
+        typer.echo(f"SLURM script not found: {script}", err=True)
+        raise typer.Exit(1)
+
+    env_overrides = {
+        "REPO_DIR": str(root),
+        "EXPERIMENT": experiment,
+        "DATA_DIR": str(dataset),
+        "NPROC_PER_NODE": str(nproc_per_node),
+    }
+    if output_dir is not None:
+        env_overrides["RUN_DIR"] = str(output_dir)
+    if init_weights_from_checkpoint is not None:
+        env_overrides["INIT_WEIGHTS_FROM_CHECKPOINT"] = str(init_weights_from_checkpoint)
+
+    sbatch: list[str] = ["sbatch"]
+    if slurm_gpus is not None:
+        sbatch.append(f"--gres=gpu:{slurm_gpus}")
+    if slurm_time is not None:
+        sbatch.append(f"--time={slurm_time}")
+    if slurm_partition is not None:
+        sbatch.append(f"--partition={slurm_partition}")
+    sbatch.append(str(script))
+    sbatch.extend(overrides)
+
+    env_prefix = " ".join(f"{k}={v}" for k, v in env_overrides.items())
+    typer.echo(f"{env_prefix} \\\n  {' '.join(sbatch)}")
+    if dry_run:
+        return
+
+    env = {**os.environ, **env_overrides}
+    raise typer.Exit(subprocess.run(sbatch, env=env).returncode)
+
 
 @app.command(
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
@@ -16,9 +178,9 @@ app = typer.Typer(no_args_is_help=True)
 def train(
     ctx: typer.Context,
     dataset: Annotated[
-        Path,
+        Optional[Path],
         typer.Argument(help="Saved Regulonado/Hugging Face dataset directory"),
-    ],
+    ] = None,
     output_dir: Annotated[
         Optional[Path],
         typer.Option("--output-dir", "-o", help="Run directory for checkpoints and diagnostics"),
@@ -27,6 +189,26 @@ def train(
         str,
         typer.Option("--experiment", "-e", help="Hydra experiment config to launch"),
     ] = "condition_agnostic_borzoi",
+    interactive: Annotated[
+        bool,
+        typer.Option("--interactive", "-i", help="Pick experiment and options via prompts"),
+    ] = False,
+    slurm: Annotated[
+        bool,
+        typer.Option("--slurm", help="Submit via sbatch scripts/train_slurm.sh instead of locally"),
+    ] = False,
+    slurm_gpus: Annotated[
+        Optional[int],
+        typer.Option("--slurm-gpus", help="Override GPUs requested from SLURM (sbatch --gres)"),
+    ] = None,
+    slurm_time: Annotated[
+        Optional[str],
+        typer.Option("--slurm-time", help="Override SLURM time limit, e.g. 12:00:00"),
+    ] = None,
+    slurm_partition: Annotated[
+        Optional[str],
+        typer.Option("--slurm-partition", help="Override SLURM partition"),
+    ] = None,
     nproc_per_node: Annotated[
         int,
         typer.Option(
@@ -86,7 +268,25 @@ def train(
     Extra arguments after the options are passed directly to Hydra, for example:
 
     regulonado train dataset/ --max-steps 1000 trainer.max_eval_samples=200
+
+    Use --interactive to pick an experiment from a menu, or --slurm to submit
+    the run through scripts/train_slurm.sh instead of running locally.
     """
+    if interactive:
+        (
+            dataset,
+            experiment,
+            output_dir,
+            nproc_per_node,
+            slurm,
+        ) = _interactive_prompts(dataset, experiment, output_dir, nproc_per_node, slurm)
+
+    if dataset is None:
+        typer.echo("Provide a dataset path, or use --interactive.", err=True)
+        raise typer.Exit(1)
+
+    _validate_experiment(experiment)
+
     if resume_from_checkpoint and init_weights_from_checkpoint:
         typer.echo(
             "Set only one of --resume-from-checkpoint or --init-weights-from-checkpoint.",
@@ -94,18 +294,12 @@ def train(
         )
         raise typer.Exit(1)
 
-    overrides = [
-        f"+experiment={experiment}",
-        f"data.path={dataset}",
-    ]
-    if output_dir is not None:
-        overrides.append(f"output_dir={output_dir}")
+    # Tuning overrides apply to both the local and SLURM paths. The SLURM script
+    # sets +experiment / data.path / output_dir from the environment itself, so
+    # those stay out of this list and are passed via env in _submit_slurm.
+    overrides: list[str] = []
     if resume_from_checkpoint is not None:
         overrides.append(f"trainer.resume_from_checkpoint={resume_from_checkpoint}")
-    if init_weights_from_checkpoint is not None:
-        overrides.append(
-            f"trainer.init_weights_from_checkpoint={init_weights_from_checkpoint}"
-        )
     if max_steps is not None:
         overrides.append(f"trainer.max_steps={max_steps}")
     if batch_size is not None:
@@ -123,16 +317,40 @@ def train(
         overrides.append("trainer.fit_examples.log_to_wandb=false")
     overrides.extend(ctx.args)
 
+    if slurm:
+        _submit_slurm(
+            experiment=experiment,
+            dataset=dataset,
+            output_dir=output_dir,
+            nproc_per_node=nproc_per_node,
+            init_weights_from_checkpoint=init_weights_from_checkpoint,
+            overrides=overrides,
+            slurm_gpus=slurm_gpus,
+            slurm_time=slurm_time,
+            slurm_partition=slurm_partition,
+            dry_run=dry_run,
+        )
+        return
+
+    local_overrides = [f"+experiment={experiment}", f"data.path={dataset}"]
+    if output_dir is not None:
+        local_overrides.append(f"output_dir={output_dir}")
+    if init_weights_from_checkpoint is not None:
+        local_overrides.append(
+            f"trainer.init_weights_from_checkpoint={init_weights_from_checkpoint}"
+        )
+    local_overrides.extend(overrides)
+
     if nproc_per_node > 1:
         command = [
             "torchrun",
             f"--nproc_per_node={nproc_per_node}",
             "-m",
             "regulonado.train",
-            *overrides,
+            *local_overrides,
         ]
     else:
-        command = [sys.executable, "-m", "regulonado.train", *overrides]
+        command = [sys.executable, "-m", "regulonado.train", *local_overrides]
 
     typer.echo(" ".join(command))
     if dry_run:
@@ -140,11 +358,59 @@ def train(
     raise typer.Exit(subprocess.run(command).returncode)
 
 
+def _interactive_prompts(
+    dataset: Optional[Path],
+    experiment: str,
+    output_dir: Optional[Path],
+    nproc_per_node: int,
+    slurm: bool,
+) -> tuple[Optional[Path], str, Optional[Path], int, bool]:
+    """Guided front-end that fills in the same values the flags would set."""
+    from regulonado.experiments import discover_experiments
+
+    known = discover_experiments()
+    names = list(known)
+
+    typer.echo("Available experiments:")
+    for idx, name in enumerate(names, start=1):
+        summary = known[name].summary or "(no description)"
+        typer.echo(f"  {idx:>2}. {name:<34}  {summary}")
+
+    default_idx = names.index(experiment) + 1 if experiment in names else 1
+    choice = typer.prompt("Select experiment", default=default_idx, type=int)
+    if not 1 <= choice <= len(names):
+        typer.echo(f"Selection out of range: {choice}", err=True)
+        raise typer.Exit(1)
+    experiment = names[choice - 1]
+
+    dataset_default = str(dataset) if dataset is not None else None
+    dataset_str = typer.prompt("Dataset path", default=dataset_default)
+    dataset = Path(dataset_str)
+    if not dataset.exists():
+        typer.echo(f"Dataset path does not exist: {dataset}", err=True)
+        raise typer.Exit(1)
+
+    out_str = typer.prompt(
+        "Output dir (blank for default)",
+        default=str(output_dir) if output_dir is not None else "",
+    )
+    output_dir = Path(out_str) if out_str.strip() else None
+
+    nproc_per_node = typer.prompt("GPUs (nproc_per_node)", default=nproc_per_node, type=int)
+    slurm = typer.confirm("Submit to SLURM?", default=slurm)
+
+    return dataset, experiment, output_dir, nproc_per_node, slurm
+
+
 @app.command()
 def scale(
-    bigwig_dir: Annotated[Path, typer.Argument(help="Directory containing .bw / .bigwig files")],
+    bigwig_dir: Annotated[
+        Path, typer.Argument(help="Directory containing .bw / .bigwig files")
+    ],
     output: Annotated[Path, typer.Option("--output", "-o", help="Output file path")],
-    fmt: Annotated[str, typer.Option("--format", "-f", help="Output format: csv or parquet")] = "parquet",
+    fmt: Annotated[
+        str, typer.Option("--format", "-f", help="Output format: csv or parquet")
+    ] = "parquet",
     max_workers: Annotated[int, typer.Option("--workers", "-w", help="Thread pool size")] = 16,
     glob: Annotated[str, typer.Option("--glob", help="Glob pattern for bigwig files")] = "*.bw",
 ) -> None:
@@ -167,9 +433,14 @@ def calculate_original_scaling(
     metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json")],
     output: Annotated[
         Optional[Path],
-        typer.Option("--output", "-o", help="Output file path (default: <metadata_dir>/scale_factors.parquet)"),
+        typer.Option(
+            "--output", "-o",
+            help="Output file path (default: <metadata_dir>/scale_factors.parquet)",
+        ),
     ] = None,
-    fmt: Annotated[str, typer.Option("--format", "-f", help="Output format: csv or parquet")] = "parquet",
+    fmt: Annotated[
+        str, typer.Option("--format", "-f", help="Output format: csv or parquet")
+    ] = "parquet",
     max_workers: Annotated[int, typer.Option("--workers", "-w", help="Thread pool size")] = 16,
 ) -> None:
     """Infer original scale factors for the final_bigwig_paths recorded in a dataset metadata file.
@@ -218,7 +489,10 @@ def calculate_original_scaling(
     # Join track_index and resolved_path from the records, then sort so row i
     # corresponds to track i — enabling direct positional application.
     records_df = pd.DataFrame(
-        [{"track_index": r["track_index"], "resolved_path": r["resolved_path"]} for r in track_records]
+        [
+            {"track_index": r["track_index"], "resolved_path": r["resolved_path"]}
+            for r in track_records
+        ]
     )
     df = df.merge(records_df, left_on="path", right_on="resolved_path", how="left")
     df = df.drop(columns=["resolved_path"]).sort_values("track_index").reset_index(drop=True)
@@ -232,7 +506,9 @@ def calculate_original_scaling(
 
     save_scale_factors(df, out_path, fmt=fmt)  # type: ignore[arg-type]
     typer.echo(f"Saved scale factors to {out_path}")
-    typer.echo("Run 'regulonado enrich-metadata' to write these values into final_track_records.")
+    typer.echo(
+        "Run 'regulonado enrich-metadata' to write these values into final_track_records."
+    )
 
 
 @app.command()
@@ -240,17 +516,42 @@ def calculate_tmm_scaling(
     metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json")],
     scale_factors: Annotated[
         Optional[Path],
-        typer.Option("--scale-factors", "-s", help="Scale-factors parquet from calculate-original-scaling (default: <metadata_dir>/scale_factors.parquet)"),
+        typer.Option(
+            "--scale-factors", "-s",
+            help=(
+                "Scale-factors parquet from calculate-original-scaling "
+                "(default: <metadata_dir>/scale_factors.parquet)"
+            ),
+        ),
     ] = None,
     output: Annotated[
         Optional[Path],
-        typer.Option("--output", "-o", help="Output path (default: overwrites --scale-factors input)"),
+        typer.Option(
+            "--output", "-o", help="Output path (default: overwrites --scale-factors input)"
+        ),
     ] = None,
-    fmt: Annotated[str, typer.Option("--format", "-f", help="Output format: csv or parquet")] = "parquet",
-    split: Annotated[str, typer.Option("--split", help="Dataset split to use for TMM estimation")] = "train",
-    trim_m: Annotated[float, typer.Option("--trim-m", help="Fraction to trim from each M-value tail (edgeR default 0.3)")] = 0.3,
-    trim_a: Annotated[float, typer.Option("--trim-a", help="Fraction to trim from each A-value tail (edgeR default 0.05)")] = 0.05,
-    min_count: Annotated[float, typer.Option("--min-count", help="Minimum pseudo-count for a region to be included")] = 1.0,
+    fmt: Annotated[
+        str, typer.Option("--format", "-f", help="Output format: csv or parquet")
+    ] = "parquet",
+    split: Annotated[
+        str, typer.Option("--split", help="Dataset split to use for TMM estimation")
+    ] = "train",
+    trim_m: Annotated[
+        float,
+        typer.Option(
+            "--trim-m", help="Fraction to trim from each M-value tail (edgeR default 0.3)"
+        ),
+    ] = 0.3,
+    trim_a: Annotated[
+        float,
+        typer.Option(
+            "--trim-a", help="Fraction to trim from each A-value tail (edgeR default 0.05)"
+        ),
+    ] = 0.05,
+    min_count: Annotated[
+        float,
+        typer.Option("--min-count", help="Minimum pseudo-count for a region to be included"),
+    ] = 1.0,
 ) -> None:
     """Compute edgeR-style TMM normalisation factors from the Arrow dataset.
 
@@ -312,7 +613,11 @@ def calculate_tmm_scaling(
         typer.echo("Column 'library_size' missing from scale-factors file.", err=True)
         raise typer.Exit(1)
     if "scale_factor" not in sf_df.columns:
-        typer.echo("Column 'scale_factor' missing from scale-factors file.  Run calculate-original-scaling first.", err=True)
+        typer.echo(
+            "Column 'scale_factor' missing from scale-factors file.  "
+            "Run calculate-original-scaling first.",
+            err=True,
+        )
         raise typer.Exit(1)
 
     library_sizes = sf_df.sort_values("track_index")["library_size"].to_numpy(dtype=float)
@@ -349,12 +654,17 @@ def calculate_tmm_scaling(
 
     # Report
     sf_sorted = sf_df.sort_values("track_index").reset_index(drop=True)
-    typer.echo(f"{'Track':>5}  {'samplename':<30}  {'tmm_factor':>12}  {'old_sf':>12}  {'new_sf':>12}")
+    typer.echo(
+        f"{'Track':>5}  {'samplename':<30}  {'tmm_factor':>12}  {'old_sf':>12}  {'new_sf':>12}"
+    )
     for i, (_, row) in enumerate(sf_sorted.iterrows()):
         old_sf = float(row["scale_factor"])
         new_sf = old_sf / tmm[i]
         name = str(row.get("samplename", i))[:30]
-        typer.echo(f"{int(row['track_index']):>5}  {name:<30}  {tmm[i]:>12.6f}  {old_sf:>12.6f}  {new_sf:>12.6f}")
+        typer.echo(
+            f"{int(row['track_index']):>5}  {name:<30}  "
+            f"{tmm[i]:>12.6f}  {old_sf:>12.6f}  {new_sf:>12.6f}"
+        )
 
     # Write updated parquet: add tmm_factor, overwrite scale_factor
     sf_df = sf_df.sort_values("track_index").reset_index(drop=True)
@@ -403,11 +713,21 @@ def recompress_dataset(
 
 @app.command()
 def enrich_metadata(
-    metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json to update in-place")],
-    scale_factors: Annotated[Path, typer.Argument(help="Parquet (or CSV) produced by calculate-original-scaling")],
+    metadata: Annotated[
+        Path, typer.Argument(help="Path to regulonado_metadata.json to update in-place")
+    ],
+    scale_factors: Annotated[
+        Path, typer.Argument(help="Parquet (or CSV) produced by calculate-original-scaling")
+    ],
     fields: Annotated[
         Optional[list[str]],
-        typer.Option("--field", "-f", help="Field to copy into final_track_records (repeat; default: all of scale_factor clip_soft clip_hard)"),
+        typer.Option(
+            "--field", "-f",
+            help=(
+                "Field to copy into final_track_records "
+                "(repeat; default: all of scale_factor clip_soft clip_hard)"
+            ),
+        ),
     ] = None,
 ) -> None:
     """Write scale_factor / clip_soft / clip_hard into final_track_records in a metadata JSON.
@@ -429,7 +749,11 @@ def enrich_metadata(
         typer.echo(f"Scale-factors file not found: {scale_factors}", err=True)
         raise typer.Exit(1)
 
-    sf_df = pd.read_parquet(scale_factors) if str(scale_factors).endswith(".parquet") else pd.read_csv(scale_factors)
+    sf_df = (
+        pd.read_parquet(scale_factors)
+        if str(scale_factors).endswith(".parquet")
+        else pd.read_csv(scale_factors)
+    )
 
     missing = [f for f in fields_to_copy if f not in sf_df.columns]
     if missing:
@@ -545,7 +869,10 @@ def build(
         bool, typer.Option("--overwrite", help="Regenerate splits that already exist")
     ] = False,
     drop_missing: Annotated[
-        bool, typer.Option("--drop-missing", help="Drop missing BigWig paths instead of raising an error")
+        bool,
+        typer.Option(
+            "--drop-missing", help="Drop missing BigWig paths instead of raising an error"
+        ),
     ] = False,
     dedupe_tracks: Annotated[
         str,

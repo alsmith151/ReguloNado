@@ -190,7 +190,35 @@ regulonado enrich-metadata dataset/regulonado_metadata.json dataset/scale_factor
 
 ## Training
 
+### Find an experiment
+
+Experiments are named Hydra configs. List them and inspect any one without
+opening the YAML:
+
+```bash
+regulonado experiments                          # list all with one-line summaries
+regulonado experiments show sharp_transfer_learning   # full description + effective settings
+```
+
+Not sure which to run? Let the CLI walk you through it:
+
+```bash
+regulonado train --interactive    # pick experiment, dataset, GPUs, local vs Slurm
+```
+
 ### Quick start (Slurm)
+
+Submit straight from the CLI — no need to remember the env-var incantation:
+
+```bash
+regulonado train /path/to/dataset -e head_only_borzoi --slurm
+```
+
+This submits `scripts/train_slurm.sh` via `sbatch`, setting `EXPERIMENT`,
+`DATA_DIR`, and `REPO_DIR` for you. Add `--dry-run` to preview the command,
+`--slurm-gpus`/`--slurm-time`/`--slurm-partition` to override the `#SBATCH`
+defaults, and any `--max-steps`/`--lr`/raw Hydra overrides as usual. The
+equivalent manual form still works:
 
 ```bash
 EXPERIMENT=head_only_borzoi \
@@ -211,6 +239,9 @@ regulonado train /path/to/dataset \
 regulonado train /path/to/dataset --nproc-per-node 2     # multi-GPU via torchrun
 regulonado train /path/to/dataset --max-steps 10 --no-wandb   # smoke test
 ```
+
+An unknown `-e` name prints the available experiments and a did-you-mean
+suggestion instead of a Hydra stack trace.
 
 Raw Hydra overrides can be appended to either the CLI or the Slurm script:
 
