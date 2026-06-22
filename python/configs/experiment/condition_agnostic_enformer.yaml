@@ -1,0 +1,46 @@
+# @package _global_
+# Condition-agnostic transfer on the Enformer backbone — heterogeneous tracks.
+#
+# The Enformer counterpart of condition_agnostic_borzoi: same general-purpose
+# transfer recipe (frozen backbone with the two output-end stages unfrozen,
+# poisson_multinomial loss, no per-track metadata), but on Enformer instead of
+# Borzoi. Use it to compare backbones on the same dataset, or when Enformer's
+# 196 kb receptive field suits your targets better than Borzoi's.
+#
+# Enformer is heavier than (Flash)Borzoi, so the batch size is smaller here;
+# raise it if your GPU has the memory.
+
+defaults:
+  - override /backbone: enformer
+  - override /head: transfer_mlp
+  - override /loss: poisson_multinomial
+
+data:
+  streaming: true
+  enable_rc_aug: false
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+trainer:
+  batch_size: 4
+  eval_batch_size: 4
+  num_workers: 6
+  learning_rate: 5.0e-4
+  backbone_learning_rate: 5.0e-6
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_steps: 200
+  max_steps: 10000
+  gradient_accumulation_steps: 2
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+  log_every_n_steps: 10
+  eval_every_n_steps: 500
+  checkpoint_every_n_steps: 1000
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 2
+  report_to: [wandb]
+  metric_for_best_model: pearson_bin_median
+  greater_is_better: true
