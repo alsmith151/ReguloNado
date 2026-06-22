@@ -1,8 +1,14 @@
 # Backbone family name used by the adapter builder.
 name: enformer
-# Optional model identifier for Enformer.from_pretrained(...).
-pretrained_name: null
+# Model identifier for Enformer.from_pretrained(...). Set this for normal runs; building fails
+# when unset unless allow_random_init is enabled (see below).
+pretrained_name: EleutherAI/enformer-official-rough
 # Optional override for Enformer target length when the dataset metadata should not decide it.
 target_length: null
 # Raw keyword arguments passed to EnformerConfig when not loading pretrained weights.
 config_overrides: {}
+# Safety guard: when pretrained_name is unset the backbone would be randomly initialised
+# (no pretrained motif representations), which is almost never intended for transfer
+# learning. Building fails in that case unless this is explicitly set to true to train
+# from scratch.
+allow_random_init: false

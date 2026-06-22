@@ -1,8 +1,15 @@
 # Backbone family name used by the adapter builder.
 name: borzoi
-# Optional model identifier for Borzoi.from_pretrained(...).
-pretrained_name: null
+# Model identifier for Borzoi.from_pretrained(...). Defaults to FlashZoi (a flash-attention
+# distilled Borzoi) for faster training/iteration; swap to johahi/borzoi-replicate-0..3 for the
+# original Borzoi weights. Must be set (or allow_random_init enabled) — see allow_random_init.
+pretrained_name: johahi/flashzoi-replicate-0
 # Optional override for backbone output length when the dataset metadata should not decide it.
 target_length: null
 # Raw keyword arguments passed to BorzoiConfig when not loading pretrained weights.
 config_overrides: {}
+# Safety guard: when pretrained_name is unset the backbone would be randomly initialised
+# (no pretrained motif representations), which is almost never intended for transfer
+# learning. Building fails in that case unless this is explicitly set to true to train
+# from scratch.
+allow_random_init: false

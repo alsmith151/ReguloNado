@@ -21,6 +21,26 @@ class BackboneSpec:
     feature_dim: int | None = None
     target_length: int | None = None
     config_overrides: dict[str, Any] | None = None
+    # Opt-in guard: building a backbone without pretrained weights yields a randomly
+    # initialised network. That is almost never intended for transfer learning, so it
+    # must be requested explicitly rather than happening as a silent fallback.
+    allow_random_init: bool = False
+
+
+def _require_pretrained_or_explicit_random(spec: BackboneSpec, example: str) -> None:
+    """Guard against silently training on a randomly initialised backbone.
+
+    Raises when no ``pretrained_name`` is set and random initialisation was not
+    explicitly opted into via ``allow_random_init``.
+    """
+    if not spec.allow_random_init:
+        raise ValueError(
+            f"Backbone {spec.backbone_type!r} has no 'pretrained_name', which would "
+            "silently train on a randomly initialised backbone (no pretrained motif "
+            "representations). Set backbone.pretrained_name to a checkpoint "
+            f"(e.g. {example!r}), or set backbone.allow_random_init=true to "
+            "deliberately train from scratch."
+        )
 
 
 class BaseBackboneAdapter(nn.Module):
@@ -72,6 +92,7 @@ class BorzoiBackboneAdapter(BaseBackboneAdapter):
             model = Borzoi.from_pretrained(spec.pretrained_name)
             return cls(model)
 
+        _require_pretrained_or_explicit_random(spec, example="johahi/borzoi-replicate-0")
         overrides = dict(spec.config_overrides or {})
         config = BorzoiConfig(**overrides)
         return cls(Borzoi(config=config))
@@ -111,6 +132,7 @@ class EnformerBackboneAdapter(BaseBackboneAdapter):
             model = Enformer.from_pretrained(spec.pretrained_name)
             return cls(model)
 
+        _require_pretrained_or_explicit_random(spec, example="EleutherAI/enformer-official-rough")
         overrides = dict(spec.config_overrides or {})
         if spec.target_length is not None:
             overrides.setdefault("target_length", spec.target_length)
