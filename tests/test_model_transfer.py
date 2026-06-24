@@ -13,7 +13,8 @@ from regulonado.model import (
     EnformerBackboneAdapter,
     FiLMPerturbHead,
     FreezePolicy,
-    HeadedSequenceModel,
+    RegulonadoConfig,
+    RegulonadoModel,
     ResidualFiLMPerturbHead,
     TransferMLPPerturbHead,
     build_condition_shared_track_index,
@@ -115,7 +116,7 @@ def test_residual_and_transfer_heads_produce_expected_shapes():
 
 def test_freeze_policy_unfreezes_last_block_only():
     backbone = DummyBackbone()
-    model = HeadedSequenceModel(
+    model = RegulonadoModel(
         backbone=backbone, head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2)
     )
     model.apply_freeze_policy(
@@ -174,7 +175,7 @@ def test_scaled_poisson_multinomial_loss_is_finite():
 
 
 def test_optimizer_excludes_bias_and_norm_from_weight_decay():
-    model = HeadedSequenceModel(
+    model = RegulonadoModel(
         backbone=DummyBackbone(),
         head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
     )
@@ -182,6 +183,37 @@ def test_optimizer_excludes_bias_and_norm_from_weight_decay():
     optimizer = _build_optimizer(model, cfg)
     assert {group["weight_decay"] for group in optimizer.param_groups} == {0.0, 0.1}
     assert {group["lr"] for group in optimizer.param_groups} == {1e-3, 1e-4}
+
+
+def test_regulonado_model_save_pretrained_roundtrip(tmp_path, monkeypatch):
+    from regulonado.model import adapters
+
+    config = RegulonadoConfig(
+        backbone_type="dummy",
+        head_type="transfer_mlp",
+        head_hidden=4,
+        mlp_hidden=4,
+        feature_dim=8,
+        n_tracks=2,
+        context_length=12,
+        n_pred_bins=12,
+        bin_size=1,
+        track_names=["a", "b"],
+    )
+    model = RegulonadoModel(
+        config,
+        backbone=DummyBackbone(),
+        head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
+    )
+    model.save_pretrained(tmp_path, safe_serialization=True)
+
+    monkeypatch.setattr(adapters, "build_backbone_architecture", lambda *_: DummyBackbone())
+    loaded = RegulonadoModel.from_pretrained(tmp_path)
+
+    assert isinstance(loaded, RegulonadoModel)
+    assert loaded.config.context_length == 12
+    assert loaded.config.track_names == ["a", "b"]
+    assert loaded(torch.randn(1, 4, 12)).shape == (1, 2, 12)
 
 
 def test_checkpoint_mode_normalisation():
@@ -303,5 +335,9 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
     assert (tmp_path / "run" / "training_summary.json").exists()
     assert (tmp_path / "run" / "provenance.json").exists()
     assert (tmp_path / "run" / "resolved_config.json").exists()
-    assert list((tmp_path / "run" / "fit").glob("step_*/summary.json"))
-    assert list((tmp_path / "run" / "fit" / "examples").glob("step_*/manifest.json"))
+    assert (tmp_path / "run" / "config.json").exists()
+    assert (tmp_path / "run" / "model.safetensors").exists()
+
+    saved_config = RegulonadoConfig.from_pretrained(tmp_path / "run")
+    assert saved_config.track_names == ["track0", "track1"]
+    assert saved_config.track_metadata["track_condition_ids"] == [0, 1]

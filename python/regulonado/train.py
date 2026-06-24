@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
 import random
 from collections.abc import Callable, Mapping, Sequence
+from os import environ
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +27,10 @@ from regulonado.dataset import build_rc_permutation, make_transform
 from regulonado.model import (
     BackboneSpec,
     FreezePolicy,
-    HeadedSequenceModel,
+    RegulonadoConfig,
+    RegulonadoModel,
     build_backbone_adapter,
     build_condition_shared_track_index,
-    build_perturb_head,
 )
 from regulonado.training.callbacks import (
     _EvalPlotCallback,
@@ -94,7 +94,7 @@ def load_model_weights_only(model: torch.nn.Module, checkpoint: str | Path) -> N
     else:
         state_dict = torch.load(weight_path, map_location="cpu")
     # HF Trainer saves the TrainerCompatibleModel wrapper, so keys are prefixed with "model.".
-    # Strip that prefix if present so the state dict loads into a bare HeadedSequenceModel.
+    # Strip that prefix if present so the state dict loads into a bare RegulonadoModel.
     first_keys = list(state_dict)[:5]
     if all(k.startswith("model.") for k in first_keys):
         state_dict = {k[len("model."):]: v for k, v in state_dict.items()}
@@ -171,26 +171,41 @@ def infer_cardinality(records: Sequence[Mapping[str, Any]], key: str) -> int:
     return max(values) + 1 if values else 0
 
 
-def constant_track_metadata(records: Sequence[Mapping[str, Any]]) -> dict[str, torch.Tensor]:
-    field_map = {
-        "track_condition_ids": ("condition_id",),
-        "track_timepoint_minutes": ("timepoint_minutes",),
-        "track_cell_line_ids": ("cell_line_id",),
-        "track_assay_type_ids": ("assay_type_id",),
-        "track_target_ids": ("target_id",),
-    }
-    tensors: dict[str, torch.Tensor] = {}
-    for out_key, keys in field_map.items():
+_TRACK_METADATA_FIELD_MAP = {
+    "track_condition_ids": ("condition_id",),
+    "track_timepoint_minutes": ("timepoint_minutes",),
+    "track_cell_line_ids": ("cell_line_id",),
+    "track_assay_type_ids": ("assay_type_id",),
+    "track_target_ids": ("target_id",),
+}
+
+
+def constant_track_metadata_values(records: Sequence[Mapping[str, Any]]) -> dict[str, list]:
+    values: dict[str, list] = {}
+    for out_key, keys in _TRACK_METADATA_FIELD_MAP.items():
         if out_key == "track_timepoint_minutes":
             array = _track_array(records, *keys, dtype=np.float32, fill_value=float("nan"))
             if np.all(np.isnan(array)):
                 continue
-            tensors[out_key] = torch.as_tensor(array, dtype=torch.float32)
+            values[out_key] = [None if np.isnan(value) else float(value) for value in array]
         else:
             array = _track_array(records, *keys, dtype=np.int64, fill_value=-1)
             if np.all(array < 0):
                 continue
-            tensors[out_key] = torch.as_tensor(array, dtype=torch.long)
+            values[out_key] = [int(value) for value in array]
+    return values
+
+
+def constant_track_metadata(records: Sequence[Mapping[str, Any]]) -> dict[str, torch.Tensor]:
+    tensors: dict[str, torch.Tensor] = {}
+    for out_key, values in constant_track_metadata_values(records).items():
+        if out_key == "track_timepoint_minutes":
+            tensors[out_key] = torch.as_tensor(
+                [float("nan") if value is None else value for value in values],
+                dtype=torch.float32,
+            )
+        else:
+            tensors[out_key] = torch.as_tensor(values, dtype=torch.long)
     return tensors
 
 
@@ -301,34 +316,6 @@ def _build_loss_fn(
     raise ValueError(f"Unsupported loss name {loss_name!r}")
 
 
-class TrainerCompatibleModel(torch.nn.Module):
-    def __init__(
-        self,
-        model: HeadedSequenceModel,
-        loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-    ):
-        super().__init__()
-        self.model = model
-        self.loss_fn = loss_fn
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        labels: torch.Tensor | None = None,
-        **metadata: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        model_metadata = {
-            key: value
-            for key, value in metadata.items()
-            if key.startswith("track_")
-        }
-        logits = self.model(input_ids, **model_metadata)
-        outputs: dict[str, torch.Tensor] = {"logits": logits}
-        if labels is not None:
-            # Labels may be loaded as [B, L, T] by the HF datasets library; align to [B, T, L].
-            aligned = labels if labels.shape[-2:] == logits.shape[-2:] else labels.transpose(-2, -1)
-            outputs["loss"] = self.loss_fn(logits, aligned)
-        return outputs
 
 
 def _apply_dataset_transforms(
@@ -406,51 +393,91 @@ def _make_backbone_spec(
     )
 
 
+def _build_regulonado_config(
+    cfg: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    records: Sequence[Mapping[str, Any]],
+    backbone: Any,
+) -> RegulonadoConfig:
+    model_cfg = cfg["model"]
+    head_cfg = cfg["head"]
+    backbone_cfg = cfg["backbone"]
+    data_cfg = cfg.get("data", {})
+    use_track_metadata = bool(model_cfg.get("use_track_metadata", False))
+    target_length = int(metadata.get("n_pred_bins", 0)) or None
+
+    shared_track_index: list[int] = []
+    if bool(model_cfg.get("share_condition_base_channels", True)) and use_track_metadata:
+        shared_track_index = build_condition_shared_track_index(records)
+
+    head_type = str(head_cfg.get("type", "residual_film"))
+
+    # Derive filesystem-safe track names from the resolved BigWig paths.
+    track_names: list[str] = []
+    seen: dict[str, int] = {}
+    for idx, record in enumerate(records):
+        path = (
+            record.get("resolved_path")
+            or record.get("path")
+            or record.get("bigwig_path")
+            or f"track{idx}"
+        )
+        stem = Path(str(path)).name
+        for suffix in (".bigWig", ".bigwig", ".bw", ".bedGraph", ".bedgraph"):
+            if stem.endswith(suffix):
+                stem = stem[: -len(suffix)]
+                break
+        stem = "".join(c if (c.isalnum() or c in "._-") else "_" for c in stem) or f"track{idx}"
+        if stem in seen:
+            seen[stem] += 1
+            stem = f"{stem}_{seen[stem]}"
+        else:
+            seen[stem] = 0
+        track_names.append(stem)
+
+    return RegulonadoConfig(
+        backbone_type=str(backbone_cfg.get("name", "borzoi")),
+        pretrained_name=backbone_cfg.get("pretrained_name"),
+        config_overrides=dict(backbone_cfg.get("config_overrides") or {}),
+        target_length=backbone_cfg.get("target_length") or target_length,
+        head_type=head_type,
+        head_hidden=int(head_cfg.get("hidden", 512)),
+        head_dropout=float(head_cfg.get("dropout", 0.0)),
+        refinement_kernel=int(head_cfg.get("refinement_kernel", 9)),
+        mlp_hidden=int(head_cfg["mlp_hidden"]) if head_cfg.get("mlp_hidden") is not None else None,
+        n_tracks=len(records),
+        feature_dim=int(getattr(backbone, "feature_dim", 1920)),
+        use_track_metadata=use_track_metadata,
+        activation_type=str(model_cfg.get("activation_type", "softplus")),
+        num_conditions=infer_cardinality(records, "condition_id") if use_track_metadata else 0,
+        num_cell_lines=infer_cardinality(records, "cell_line_id") if use_track_metadata else 0,
+        num_assay_types=infer_cardinality(records, "assay_type_id") if use_track_metadata else 0,
+        num_targets=infer_cardinality(records, "target_id") if use_track_metadata else 0,
+        metadata_hidden=int(model_cfg.get("metadata_hidden", 32)),
+        condition_shared_track_index=shared_track_index,
+        context_length=int(metadata.get("context_length", data_cfg.get("context_length", 524_288))),
+        n_pred_bins=int(metadata.get("n_pred_bins", data_cfg.get("n_pred_bins", 6_144))),
+        bin_size=int(metadata.get("bin_size", 32)),
+        track_names=track_names,
+        track_metadata=constant_track_metadata_values(records) if use_track_metadata else {},
+        data_path=str(cfg["data"]["path"]),
+    )
+
+
 def build_model(
     cfg: Mapping[str, Any],
     metadata: Mapping[str, Any],
     records: Sequence[Mapping[str, Any]],
     adapter_builder: Callable[[BackboneSpec], torch.nn.Module],
-) -> HeadedSequenceModel:
+) -> RegulonadoModel:
     backbone_spec = _make_backbone_spec(cfg["backbone"], metadata)
     backbone = adapter_builder(backbone_spec)
-    model_cfg = cfg["model"]
-    head_cfg = cfg["head"]
-    use_track_metadata = bool(model_cfg.get("use_track_metadata", False))
-    shared_track_index = None
-    if bool(model_cfg.get("share_condition_base_channels", True)) and use_track_metadata:
-        shared_track_index = build_condition_shared_track_index(records)
-
-    head_type = str(head_cfg.get("type", "residual_film"))
-    head_kwargs: dict[str, Any] = {
-        "in_ch": int(getattr(backbone, "feature_dim")),
-        "hidden": int(head_cfg.get("hidden", 512)),
-        "n_tracks": len(records),
-        "use_track_metadata": use_track_metadata,
-        "num_conditions": infer_cardinality(records, "condition_id") if use_track_metadata else 0,
-        "num_cell_lines": infer_cardinality(records, "cell_line_id") if use_track_metadata else 0,
-        "num_assay_types": infer_cardinality(records, "assay_type_id")
-        if use_track_metadata
-        else 0,
-        "num_targets": infer_cardinality(records, "target_id") if use_track_metadata else 0,
-        "metadata_hidden": int(model_cfg.get("metadata_hidden", 32)),
-        "condition_shared_track_index": shared_track_index,
-        "dropout": float(head_cfg.get("dropout", 0.0)),
-    }
-    if head_type == "residual_film":
-        head_kwargs["refinement_kernel"] = int(head_cfg.get("refinement_kernel", 9))
-    if head_type == "transfer_mlp" and head_cfg.get("mlp_hidden") is not None:
-        head_kwargs["mlp_hidden"] = int(head_cfg.get("mlp_hidden"))
-
-    head = build_perturb_head(
-        head_type=head_type,
-        activation_type=str(model_cfg.get("activation_type", "softplus")),
-        **head_kwargs,
-    )
-    return HeadedSequenceModel(backbone=backbone, head=head)
+    regulonado_config = _build_regulonado_config(cfg, metadata, records, backbone)
+    model = RegulonadoModel(regulonado_config, backbone=backbone)
+    return model
 
 
-def _apply_freeze_policy(model: HeadedSequenceModel, trainer_cfg: TrainerConfig) -> None:
+def _apply_freeze_policy(model: RegulonadoModel, trainer_cfg: TrainerConfig) -> None:
     model.apply_freeze_policy(
         FreezePolicy(
             freeze_backbone=trainer_cfg.freeze_backbone,
@@ -462,7 +489,7 @@ def _apply_freeze_policy(model: HeadedSequenceModel, trainer_cfg: TrainerConfig)
 
 
 def _build_optimizer(
-    model: HeadedSequenceModel, trainer_cfg: TrainerConfig
+    model: RegulonadoModel, trainer_cfg: TrainerConfig
 ) -> torch.optim.Optimizer:
     lr = trainer_cfg.learning_rate
     backbone_lr = trainer_cfg.backbone_learning_rate or lr
@@ -529,7 +556,7 @@ def _build_training_arguments(
 
     return TrainingArguments(
         output_dir=str(output_dir),
-        run_name=os.environ.get("WANDB_NAME") or output_dir.name,
+        run_name=environ.get("WANDB_NAME") or output_dir.name,
         per_device_train_batch_size=trainer_cfg.batch_size,
         per_device_eval_batch_size=trainer_cfg.resolved_eval_batch_size(),
         dataloader_num_workers=trainer_cfg.num_workers,
@@ -610,20 +637,59 @@ def _build_scheduler_for_trainer(
 
 
 class RegulonadoTrainer(Trainer):
-    """Trainer subclass that applies preprocess_logits_for_metrics inside prediction_step
-    (with raw labels) and then reduces labels to [B, T] before accumulation to avoid OOM.
+    """Trainer subclass with custom loss, checkpoint saving, and metrics preprocessing.
 
-    HF's evaluation_loop calls preprocess *after* prediction_step with whatever labels
-    prediction_step returned.  By handling preprocess here and passing None to the base
-    class, we ensure preprocess always sees full [B, T, L] labels while only [B, T]
-    reduced labels are stored across the eval set.
+    Saves checkpoints as self-contained HF ``PreTrainedModel`` directories (``config.json`` +
+    ``model.safetensors``) so any checkpoint can be loaded with
+    ``RegulonadoModel.from_pretrained(checkpoint_dir)`` without external metadata files.
+
+    Applies ``preprocess_logits_for_metrics`` inside ``prediction_step`` (with raw labels) and
+    then reduces labels to ``[B, T]`` before accumulation to avoid OOM.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._loss_fn: Callable = kwargs.pop("loss_fn", torch.nn.functional.mse_loss)
         self._metrics_preprocess: Callable | None = kwargs.pop(
             "preprocess_logits_for_metrics", None
         )
         super().__init__(*args, **kwargs)
+
+    def compute_loss(
+        self,
+        model: torch.nn.Module,
+        inputs: dict[str, Any],
+        return_outputs: bool = False,
+        num_items_in_batch: int | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        input_ids = inputs["input_ids"]
+        labels: torch.Tensor | None = inputs.get("labels")
+        track_metadata = {k: v for k, v in inputs.items() if k.startswith("track_")}
+
+        logits = model(input_ids, **track_metadata)
+        outputs: dict[str, torch.Tensor] = {"logits": logits}
+
+        loss: torch.Tensor | None = None
+        if labels is not None:
+            # Labels may arrive as [B, L, T]; align to [B, T, L] expected by the loss.
+            aligned = labels if labels.shape[-2:] == logits.shape[-2:] else labels.transpose(-2, -1)
+            loss = self._loss_fn(logits, aligned)
+            outputs["loss"] = loss
+
+        if return_outputs:
+            return loss, outputs  # type: ignore[return-value]
+        return loss  # type: ignore[return-value]
+
+    def save_model(self, output_dir: str | None = None, _internal_call: bool = False) -> None:
+        output_path = Path(output_dir or self.args.output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        # Save the RegulonadoModel directly — config.json + model.safetensors with clean keys.
+        self.model.save_pretrained(output_path, safe_serialization=True)
+        # Preserve training arguments alongside the model for traceability.
+        args_path = output_path / "training_args.json"
+        if hasattr(self.args, "to_json_file"):
+            self.args.to_json_file(args_path)
+        else:
+            Path(args_path).write_text(self.args.to_json_string())
 
     def prediction_step(
         self,
@@ -839,9 +905,8 @@ def run_training(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     _apply_freeze_policy(model, trainer_cfg)
-    trainer_model = TrainerCompatibleModel(model, loss_fn)
     if trainer_cfg.init_weights_from_checkpoint:
-        load_model_weights_only(trainer_model.model, trainer_cfg.init_weights_from_checkpoint)
+        load_model_weights_only(model, trainer_cfg.init_weights_from_checkpoint)
 
     _write_provenance(
         output_dir=output_dir,
@@ -890,13 +955,14 @@ def run_training(
             )
         )
     trainer = RegulonadoTrainer(
-        model=trainer_model,
+        model=model,
         args=training_args,
         train_dataset=dataset_dict["train"],
         eval_dataset=val_dataset,
         data_collator=collate_fn,
         optimizers=(optimizer, scheduler),
         callbacks=callbacks,
+        loss_fn=loss_fn,
         compute_metrics=_make_compute_metrics(len(records)),
         preprocess_logits_for_metrics=_make_preprocess_logits_for_metrics(topk_bins),
     )

@@ -146,3 +146,22 @@ def build_backbone_adapter(spec: BackboneSpec) -> BaseBackboneAdapter:
     if spec.backbone_type == "enformer":
         return EnformerBackboneAdapter.from_spec(spec)
     raise ValueError(f"Unsupported backbone type {spec.backbone_type!r}")
+
+
+def build_backbone_architecture(backbone_type: str, config_overrides: dict[str, Any], target_length: int | None) -> BaseBackboneAdapter:
+    """Build backbone architecture with random weights — no pretrained download.
+
+    Used by RegulonadoModel.__init__ so that from_pretrained can reconstruct the exact
+    architecture before loading merged weights from the checkpoint.
+    """
+    if backbone_type == "borzoi":
+        overrides = dict(config_overrides or {})
+        borzoi_config = BorzoiConfig(**overrides)
+        return BorzoiBackboneAdapter(Borzoi(config=borzoi_config))
+    if backbone_type == "enformer":
+        overrides = dict(config_overrides or {})
+        if target_length is not None:
+            overrides.setdefault("target_length", target_length)
+        enformer_config = EnformerConfig(**overrides)
+        return EnformerBackboneAdapter(Enformer(enformer_config))
+    raise ValueError(f"Unsupported backbone type {backbone_type!r}")
