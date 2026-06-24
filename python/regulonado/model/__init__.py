@@ -4,7 +4,9 @@ from regulonado.model.adapters import (
     BorzoiBackboneAdapter,
     EnformerBackboneAdapter,
     build_backbone_adapter,
+    build_backbone_architecture,
 )
+from regulonado.model.config import RegulonadoConfig
 from regulonado.model.heads import (
     ActivationType,
     FiLMPerturbHead,
@@ -17,7 +19,7 @@ from regulonado.model.heads import (
     build_condition_shared_track_index,
     build_perturb_head,
 )
-from regulonado.model.wrapper import BackboneAdapter, FreezePolicy, HeadedSequenceModel
+from regulonado.model.wrapper import BackboneAdapter, FreezePolicy, RegulonadoModel
 
 __all__ = [
     "ActivationType",
@@ -29,13 +31,15 @@ __all__ = [
     "FiLMPerturbHead",
     "FreezePolicy",
     "HeadType",
-    "HeadedSequenceModel",
+    "RegulonadoModel",
     "LogFiLMPerturbHead",
     "PerturbHead",
+    "RegulonadoConfig",
     "ResidualFiLMPerturbHead",
     "TrackMetadataEncoder",
     "TransferMLPPerturbHead",
     "build_backbone_adapter",
+    "build_backbone_architecture",
     "build_condition_shared_track_index",
     "build_perturb_head",
 ]
