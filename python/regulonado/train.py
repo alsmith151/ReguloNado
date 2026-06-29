@@ -435,10 +435,20 @@ def _build_regulonado_config(
             seen[stem] = 0
         track_names.append(stem)
 
+    # Store the effective backbone architecture config used at build time so
+    # HF from_pretrained(checkpoint-*) can reconstruct the exact module layout
+    # before loading weights (e.g. flashed attention variants for flashzoi).
+    backbone_model = getattr(backbone, "model", None)
+    backbone_cfg_obj = getattr(backbone_model, "config", None)
+    if backbone_cfg_obj is not None and hasattr(backbone_cfg_obj, "to_dict"):
+        config_overrides = dict(backbone_cfg_obj.to_dict())
+    else:
+        config_overrides = dict(backbone_cfg.get("config_overrides") or {})
+
     return RegulonadoConfig(
         backbone_type=str(backbone_cfg.get("name", "borzoi")),
         pretrained_name=backbone_cfg.get("pretrained_name"),
-        config_overrides=dict(backbone_cfg.get("config_overrides") or {}),
+        config_overrides=config_overrides,
         target_length=backbone_cfg.get("target_length") or target_length,
         head_type=head_type,
         head_hidden=int(head_cfg.get("hidden", 512)),
