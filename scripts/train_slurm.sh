@@ -30,7 +30,7 @@ set -euo pipefail
 #   RUN_DIR           Output directory
 #                     (default: outputs/train/<EXPERIMENT>-<DATASET_TAG>-<JOBID>)
 #   WANDB_PROJECT     W&B project name (default: regulonado)
-#   WANDB_RUN_NAME    W&B run name (default: <EXPERIMENT>-<JOBID>)
+#   WANDB_RUN_NAME    W&B run name (default: <EXPERIMENT>-<DATASET_TAG>-<JOBID>)
 #   NPROC_PER_NODE    GPUs per node (default: 2)
 #
 # Checkpoint fields (resume_from_checkpoint, init_weights_from_checkpoint) are
@@ -61,7 +61,7 @@ fi
 SCRIPTS_DIR="${REPO_DIR}/scripts"
 RUN_DIR="${RUN_DIR:-${REPO_DIR}/outputs/train/${EXPERIMENT}-${DATASET_TAG}-${SLURM_JOB_ID:-local}}"
 WANDB_PROJECT="${WANDB_PROJECT:-regulonado}"
-WANDB_RUN_NAME="${WANDB_RUN_NAME:-${EXPERIMENT}-${SLURM_JOB_ID:-local}}"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-${EXPERIMENT}-${DATASET_TAG}-${SLURM_JOB_ID:-local}}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
 
 export MPLCONFIGDIR="${MPLCONFIGDIR:-${RUN_DIR}/matplotlib}"

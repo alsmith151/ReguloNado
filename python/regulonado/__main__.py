@@ -593,9 +593,30 @@ def build(
         int,
         typer.Option(
             "--arrow-batch-size",
-            help="Samples per Rust-written Arrow record batch",
+            help="Samples per Rust-written Arrow record batch (RAM-bounded)",
         ),
     ] = 8,
+    shard_target_mb: Annotated[
+        int,
+        typer.Option(
+            "--shard-target-mb",
+            help=(
+                "Target on-disk size per Arrow shard file (chrom_pass). Shard "
+                "sample count is derived from this and the schema; raise it for "
+                "fewer/larger shards, lower it for more/smaller ones."
+            ),
+        ),
+    ] = 256,
+    shard_size: Annotated[
+        Optional[int],
+        typer.Option(
+            "--shard-size",
+            help=(
+                "Explicit samples per Arrow shard file (chrom_pass); overrides "
+                "--shard-target-mb when set."
+            ),
+        ),
+    ] = None,
     arrow_compression: Annotated[
         str,
         typer.Option(
@@ -718,6 +739,8 @@ def build(
             signal_sample_chunk=signal_sample_chunk,
             signal_track_chunk=signal_track_chunk,
             arrow_batch_size=arrow_batch_size,
+            shard_size=shard_size,
+            shard_target_mb=shard_target_mb,
             arrow_compression=arrow_compression,
             arrow_write_threads=arrow_write_threads,
             num_proc=num_proc,

@@ -338,6 +338,61 @@ def test_chrom_pass_arrow_write_threads_are_equivalent(synth_dataset, tmp_path):
         np.testing.assert_array_equal(loaded[1][i]["input_ids"], loaded[2][i]["input_ids"])
 
 
+def test_chrom_pass_shard_size_decouples_file_count_from_batch_size(synth_dataset, tmp_path):
+    """A larger shard_size produces fewer files but bit-identical contents.
+
+    The fixture has 4 samples per chromosome (2 chromosomes). With batch_size=2:
+    shard_size=2 -> 2 shards/chrom (4 files); shard_size=4 -> 1 shard/chrom of
+    two record batches (2 files). Row data must be unchanged either way.
+    """
+    from regulonado._rs import write_arrow_split_chrom_pass  # type: ignore[import-not-found]
+
+    bw_paths = synth_dataset["bw_paths"]
+    bed_rows_tuples = [
+        (c, int(s), int(e), "fold0") for (c, s, e) in synth_dataset["bed_rows"]
+    ]
+    sample_indices = list(range(len(bed_rows_tuples)))
+    signal_intervals = [(c, int(s), int(e)) for (c, s, e) in synth_dataset["bed_rows"]]
+
+    cols_by_shard: dict[int, dict] = {}
+    n_files: dict[int, int] = {}
+    for shard_size in (2, 4):
+        split_dir = tmp_path / f"split_shard_{shard_size}"
+        split_dir.mkdir()
+        write_arrow_split_chrom_pass(
+            bw_paths,
+            [False] * N_TRACKS,
+            signal_intervals,
+            str(split_dir),
+            sample_indices,
+            bed_rows_tuples,
+            synth_dataset["fasta"],
+            N_PRED_BINS,
+            CONTEXT_LEN,
+            BIN_SIZE,
+            batch_size=2,
+            shard_size=shard_size,
+            n_threads=2,
+            compression="none",
+        )
+        n_files[shard_size] = len(list(split_dir.glob("data-*-of-*.arrow")))
+        cols_by_shard[shard_size] = _load_arrow_files(split_dir)
+
+    # Decoupling: larger shard_size -> strictly fewer shard files.
+    assert n_files[2] == 4
+    assert n_files[4] == 2
+
+    # ...but identical row content (ordered by global index for a stable compare).
+    small = cols_by_shard[2]
+    large = cols_by_shard[4]
+    assert sorted(small["index"]) == sorted(large["index"]) == sample_indices
+    order_s = np.argsort(small["index"])
+    order_l = np.argsort(large["index"])
+    for si, li in zip(order_s, order_l, strict=True):
+        np.testing.assert_array_equal(small["labels"][si], large["labels"][li])
+        np.testing.assert_array_equal(small["input_ids"][si], large["input_ids"][li])
+
+
 def test_chrom_pass_shared_scan_writes_multiple_splits(synth_dataset, tmp_path):
     """The shared chrom pass should write loadable split directories in one call."""
     from datasets import Array2D, Features, Value, load_from_disk
