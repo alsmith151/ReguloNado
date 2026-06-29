@@ -21,9 +21,14 @@ set -euo pipefail
 #                in scripts/experiment/ (run-specific overrides added via the
 #                hydra.searchpath override below).
 #   DATA_DIR     Path to the prepared Arrow dataset.
+#   DATASET_TAG  Short, human-readable label for the dataset (e.g. runx-test).
+#                Embedded in the output directory name so runs are self-
+#                describing on disk. DATA_DIR's basename is usually just
+#                "dataset", hence an explicit tag rather than a derived one.
 #
 # Optional:
-#   RUN_DIR           Output directory (default: outputs/train/<EXPERIMENT>-<JOBID>)
+#   RUN_DIR           Output directory
+#                     (default: outputs/train/<EXPERIMENT>-<DATASET_TAG>-<JOBID>)
 #   WANDB_PROJECT     W&B project name (default: regulonado)
 #   WANDB_RUN_NAME    W&B run name (default: <EXPERIMENT>-<JOBID>)
 #   NPROC_PER_NODE    GPUs per node (default: 2)
@@ -40,6 +45,7 @@ set -euo pipefail
 
 : "${EXPERIMENT:?EXPERIMENT must be set — e.g. EXPERIMENT=head_only_borzoi}"
 : "${DATA_DIR:?DATA_DIR must be set — path to the prepared Arrow dataset}"
+: "${DATASET_TAG:?DATASET_TAG must be set — short dataset label, e.g. DATASET_TAG=runx-test}"
 
 if [[ -n "${REPO_DIR:-}" ]]; then
     REPO_DIR="$(cd "$REPO_DIR" && pwd)"
@@ -53,7 +59,7 @@ else
 fi
 
 SCRIPTS_DIR="${REPO_DIR}/scripts"
-RUN_DIR="${RUN_DIR:-${REPO_DIR}/outputs/train/${EXPERIMENT}-${SLURM_JOB_ID:-local}}"
+RUN_DIR="${RUN_DIR:-${REPO_DIR}/outputs/train/${EXPERIMENT}-${DATASET_TAG}-${SLURM_JOB_ID:-local}}"
 WANDB_PROJECT="${WANDB_PROJECT:-regulonado}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-${EXPERIMENT}-${SLURM_JOB_ID:-local}}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
@@ -70,6 +76,7 @@ echo "Node      : $(hostname)"
 echo "Repo      : $REPO_DIR"
 echo "Experiment: $EXPERIMENT"
 echo "Data      : $DATA_DIR"
+echo "DatasetTag: $DATASET_TAG"
 echo "Output    : $RUN_DIR"
 echo "W&B       : project=${WANDB_PROJECT} run=${WANDB_RUN_NAME}"
 echo "Config    : ${SCRIPTS_DIR}/experiment/${EXPERIMENT}.yaml (or python/configs/experiment/)"
