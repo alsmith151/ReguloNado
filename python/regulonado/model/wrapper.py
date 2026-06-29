@@ -54,12 +54,16 @@ class RegulonadoModel(PreTrainedModel):
         else:
             from regulonado.model.adapters import build_backbone_architecture
             self.backbone = build_backbone_architecture(
-                config.backbone_type, config.config_overrides, config.target_length
+                config.backbone_type,
+                config.config_overrides,
+                config.target_length,
+                config.pretrained_name,
             )
         if head is not None:
             self.head = head
         else:
             self.head = _build_head(config)
+        self.post_init()
 
     def forward(self, input_ids: torch.Tensor, **head_kwargs: torch.Tensor | None) -> torch.Tensor:
         features = self.backbone.forward_features(input_ids)
