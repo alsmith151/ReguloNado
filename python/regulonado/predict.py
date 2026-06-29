@@ -59,6 +59,7 @@ class RegionPredictionConfig:
     tracks: Sequence[str] | None = None
     device: str | None = None
     inverse_squash: bool = False
+    include_input: bool = False  # include the one-hot input in RegionPrediction.input
 
 
 @dataclass(slots=True)
@@ -68,11 +69,14 @@ class RegionPrediction:
     chrom: str
     query_start: int
     query_end: int
+    input_start: int  # start of model input context (ctx_start; may be < 0 near chrom start)
+    input_end: int  # end of model input context (ctx_end; may be > chrom length near chrom end)
     pred_start: int
     pred_end: int
     bin_size: int
     track_names: list[str]
     values: np.ndarray
+    input: np.ndarray | None = None  # optional (4, context_length) one-hot input
 
     @property
     def bin_starts(self) -> np.ndarray:
@@ -524,6 +528,7 @@ class RegionPredictor:
     ) -> RegionPrediction:
         return self.predict(chrom, start, end, tracks=tracks)
 
+
     def predict(
         self,
         chrom: str,
@@ -581,11 +586,14 @@ class RegionPredictor:
             chrom=chrom,
             query_start=start,
             query_end=end,
+            input_start=window.ctx_start,
+            input_end=window.ctx_end,
             pred_start=pred_start,
             pred_end=pred_end,
             bin_size=self.bin_size,
             track_names=selected_names,
             values=selected_values,
+            input=seq if self.config.include_input else None,
         )
 
     def predict_many(
