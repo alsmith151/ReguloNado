@@ -6,8 +6,9 @@ from typing import Any, Literal
 
 import torch
 import torch.nn as nn
-from borzoi_pytorch import Borzoi
+from borzoi_pytorch import Borzoi as _Borzoi
 from borzoi_pytorch.config_borzoi import BorzoiConfig
+
 from enformer_pytorch import Enformer
 from enformer_pytorch.config_enformer import EnformerConfig
 
@@ -43,6 +44,33 @@ def _require_pretrained_or_explicit_random(spec: BackboneSpec, example: str) -> 
         )
 
 
+
+class Borzoi(_Borzoi):
+    """Thin subclass that adapts upstream Borzoi to transformers v5 weight loading.
+
+    transformers v5 requires post_init() to mark modules with _is_hf_initialized so
+    that _initialize_missing_keys() does not re-initialize weights after from_pretrained
+    loads the checkpoint.  The upstream Borzoi.__init__ omits this call.
+
+    Additionally, transformers >=5.12 only honours the per-parameter
+    ``_is_hf_initialized`` flag (set on each tensor by the checkpoint loader) inside
+    ``_initialize_weights`` when ``is_remote_code=True``.  borzoi_pytorch is an
+    installed package, not Hub remote code, so that flag is otherwise ignored and
+    ``_init_weights`` re-runs ``xavier_normal_`` over already-loaded modules — silently
+    clobbering the pretrained BatchNorm affine params and conv/head biases (~100
+    tensors) and producing NaN activations at the first transformer block.  We force
+    the remote-code code path so loaded weights are preserved while genuinely missing
+    keys (whose tensors lack the flag) are still initialized normally.
+    """
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.post_init()
+
+    def _initialize_weights(self, module, is_remote_code: bool = False):
+        return super()._initialize_weights(module, is_remote_code=True)
+
+
 class BaseBackboneAdapter(nn.Module):
     feature_dim: int
 
@@ -65,17 +93,30 @@ class BorzoiBackboneAdapter(BaseBackboneAdapter):
         super().__init__()
         self.model = model
         self.feature_dim = 1920
+        # FlashZoi's flash_attn kernels require uniform half precision and CANNOT run
+        # under torch.autocast: flash_attn builds its rotary cos/sin cache with
+        # torch.outer *inside* the autocast region, which corrupts it to NaN on every
+        # torch/flash_attn version tested (torch 2.6-2.8, flash 2.7-2.8). So we keep the
+        # flash backbone in bf16 and run it with autocast disabled (see forward_features).
+        # Casting here — at build time, before the optimizer is created and before any
+        # DDP wrap — keeps param dtypes consistent for the optimizer and DDP reducer.
+        # The prediction head stays fp32 (the wrapper feeds it features.float()).
+        if getattr(model, "flashed", False):
+            self.model = self.model.to(torch.bfloat16)
 
     def forward_features(self, input_ids: torch.Tensor) -> torch.Tensor:
-        autocast_dtype = torch.get_autocast_dtype("cuda") if input_ids.is_cuda else torch.float32
-        with torch.amp.autocast(
-            device_type="cuda",
-            enabled=input_ids.is_cuda,
-            dtype=autocast_dtype,
-        ):
-            features = self.model.get_embs_after_crop(input_ids)
-            features = self.model.final_joined_convs(features)
-        return features
+        param_dtype = next(self.model.parameters()).dtype
+        if input_ids.is_cuda and param_dtype in (torch.bfloat16, torch.float16):
+            # Half-precision flash backbone: run with autocast explicitly disabled so the
+            # rotary cache is computed in fp32 (finite) rather than under autocast (NaN).
+            with torch.autocast(device_type="cuda", enabled=False):
+                features = self.model.get_embs_after_crop(input_ids.to(param_dtype))
+                features = self.model.final_joined_convs(features)
+            return features
+        # Non-flash / CPU path: plain fp32, no autocast (Borzoi's own attention is
+        # numerically stable in fp32; autocast fp16 here overflows the conv tower).
+        features = self.model.get_embs_after_crop(input_ids.to(param_dtype))
+        return self.model.final_joined_convs(features)
 
     def iter_named_blocks(self) -> Iterable[tuple[str, nn.Module]]:
         if hasattr(self.model, "transformer") and isinstance(
@@ -148,7 +189,12 @@ def build_backbone_adapter(spec: BackboneSpec) -> BaseBackboneAdapter:
     raise ValueError(f"Unsupported backbone type {spec.backbone_type!r}")
 
 
-def build_backbone_architecture(backbone_type: str, config_overrides: dict[str, Any], target_length: int | None) -> BaseBackboneAdapter:
+def build_backbone_architecture(
+    backbone_type: str,
+    config_overrides: dict[str, Any],
+    target_length: int | None,
+    pretrained_name: str | None = None,
+) -> BaseBackboneAdapter:
     """Build backbone architecture with random weights — no pretrained download.
 
     Used by RegulonadoModel.__init__ so that from_pretrained can reconstruct the exact
@@ -156,10 +202,17 @@ def build_backbone_architecture(backbone_type: str, config_overrides: dict[str, 
     """
     if backbone_type == "borzoi":
         overrides = dict(config_overrides or {})
+        if not overrides and pretrained_name:
+            # Legacy checkpoints may not persist backbone config_overrides in config.json.
+            # Fetching the pretrained config keeps HF from_pretrained architecture-compatible
+            # (e.g. flashed=True for flashzoi) without relying on custom load paths.
+            overrides = BorzoiConfig.from_pretrained(pretrained_name).to_dict()
         borzoi_config = BorzoiConfig(**overrides)
         return BorzoiBackboneAdapter(Borzoi(config=borzoi_config))
     if backbone_type == "enformer":
         overrides = dict(config_overrides or {})
+        if not overrides and pretrained_name:
+            overrides = EnformerConfig.from_pretrained(pretrained_name).to_dict()
         if target_length is not None:
             overrides.setdefault("target_length", target_length)
         enformer_config = EnformerConfig(**overrides)
