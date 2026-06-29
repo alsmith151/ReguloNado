@@ -27,7 +27,9 @@ friendly CLI on top of the Hugging Face `Trainer`.
                        ▼
             regulonado train               ← Borzoi/Enformer + prediction head
                        ▼
-        checkpoints · metrics · provenance · plots
+        config.json + model.safetensors    ← self-contained HF checkpoint
+                       ▼
+            regulonado predict             ← BigWig tracks from any region or whole genome
 ```
 
 A built dataset stores each example as one-hot DNA (`input_ids`, int8 `(4, L)`)
@@ -43,6 +45,7 @@ and per-track binned coverage (`labels`, float32 `(T, B)`), split into
 - [Training](#training)
 - [Experiment & loss configs](#experiment--loss-configs)
 - [Checkpoint reuse](#checkpoint-reuse)
+- [Prediction](#prediction)
 - [Run outputs](#run-outputs)
 - [External dependencies](#external-dependencies)
 - [Development & tests](#development--tests)
@@ -290,6 +293,15 @@ bash scripts/run_magnitude_experiments_slurm.sh
 
 ## Checkpoint reuse
 
+Checkpoints saved by `RegulonadoTrainer` are self-contained Hugging Face
+`PreTrainedModel` directories (`config.json` + `model.safetensors`). Any saved
+checkpoint can be loaded directly for inference:
+
+```python
+from regulonado.model import RegulonadoModel
+model = RegulonadoModel.from_pretrained("outputs/train/my_run/checkpoint-5000")
+```
+
 **Full resume** restores model weights, optimizer, scheduler, and RNG state — use
 to continue an interrupted run:
 
@@ -305,11 +317,104 @@ changing learning rate, scheduler, unfreezing policy, or training objective. Sta
 `${oc.env:...}` interpolation, or set `init_weights_from_checkpoint` directly in the
 YAML.
 
+## Prediction
+
+Once a model is trained, `regulonado predict` writes one BigWig per track directly
+from the checkpoint, without needing the original Arrow dataset.
+
+### Targeted mode (BED regions)
+
+Predict the central output window centred on each row in a BED file:
+
+```bash
+regulonado predict outputs/train/my_run genome.fa predictions/ \
+    --bed regions.bed
+```
+
+Each window in the BED is centred on `(start + end) / 2` and the model's full
+context is extracted around that centre. Only the central prediction region
+(`n_pred_bins × bin_size` bp) is written to the BigWig; windows must be spaced far
+enough apart that their predicted regions do not overlap.
+
+### Whole-genome mode
+
+Tile every chromosome into adjacent, non-overlapping prediction windows:
+
+```bash
+regulonado predict outputs/train/my_run genome.fa predictions/ \
+    --whole-genome \
+    --chromsizes hg38.chrom.sizes
+```
+
+`--chromsizes` selects which chromosomes to tile and sets the BigWig header lengths.
+When omitted the FASTA `.fai` index is used (every contig). For whole-genome runs
+with many tracks, use `--tracks` to write only the tracks you need.
+
+### Common options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--tracks` | all | Comma-separated track names or integer indices |
+| `--batch-size` | 4 | Windows per forward pass |
+| `--device` | auto | Torch device (`cuda`, `cpu`, `cuda:1`, …) |
+| `--rtol` | 0.01 | Relative tolerance for collapsing adjacent equal bins |
+| `--inverse-squash` | off | Undo the `(x+1)^0.75` training squash to approximate raw counts |
+
+Legacy run roots that pre-date the HF checkpoint format (no `config.json`) are also
+supported; pass `--dataset /path/to/dataset` to supply the metadata:
+
+```bash
+regulonado predict outputs/train/my_run genome.fa predictions/ \
+    --dataset /path/to/original/dataset \
+    --bed regions.bed
+```
+
+### Python API
+
+For notebook or script use, `RegionPredictor` wraps the model and FASTA and
+exposes a simple call interface:
+
+```python
+from regulonado.predict import RegionPredictor, RegionPredictionConfig
+
+predictor = RegionPredictor(
+    RegionPredictionConfig(
+        checkpoint_dir="outputs/train/my_run",
+        fasta_path="genome.fa",
+        tracks=["my_track_1", "my_track_2"],   # optional subset
+        inverse_squash=True,
+    )
+)
+
+# Single region — returns a RegionPrediction with .values (n_tracks, n_bins)
+pred = predictor("chr1", 1_000_000, 1_010_000)
+print(pred.values.shape)      # (2, n_pred_bins)
+print(pred.track_names)       # ['my_track_1', 'my_track_2']
+
+# Multiple regions
+preds = predictor.predict_many([
+    ("chr1", 1_000_000, 1_010_000),
+    ("chr2", 5_000_000, 5_010_000),
+])
+
+# Long-form records (chrom/start/end/track/value) for downstream analysis
+import pandas as pd
+df = pd.DataFrame(pred.as_records())
+```
+
+`RegionPrediction.bin_starts` / `.bin_ends` give the genomic coordinates of each
+bin in the output array.
+
 ## Run outputs
 
 Each run writes, into `output_dir` (defaults to the Hydra output dir or the Slurm
 wrapper's `RUN_DIR`):
 
+- `config.json` — `RegulonadoConfig` (architecture, geometry, track names/metadata);
+  enables `RegulonadoModel.from_pretrained` and `regulonado predict` without any
+  external metadata files.
+- `model.safetensors` — merged model weights (no `model.` key prefix).
+- `training_args.json` — HF `TrainingArguments` serialised alongside the weights.
 - `resolved_config.json` — fully resolved Hydra config.
 - `provenance.json` — command, git commit/status, dataset hash and split summary,
   package versions, CUDA/Torch details, Slurm context, checkpoint reuse mode.
@@ -389,7 +494,10 @@ internals.
   production writer).
 - `python/regulonado/dataset.py` — dataset construction, transforms, scaling, augmentation.
 - `python/regulonado/train.py` — training entrypoint (Hydra + HF `Trainer`).
-- `python/regulonado/model/` — backbone adapters and prediction heads.
+- `python/regulonado/predict.py` — `RegionPredictor` and `predict_to_bigwig`; BigWig
+  generation from a trained checkpoint.
+- `python/regulonado/model/` — backbone adapters, prediction heads, `RegulonadoModel`
+  (`PreTrainedModel`), and `RegulonadoConfig`.
 - `python/configs/` — Hydra configs for backbones, heads, losses, and experiments.
 - `scripts/` — Slurm launchers (see `scripts/README.md`); `scripts/experiment/` holds
   production run configs.
