@@ -59,6 +59,49 @@ _DEFAULT_ARROW_BATCH_SIZE = 8
 _DEFAULT_ARROW_COMPRESSION = "lz4"
 _DEDUPE_TRACK_MODES = {"none", "identity", "content"}
 
+# Target on-disk size per Arrow shard file. The chrom_pass writer groups whole
+# record batches into shard files to hit roughly this size, decoupling the
+# shard count from the (RAM-bounded) record-batch size. ~256 MB keeps shard
+# counts in the low hundreds while staying comfortably under the ~500 MB the
+# HuggingFace/Arrow ecosystem recommends per shard.
+_DEFAULT_SHARD_TARGET_MB = 256
+# Rough on-disk compression ratio (compressed / uncompressed) per IPC codec,
+# used only to size shards. One-hot sequence compresses very well; float32
+# labels much less, so these are deliberately conservative (over-estimate the
+# compressed size, i.e. under-fill shards rather than overshoot the target).
+_SHARD_COMPRESSION_RATIO = {"zstd": 0.5, "lz4": 0.65, "none": 1.0}
+
+
+def _recommend_shard_size(
+    *,
+    n_tracks: int,
+    stored_n_bins: int,
+    stored_context: int,
+    compression: str,
+    target_mb: int,
+    batch_size: int,
+) -> int:
+    """Samples per shard file to hit ~``target_mb`` on disk.
+
+    Estimates the per-sample on-disk footprint from the schema (float32 labels +
+    int8 one-hot sequence + small per-row overhead) and divides the target byte
+    budget by it. The result is rounded up to a whole number of record batches
+    so every shard is a clean sequence of ``batch_size`` batches, and clamped to
+    at least one batch.
+    """
+    label_bytes = n_tracks * stored_n_bins * 4
+    seq_bytes = 4 * stored_context  # int8 one-hot, 4 channels
+    row_overhead = 128  # interval string + index/local_index + Arrow framing
+    per_sample_uncompressed = label_bytes + seq_bytes + row_overhead
+    ratio = _SHARD_COMPRESSION_RATIO.get(compression.lower(), 0.65)
+    per_sample_on_disk = max(1, int(per_sample_uncompressed * ratio))
+
+    target_bytes = max(1, target_mb) * 1_000_000
+    est_samples = max(1, target_bytes // per_sample_on_disk)
+    # Round up to a whole number of record batches, but never below one batch.
+    n_batches = max(1, -(-est_samples // batch_size))
+    return n_batches * batch_size
+
 DEFAULT_SPLITS: dict[str, list[str]] = {
     "train": ["fold0", "fold1", "fold2", "fold5", "fold6", "fold7"],
     "validation": ["fold4"],
@@ -910,6 +953,8 @@ def build_dataset_fast(
     signal_sample_chunk: int = _DEFAULT_SIGNAL_SAMPLE_CHUNK,
     signal_track_chunk: int = _DEFAULT_SIGNAL_TRACK_CHUNK,
     arrow_batch_size: int = _DEFAULT_ARROW_BATCH_SIZE,
+    shard_size: int | None = None,
+    shard_target_mb: int = _DEFAULT_SHARD_TARGET_MB,
     arrow_compression: str = _DEFAULT_ARROW_COMPRESSION,
     arrow_write_threads: int | None = None,
     num_proc: int = 1,
@@ -935,9 +980,10 @@ def build_dataset_fast(
     strategy : {"chrom_pass", "fast"}
         - "chrom_pass" (default): one chromosome at a time, decoding all
           tracks' binned signal once per chromosome and slicing per-sample
-          rows from RAM. One Arrow shard per chromosome, ordered chrom-major
-          (largest chromosome first). Rows within each shard are in
-          original BED order. ~10× fewer BigWig seeks than "fast".
+          rows from RAM. Shards are ordered chrom-major (largest chromosome
+          first); each chromosome yields ``ceil(samples / shard_size)`` shard
+          files sized to ~``shard_target_mb`` on disk. Rows within each shard
+          are in original BED order. ~10× fewer BigWig seeks than "fast".
         - "fast": sample-batched writer; reads each sample's interval from
           every BigWig per batch. Retained for parity testing.
     chrom_filter : list[str] | None
@@ -1007,6 +1053,25 @@ def build_dataset_fast(
             f"Capping arrow_batch_size from {arrow_batch_size} to {effective_arrow_batch} "
             f"to avoid Arrow i32 offset overflow ({n_tracks} tracks × {stored_n_bins} bins)"
         )
+    # Shard files group whole record batches up to a target on-disk size. An
+    # explicit shard_size wins; otherwise derive it from shard_target_mb.
+    if shard_size is not None:
+        effective_shard_size = max(effective_arrow_batch, shard_size)
+    else:
+        effective_shard_size = _recommend_shard_size(
+            n_tracks=n_tracks,
+            stored_n_bins=stored_n_bins,
+            stored_context=stored_context,
+            compression=arrow_compression,
+            target_mb=shard_target_mb,
+            batch_size=effective_arrow_batch,
+        )
+    logger.info(
+        f"Shard sizing: {effective_shard_size} samples/shard "
+        f"({effective_shard_size // effective_arrow_batch} record batch(es) of "
+        f"{effective_arrow_batch}), target≈{shard_target_mb} MB on disk, "
+        f"compression={arrow_compression}"
+    )
     label_batch_gb = effective_arrow_batch * n_tracks * stored_n_bins * 4 / 1e9
     seq_batch_gb = effective_arrow_batch * 4 * stored_context / 1e9
     effective_arrow_write_threads = (
@@ -1145,6 +1210,7 @@ def build_dataset_fast(
                 stored_context,
                 bin_size,
                 batch_size=effective_arrow_batch,
+                shard_size=effective_shard_size,
                 n_threads=n_extract_threads,
                 arrow_write_threads=effective_arrow_write_threads,
                 compression=arrow_compression,

@@ -5,11 +5,15 @@
 //! that matrix. This collapses ~N_samples random BigWig seeks per chromosome
 //! into one sequential pass per (chrom, track) pair.
 //!
-//! Output: one Arrow IPC shard per chromosome, `data-NNNNN-of-MMMMM.arrow`,
-//! where shard `00000` is the longest chromosome with at least one sample in
-//! this split (descending by length). Rows within a shard are in original
-//! BED order. The schema includes a `local_index` column so downstream code can
-//! recover original BED order via `dataset.sort("index")` if needed.
+//! Output: Arrow IPC shards `data-NNNNN-of-MMMMM.arrow`, ordered chrom-major
+//! with shard `00000` on the longest chromosome that has at least one sample in
+//! this split (descending by length). Each chromosome is split into
+//! `ceil(samples / shard_size)` shard files, and each shard file holds
+//! `ceil(shard_size / batch_size)` Arrow record batches — so shard *file* size
+//! (`shard_size`) is decoupled from the RAM-bounded record-batch size
+//! (`batch_size`). Rows within a shard are in original BED order. The schema
+//! includes a `local_index` column so downstream code can recover original BED
+//! order via `dataset.sort("index")` if needed.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -57,8 +61,9 @@ struct WriteShardSpec<'a> {
     out_dir: &'a str,
     shard_idx: usize,
     shard_total: usize,
-    batch_start: usize,
-    batch_end: usize,
+    /// Sample range [shard_start, shard_end) covered by this shard file.
+    shard_start: usize,
+    shard_end: usize,
     samples: &'a [(usize, usize)],
 }
 
@@ -71,6 +76,10 @@ struct WriteShardCtx<'a> {
     n_bins: usize,
     context_len: usize,
     bin_size: u32,
+    /// Rows per Arrow record batch within a shard file. A shard holds
+    /// `ceil((shard_end - shard_start) / batch_size)` record batches, keeping
+    /// peak RAM bounded by one batch regardless of the shard's row count.
+    batch_size: usize,
     signal_intervals: &'a [(String, u32, u32)],
     bed_rows: &'a [(String, u32, u32, String)],
     fasta_path: &'a str,
@@ -82,7 +91,7 @@ fn write_chrom_shard(
     ctx: &WriteShardCtx<'_>,
 ) -> Result<WriteShardProfile, String> {
     let started = Instant::now();
-    let rows_in_batch = spec.batch_end - spec.batch_start;
+    let rows_in_shard = spec.shard_end - spec.shard_start;
     let shard_path = format!(
         "{}/data-{:05}-of-{:05}.arrow",
         spec.out_dir, spec.shard_idx, spec.shard_total
@@ -96,79 +105,96 @@ fn write_chrom_shard(
     let mut writer = StreamWriter::try_new_with_options(out_file, &ctx.schema, write_options)
         .map_err(|e| e.to_string())?;
 
-    let t_slice = Instant::now();
-    let mut labels: Vec<f32> = vec![0.0; rows_in_batch * ctx.n_tracks * ctx.n_bins];
-    for (row_idx, (_, global_idx)) in spec.samples[spec.batch_start..spec.batch_end]
-        .iter()
-        .copied()
-        .enumerate()
-    {
-        let (_chrom, sig_start, sig_end) = &ctx.signal_intervals[global_idx];
-        let bin_start = (*sig_start / ctx.bin_size) as usize;
-        let bin_end_raw = (*sig_end / ctx.bin_size) as usize;
-        let bin_end = bin_end_raw.min(ctx.n_chrom_bins);
-        let copy_n = bin_end.saturating_sub(bin_start).min(ctx.n_bins);
+    let mut slice_ns: u128 = 0;
+    let mut fasta_ns: u128 = 0;
+    let mut batch_ns: u128 = 0;
+    let mut arrow_write_ns: u128 = 0;
 
-        if copy_n > 0 && bin_start < ctx.n_chrom_bins {
-            let row_base = row_idx * ctx.n_tracks * ctx.n_bins;
-            for track_idx in 0..ctx.n_tracks {
-                let src_start = track_idx * ctx.n_chrom_bins + bin_start;
-                let dst_start = row_base + track_idx * ctx.n_bins;
-                labels[dst_start..dst_start + copy_n]
-                    .copy_from_slice(&ctx.chrom_signals[src_start..src_start + copy_n]);
+    // Write the shard as a sequence of record batches of at most `batch_size`
+    // rows. Decoupling on-disk shard size from record-batch size keeps peak RAM
+    // bounded by one batch while producing far fewer, larger shard files.
+    let batch_size = ctx.batch_size.max(1);
+    let mut batch_start = spec.shard_start;
+    while batch_start < spec.shard_end {
+        let batch_end = (batch_start + batch_size).min(spec.shard_end);
+        let rows_in_batch = batch_end - batch_start;
+
+        let t_slice = Instant::now();
+        let mut labels: Vec<f32> = vec![0.0; rows_in_batch * ctx.n_tracks * ctx.n_bins];
+        for (row_idx, (_, global_idx)) in spec.samples[batch_start..batch_end]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            let (_chrom, sig_start, sig_end) = &ctx.signal_intervals[global_idx];
+            let bin_start = (*sig_start / ctx.bin_size) as usize;
+            let bin_end_raw = (*sig_end / ctx.bin_size) as usize;
+            let bin_end = bin_end_raw.min(ctx.n_chrom_bins);
+            let copy_n = bin_end.saturating_sub(bin_start).min(ctx.n_bins);
+
+            if copy_n > 0 && bin_start < ctx.n_chrom_bins {
+                let row_base = row_idx * ctx.n_tracks * ctx.n_bins;
+                for track_idx in 0..ctx.n_tracks {
+                    let src_start = track_idx * ctx.n_chrom_bins + bin_start;
+                    let dst_start = row_base + track_idx * ctx.n_bins;
+                    labels[dst_start..dst_start + copy_n]
+                        .copy_from_slice(&ctx.chrom_signals[src_start..src_start + copy_n]);
+                }
             }
         }
+        slice_ns += t_slice.elapsed().as_nanos();
+
+        let t_fasta = Instant::now();
+        let mut input_values = Vec::with_capacity(rows_in_batch * 4 * ctx.context_len);
+        let mut interval_builder = StringBuilder::with_capacity(rows_in_batch, rows_in_batch * 32);
+        let mut index_builder = Int64Builder::with_capacity(rows_in_batch);
+        let mut local_index_builder = Int64Builder::with_capacity(rows_in_batch);
+
+        for (local_idx, global_idx) in spec.samples[batch_start..batch_end].iter().copied() {
+            let (bed_chrom, bed_start, bed_end, _) = &ctx.bed_rows[global_idx];
+            let seq = read_one_hot_sequence(
+                &fasta,
+                ctx.fai,
+                bed_chrom,
+                *bed_start,
+                *bed_end,
+                ctx.context_len,
+            )?;
+            input_values.extend_from_slice(&seq);
+            interval_builder.append_value(format!("{bed_chrom}:{bed_start}-{bed_end}"));
+            index_builder.append_value(global_idx as i64);
+            local_index_builder.append_value(local_idx as i64);
+        }
+        fasta_ns += t_fasta.elapsed().as_nanos();
+
+        let t_batch = Instant::now();
+        let batch = RecordBatch::try_new(
+            Arc::clone(&ctx.schema),
+            vec![
+                make_2d_i8_array(input_values, rows_in_batch, 4, ctx.context_len),
+                make_2d_f32_array(labels, rows_in_batch, ctx.n_tracks, ctx.n_bins),
+                Arc::new(interval_builder.finish()) as ArrayRef,
+                Arc::new(index_builder.finish()) as ArrayRef,
+                Arc::new(local_index_builder.finish()) as ArrayRef,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        batch_ns += t_batch.elapsed().as_nanos();
+
+        let t_arrow = Instant::now();
+        writer.write(&batch).map_err(|e| e.to_string())?;
+        arrow_write_ns += t_arrow.elapsed().as_nanos();
+
+        batch_start = batch_end;
     }
-    let slice_ns = t_slice.elapsed().as_nanos();
 
-    let t_fasta = Instant::now();
-    let mut input_values = Vec::with_capacity(rows_in_batch * 4 * ctx.context_len);
-    let mut interval_builder = StringBuilder::with_capacity(rows_in_batch, rows_in_batch * 32);
-    let mut index_builder = Int64Builder::with_capacity(rows_in_batch);
-    let mut local_index_builder = Int64Builder::with_capacity(rows_in_batch);
-
-    for (local_idx, global_idx) in spec.samples[spec.batch_start..spec.batch_end]
-        .iter()
-        .copied()
-    {
-        let (bed_chrom, bed_start, bed_end, _) = &ctx.bed_rows[global_idx];
-        let seq = read_one_hot_sequence(
-            &fasta,
-            ctx.fai,
-            bed_chrom,
-            *bed_start,
-            *bed_end,
-            ctx.context_len,
-        )?;
-        input_values.extend_from_slice(&seq);
-        interval_builder.append_value(format!("{bed_chrom}:{bed_start}-{bed_end}"));
-        index_builder.append_value(global_idx as i64);
-        local_index_builder.append_value(local_idx as i64);
-    }
-    let fasta_ns = t_fasta.elapsed().as_nanos();
-
-    let t_batch = Instant::now();
-    let batch = RecordBatch::try_new(
-        Arc::clone(&ctx.schema),
-        vec![
-            make_2d_i8_array(input_values, rows_in_batch, 4, ctx.context_len),
-            make_2d_f32_array(labels, rows_in_batch, ctx.n_tracks, ctx.n_bins),
-            Arc::new(interval_builder.finish()) as ArrayRef,
-            Arc::new(index_builder.finish()) as ArrayRef,
-            Arc::new(local_index_builder.finish()) as ArrayRef,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    let batch_ns = t_batch.elapsed().as_nanos();
-
-    let t_arrow = Instant::now();
-    writer.write(&batch).map_err(|e| e.to_string())?;
+    let t_finish = Instant::now();
     writer.finish().map_err(|e| e.to_string())?;
-    let arrow_write_ns = t_arrow.elapsed().as_nanos();
+    arrow_write_ns += t_finish.elapsed().as_nanos();
 
     let bytes = std::fs::metadata(&shard_path).map(|m| m.len()).unwrap_or(0);
     Ok(WriteShardProfile {
-        rows: rows_in_batch,
+        rows: rows_in_shard,
         bytes,
         slice_ns,
         fasta_ns,
@@ -191,11 +217,13 @@ fn write_chrom_shard(
     context_len,
     bin_size,
     batch_size=4,
+    shard_size=0,
     n_threads=None,
     arrow_write_threads=None,
     compression=None,
     profile=false
 ))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_arrow_split_chrom_pass(
     py: Python<'_>,
     bw_paths: Vec<String>,
@@ -209,6 +237,7 @@ pub(crate) fn write_arrow_split_chrom_pass(
     context_len: usize,
     bin_size: u32,
     batch_size: usize,
+    shard_size: usize,
     n_threads: Option<usize>,
     arrow_write_threads: Option<usize>,
     compression: Option<String>,
@@ -270,8 +299,10 @@ pub(crate) fn write_arrow_split_chrom_pass(
         write_threads,
     );
 
-    // Validate Arrow i32 offset constraints once.
+    // Validate Arrow i32 offset constraints once. Offsets are bounded by one
+    // record batch (`batch_size`), not by the on-disk shard size.
     let batch_size = batch_size.max(1);
+    let shard_size = if shard_size == 0 { batch_size } else { shard_size.max(1) };
     let max_label_offset = batch_size.saturating_mul(n_tracks).saturating_mul(n_bins);
     let max_input_offset = batch_size.saturating_mul(4).saturating_mul(context_len);
     if max_label_offset > i32::MAX as usize || max_input_offset > i32::MAX as usize {
@@ -300,7 +331,7 @@ pub(crate) fn write_arrow_split_chrom_pass(
         .iter()
         .zip(valid_chroms.iter())
         .filter(|(_, valid)| **valid)
-        .map(|((chrom, _), _)| samples_by_chrom[chrom].len().div_ceil(batch_size))
+        .map(|((chrom, _), _)| samples_by_chrom[chrom].len().div_ceil(shard_size))
         .sum();
     let mut next_output_shard = 0usize;
 
@@ -328,7 +359,7 @@ pub(crate) fn write_arrow_split_chrom_pass(
             continue;
         }
         let chrom_shard_start = next_output_shard;
-        let chrom_n_shards = samples.len().div_ceil(batch_size);
+        let chrom_n_shards = samples.len().div_ceil(shard_size);
         next_output_shard += chrom_n_shards;
 
         eprintln!(
@@ -393,14 +424,14 @@ pub(crate) fn write_arrow_split_chrom_pass(
         // --- Phase 2: write row-block Arrow shards for this chrom in parallel ---
         let t_writer = Instant::now();
         let write_specs: Vec<WriteShardSpec<'_>> = (0..samples.len())
-            .step_by(batch_size)
+            .step_by(shard_size)
             .enumerate()
-            .map(|(block_idx, batch_start)| WriteShardSpec {
+            .map(|(block_idx, shard_start)| WriteShardSpec {
                 out_dir: &out_dir,
                 shard_idx: chrom_shard_start + block_idx,
                 shard_total: total_output_shards,
-                batch_start,
-                batch_end: (batch_start + batch_size).min(samples.len()),
+                shard_start,
+                shard_end: (shard_start + shard_size).min(samples.len()),
                 samples,
             })
             .collect();
@@ -413,6 +444,7 @@ pub(crate) fn write_arrow_split_chrom_pass(
             n_bins,
             context_len,
             bin_size,
+            batch_size,
             signal_intervals: &signal_intervals,
             bed_rows: &bed_rows,
             fasta_path: &fasta_path,
@@ -519,7 +551,7 @@ fn build_split_chrom_samples(
     bed_rows: &[(String, u32, u32, String)],
     chrom_lengths: &HashMap<String, crate::fasta::FastaIndexRecord>,
     bin_size: u32,
-    batch_size: usize,
+    shard_size: usize,
 ) -> Result<(Vec<SplitChromSamples>, Vec<(String, u64)>), String> {
     if split_names.len() != out_dirs.len() || split_names.len() != split_sample_indices.len() {
         return Err(format!(
@@ -562,7 +594,7 @@ fn build_split_chrom_samples(
                     .map(|r| ((r.len as usize) / (bin_size as usize)) > 0)
                     .unwrap_or(false)
             })
-            .map(|(_, samples)| samples.len().div_ceil(batch_size))
+            .map(|(_, samples)| samples.len().div_ceil(shard_size))
             .sum();
 
         splits.push(SplitChromSamples {
@@ -594,11 +626,13 @@ fn build_split_chrom_samples(
     context_len,
     bin_size,
     batch_size=4,
+    shard_size=0,
     n_threads=None,
     arrow_write_threads=None,
     compression=None,
     profile=false
 ))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_arrow_splits_chrom_pass(
     py: Python<'_>,
     bw_paths: Vec<String>,
@@ -613,6 +647,7 @@ pub(crate) fn write_arrow_splits_chrom_pass(
     context_len: usize,
     bin_size: u32,
     batch_size: usize,
+    shard_size: usize,
     n_threads: Option<usize>,
     arrow_write_threads: Option<usize>,
     compression: Option<String>,
@@ -627,6 +662,7 @@ pub(crate) fn write_arrow_splits_chrom_pass(
 
     let n_tracks = bw_paths.len();
     let batch_size = batch_size.max(1);
+    let shard_size = if shard_size == 0 { batch_size } else { shard_size.max(1) };
     validate_batch_size(batch_size, n_tracks, n_bins, context_len)
         .map_err(PyRuntimeError::new_err)?;
 
@@ -639,7 +675,7 @@ pub(crate) fn write_arrow_splits_chrom_pass(
         &bed_rows,
         &fai,
         bin_size,
-        batch_size,
+        shard_size,
     )
     .map_err(PyRuntimeError::new_err)?;
 
@@ -703,7 +739,7 @@ pub(crate) fn write_arrow_splits_chrom_pass(
         let chrom_shards: usize = splits
             .iter()
             .filter_map(|split| split.samples_by_chrom.get(chrom))
-            .map(|samples| samples.len().div_ceil(batch_size))
+            .map(|samples| samples.len().div_ceil(shard_size))
             .sum();
         let chrom_samples: usize = splits
             .iter()
@@ -773,13 +809,13 @@ pub(crate) fn write_arrow_splits_chrom_pass(
             let Some(samples) = split.samples_by_chrom.get(chrom) else {
                 continue;
             };
-            for batch_start in (0..samples.len()).step_by(batch_size) {
+            for shard_start in (0..samples.len()).step_by(shard_size) {
                 write_specs.push(WriteShardSpec {
                     out_dir: &split.out_dir,
                     shard_idx: split.next_shard,
                     shard_total: split.total_shards,
-                    batch_start,
-                    batch_end: (batch_start + batch_size).min(samples.len()),
+                    shard_start,
+                    shard_end: (shard_start + shard_size).min(samples.len()),
                     samples,
                 });
                 split.next_shard += 1;
@@ -795,6 +831,7 @@ pub(crate) fn write_arrow_splits_chrom_pass(
             n_bins,
             context_len,
             bin_size,
+            batch_size,
             signal_intervals: &signal_intervals,
             bed_rows: &bed_rows,
             fasta_path: &fasta_path,
