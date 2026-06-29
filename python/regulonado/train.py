@@ -6,12 +6,14 @@ import random
 from collections.abc import Callable, Mapping, Sequence
 from os import environ
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import hydra
 import numpy as np
 import torch
 from datasets import DatasetDict, load_from_disk
+from loguru import logger
 from datasets import IterableDataset as HFIterableDataset
 from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
@@ -56,6 +58,11 @@ from regulonado.training.metrics import (
     _make_preprocess_logits_for_metrics,
 )
 from regulonado.training.provenance import _write_provenance
+
+
+def _rank() -> int:
+    """Process rank under torchrun/DDP (0 when launched single-process)."""
+    return int(environ.get("RANK") or environ.get("LOCAL_RANK") or 0)
 
 
 def _normalise_checkpoint_mode(value: Any) -> str | bool | None:
@@ -740,13 +747,29 @@ def run_training(
     seed = int(cfg.get("seed", 42))
     _seed_everything(seed)
 
+    rank = _rank()
     data_path = Path(str(cfg["data"]["path"]))
     streaming = bool(cfg["data"].get("streaming", False))
+    logger.info(
+        f"[rank {rank}] run_training start | backbone={cfg['backbone'].get('name')} "
+        f"head={cfg['head'].get('type')} loss={cfg['loss'].get('name')} "
+        f"streaming={streaming} output_dir={cfg.get('output_dir')}"
+    )
+
+    logger.info(f"[rank {rank}] loading dataset from {data_path} (streaming={streaming}) ...")
+    t0 = perf_counter()
     dataset_dict = (
         _load_dataset_streaming(data_path) if streaming else load_from_disk(str(data_path))
     )
+    if streaming:
+        logger.info(f"[rank {rank}] dataset opened in {perf_counter() - t0:.1f}s (streaming)")
+    else:
+        sizes = {split: len(dataset_dict[split]) for split in dataset_dict}
+        logger.info(f"[rank {rank}] dataset loaded in {perf_counter() - t0:.1f}s | splits={sizes}")
+
     metadata = load_dataset_metadata(data_path)
     records = track_records(metadata)
+    logger.info(f"[rank {rank}] metadata loaded | {len(records)} tracks")
 
     if streaming and "train" in dataset_dict:
         shuffle_buffer = _estimate_shuffle_buffer(cfg["data"], metadata)
@@ -784,8 +807,15 @@ def run_training(
                 dataset_dict["validation"] = val
 
     dataset_dict = _apply_dataset_transforms(dataset_dict, metadata, records, cfg["data"])
+    logger.info(f"[rank {rank}] dataset transforms applied")
 
+    logger.info(f"[rank {rank}] building model ...")
+    t0 = perf_counter()
     model = build_model(cfg, metadata, records, adapter_builder)
+    n_params = sum(p.numel() for p in model.parameters())
+    logger.info(
+        f"[rank {rank}] model built in {perf_counter() - t0:.1f}s | {n_params / 1e6:.1f}M params"
+    )
     track_metadata_tensors = (
         constant_track_metadata(records)
         if bool(cfg["model"].get("use_track_metadata", False))
@@ -915,8 +945,18 @@ def run_training(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     _apply_freeze_policy(model, trainer_cfg)
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(
+        f"[rank {rank}] freeze policy applied (freeze_backbone={trainer_cfg.freeze_backbone}) | "
+        f"{n_trainable / 1e6:.1f}M trainable params"
+    )
     if trainer_cfg.init_weights_from_checkpoint:
+        logger.info(
+            f"[rank {rank}] warm-starting weights from "
+            f"{trainer_cfg.init_weights_from_checkpoint} ..."
+        )
         load_model_weights_only(model, trainer_cfg.init_weights_from_checkpoint)
+        logger.info(f"[rank {rank}] warm-start weights loaded")
 
     _write_provenance(
         output_dir=output_dir,
@@ -976,7 +1016,15 @@ def run_training(
         compute_metrics=_make_compute_metrics(len(records)),
         preprocess_logits_for_metrics=_make_preprocess_logits_for_metrics(topk_bins),
     )
+    logger.info(
+        f"[rank {rank}] starting trainer.train() | "
+        f"max_steps={trainer_cfg.max_steps} max_epochs={trainer_cfg.max_epochs} "
+        f"batch_size={trainer_cfg.batch_size} grad_accum={trainer_cfg.gradient_accumulation_steps} "
+        f"resume={trainer_cfg.resume_from_checkpoint} eval_on_start={trainer_cfg.eval_on_start}"
+    )
+    t0 = perf_counter()
     trainer.train(resume_from_checkpoint=trainer_cfg.resume_from_checkpoint)
+    logger.info(f"[rank {rank}] trainer.train() returned after {perf_counter() - t0:.1f}s")
     train_losses = [
         float(entry["loss"])
         for entry in trainer.state.log_history
