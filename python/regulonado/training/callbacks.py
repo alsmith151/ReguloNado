@@ -74,8 +74,15 @@ def _plot_examples(
         for track_idx in track_indices:
             pred = preds[example_idx, track_idx]
             target = targets[example_idx, track_idx]
-            ymax = max(float(pred.max()), float(target.max()), 0.0)
-            ymin = min(float(pred.min()), float(target.min()), 0.0)
+            # Predictions may contain NaN/Inf (e.g. early in training); ignore
+            # non-finite values when computing axis limits so set_ylim doesn't raise.
+            finite = np.concatenate([pred, target])
+            finite = finite[np.isfinite(finite)]
+            if finite.size:
+                ymax = max(float(finite.max()), 0.0)
+                ymin = min(float(finite.min()), 0.0)
+            else:
+                ymax, ymin = 0.0, 0.0
             pad = (ymax - ymin) * 0.05 or 0.1
             track_name = (
                 track_names[track_idx]
