@@ -11,14 +11,12 @@ Regulonado is a mixed Rust/Python package for building Arrow datasets from BigWi
 The production hot path is **entirely in Rust**. Its centerpiece is the chromosome-pass writer:
 
 - **`chrom_pass.rs`** — the production Arrow writer. For each chromosome, it decodes the binned signal of all tracks once into an in-RAM `(n_tracks, n_chrom_bins)` matrix, then slices per-sample rows out of it. This collapses ~N_samples random BigWig seeks per chromosome into one sequential pass per (chrom, track) pair. It releases the GIL and fans out over tracks with Rayon, and over shard writers with a second thread pool. A Python port using pybigtools would have to re-serialise on the GIL to hold and slice that matrix — this is the exact reason this is not pure Python.
-- **`writers.rs`** — the sample-batched fallback writer (`write_arrow_split_from_bigwigs`), kept for parity testing and benchmarking. Also contains debug writers (`write_arrow_split_from_sample_major`, `write_arrow_split_from_track_major`) gated behind the `debug-writers` Cargo feature.
+- **`writers.rs`** — the sample-batched fallback writer (`write_arrow_split_from_bigwigs`), kept for parity testing.
 - **`binning.rs`** — interval-to-bin accumulation. Holds reusable scratch buffers (`BinningScratch`) to avoid repeated allocations in tight loops.
 - **`fasta.rs`** — `.fai` index parsing and one-hot sequence loading. Computes byte offsets directly from samtools-style FASTA indices; avoids Python and avoids constructing a GenomeIntervalDataset during Arrow writing.
 - **`schema.rs`** — Arrow schema construction and HuggingFace metadata. Builds HF-compatible nested-list Arrow types with extension metadata for `Array2D` features.
 - **`io_utils.rs`** — progress logging, IPC write options, Rayon pool configuration. Exposes Rayon thread count control without rebuilding the global pool (which can only be built once per process).
 - **`bigwig_io.rs`** — BigWig extraction and interval iteration via the `bigtools` crate.
-- **`signal_file.rs`** — debug scaffold for writing extracted signals to intermediate files.
-- **`debug.rs`** — per-sample extraction entry points (`extract_bigwig_to_file`, `extract_bigwig_regions`, `extract_all_tracks_to_dir`, `extract_all_tracks_to_file`). Only compiled with the `debug-writers` Cargo feature.
 
 All error handling is via `Result<_, String>` funnelled into `PyRuntimeError`. Python callers cannot distinguish a missing FASTA index from an out-of-range BED row from an Arrow overflow — consider this a known rough edge.
 
@@ -47,7 +45,7 @@ Configuration:
 - **`python/configs/head/`** — task head definitions.
 - **`python/configs/loss/`** — loss function configs.
 
-The only production `#[pyfunction]` is `write_arrow_splits_chrom_pass` called from `dataset.py`. All other Rust exports are either the fallback writer or feature-gated debug code.
+The only production `#[pyfunction]` is `write_arrow_splits_chrom_pass` called from `dataset.py`. The fallback writer `write_arrow_split_from_bigwigs` is also exposed for parity testing.
 
 ### Extension binding
 
@@ -68,8 +66,6 @@ src/
   fasta.rs                         FASTA index and one-hot encoding
   schema.rs                        Arrow schema / HuggingFace metadata
   io_utils.rs                      Progress logging, IPC options, Rayon pool config
-  signal_file.rs                   Debug intermediate file I/O
-  debug.rs                         Per-sample extraction (feature-gated)
 
 python/regulonado/
   __init__.py
@@ -147,9 +143,7 @@ CLAUDE.md                          Developer notes (this repo)
 
 2. **Duplicate Arrow assembly** — `writers.rs` duplicates some of `chrom_pass.rs`'s record-batch construction logic. Refactoring to share the batch-building code would reduce maintenance burden but requires careful handling of the different I/O patterns.
 
-3. **Optional ndarray/numpy in Rust** — The `numpy` and `ndarray` Rust crates are pulled in only by the `debug-writers` Cargo feature, but they add ~5 MB to the wheel. If the debug feature becomes rarely used, consider moving debug output to pure Python or removing it entirely.
-
-4. **Rayon pool rebuilding** — Rayon's global thread pool can only be configured once per process. When `write_arrow_splits_chrom_pass` is called multiple times from the same interpreter, the `n_threads` parameter on the second call is silently ignored. This is unavoidable but now logs a warning.
+3. **Rayon pool rebuilding** — Rayon's global thread pool can only be configured once per process. When `write_arrow_splits_chrom_pass` is called multiple times from the same interpreter, the `n_threads` parameter on the second call is silently ignored. This is unavoidable but now logs a warning.
 
 ## Building and testing
 
@@ -178,22 +172,10 @@ Full suite is 97 tests. Key narrower checks:
 .venv/bin/pytest tests/test_losses.py            # Loss function numerics
 ```
 
-### Features
-
-Build with debug writers enabled:
-
-```bash
-export VIRTUAL_ENV=$PWD/.venv
-.venv/bin/maturin develop --release --features debug-writers
-```
-
-This exposes `extract_bigwig_to_file`, `extract_all_tracks_to_dir`, and other per-sample benchmarking entry points. They are **not** included in a normal wheel.
-
 ## Reverse mapping: Rust ↔ Python call sites
 
 | Rust module | Called from Python | Purpose |
 |-------------|-------------------|---------|
 | `chrom_pass::write_arrow_splits_chrom_pass` | `dataset.py:build_dataset_fast` | Production dataset write |
 | `writers::write_arrow_split_from_bigwigs` | test suite | Parity checking |
-| `debug::extract_bigwig_to_file` | manual benchmarking (feature-gated) | Debug / profiling |
 | All others (binning, fasta, schema, io_utils) | called by the above | Supporting routines |

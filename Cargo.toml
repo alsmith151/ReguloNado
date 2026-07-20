@@ -15,13 +15,8 @@ rust-version = "1.85"
 name = "regulonado_rs"
 crate-type = ["cdylib"]
 
-[features]
-debug-writers = ["dep:numpy", "dep:ndarray"]
-
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
-numpy = { version = "0.23", optional = true }
-ndarray = { version = "0.16", optional = true }
 bigtools = { version = "0.5", default-features = false, features = ["read"] }
 rayon = "1"
 arrow-array = "56"

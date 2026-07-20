@@ -44,17 +44,6 @@ Do not skip this step. The SLURM build wrapper (`scripts/build_dataset_slurm.sh`
 
 For editable reinstalls, `uv sync` also rebuilds the extension automatically.
 
-### Enabling debug writers
-
-The `debug-writers` Cargo feature exposes per-sample extraction benchmarking entry points. To include them:
-
-```bash
-export VIRTUAL_ENV=$PWD/.venv
-.venv/bin/maturin develop --release --features debug-writers
-```
-
-This is used for profiling individual pipeline stages but is not included in a normal wheel.
-
 ## Running tests
 
 ### Quick test run

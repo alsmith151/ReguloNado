@@ -1,5 +1,4 @@
 use arrow_array::{
-    builder::{Float32Builder, Int8Builder, ListBuilder},
     ArrayRef, Float32Array, Int8Array, ListArray,
 };
 use arrow_buffer::{OffsetBuffer, ScalarBuffer};
@@ -65,49 +64,6 @@ pub(crate) fn hf_arrow_schema(context_len: usize, n_tracks: usize, n_bins: usize
         ],
         metadata,
     ))
-}
-
-/// Append one row of a 2D int8 tensor using Arrow builders.
-///
-/// Retained for the sample-major compatibility writer. The direct track-major
-/// writer uses zero-copy-ish buffer construction via `make_2d_i8_array`.
-pub(crate) fn append_2d_i8(
-    builder: &mut ListBuilder<ListBuilder<Int8Builder>>,
-    values: &[i8],
-    rows: usize,
-    cols: usize,
-) {
-    for row in 0..rows {
-        let start = row * cols;
-        builder
-            .values()
-            .values()
-            .append_slice(&values[start..start + cols]);
-        builder.values().append(true);
-    }
-    builder.append(true);
-}
-
-/// Append one row of a 2D float32 tensor using Arrow builders.
-///
-/// Retained for the sample-major compatibility writer. The direct track-major
-/// writer uses buffer construction via `make_2d_f32_array`, which is faster for
-/// large dense label tensors.
-pub(crate) fn append_2d_f32(
-    builder: &mut ListBuilder<ListBuilder<Float32Builder>>,
-    values: &[f32],
-    rows: usize,
-    cols: usize,
-) {
-    for row in 0..rows {
-        let start = row * cols;
-        builder
-            .values()
-            .values()
-            .append_slice(&values[start..start + cols]);
-        builder.values().append(true);
-    }
-    builder.append(true);
 }
 
 /// Construct monotonically increasing Arrow list offsets for fixed-width rows.

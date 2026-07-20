@@ -55,15 +55,6 @@ fast when no `python/regulonado/_rs*.so` extension is present.
 
 For editable reinstalls, `uv sync` also rebuilds the extension in the repo venv.
 
-The debug entry points (`extract_bigwig_to_file`, `extract_all_tracks_to_dir`, etc.) are gated
-behind the `debug-writers` Cargo feature and are **not** included in a normal build.  To expose
-them for benchmarking individual pipeline stages:
-
-```bash
-VIRTUAL_ENV=/ceph/project/milne_group/asmith/software/Regulonado/.venv \
-  .venv/bin/maturin develop --release --features debug-writers
-```
-
 ## Common workflows
 
 Scale BigWigs:
@@ -109,8 +100,7 @@ Line length 100. Linting: `E`, `F`, `I`. Run `ruff check python/` before committ
 - Uses PyO3 0.23, Rayon, bigtools (BigWig), arrow2 ecosystem.
 - `src/lib.rs` is now a thin module-registration layer; implementation lives in the sibling Rust
   modules under `src/`.
-- The `#[pymodule]` registers both debug helpers and the production writers, including
-  `chrom_pass::write_arrow_split_chrom_pass` and
-  `chrom_pass::write_arrow_splits_chrom_pass`.
+- The `#[pymodule]` registers the production writers, including
+  `chrom_pass::write_arrow_splits_chrom_pass` and `writers::write_arrow_split_from_bigwigs`.
 - When changing the Rust writer path, validate both numerical parity (`tests/test_chrom_pass.py`)
   and Python-side staging / metadata behavior (`tests/test_dataset_staging.py`).
