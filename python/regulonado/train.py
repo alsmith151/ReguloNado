@@ -13,8 +13,8 @@ import hydra
 import numpy as np
 import torch
 from datasets import DatasetDict, load_from_disk
-from loguru import logger
 from datasets import IterableDataset as HFIterableDataset
+from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
 from transformers import (

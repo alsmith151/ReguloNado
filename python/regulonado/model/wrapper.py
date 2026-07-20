@@ -67,9 +67,10 @@ class RegulonadoModel(PreTrainedModel):
 
     def forward(self, input_ids: torch.Tensor, **head_kwargs: torch.Tensor | None) -> torch.Tensor:
         features = self.backbone.forward_features(input_ids)
-        # Match the head's parameter dtype rather than hardcoding float32: under autocast training
-        # the head's master weights are float32 (so this is a no-op vs. .float()), but a model loaded
-        # at bf16/fp16 for inference keeps features and head weights on the same dtype.
+        # Match the head's parameter dtype rather than hardcoding float32: under
+        # autocast training the head's master weights are float32 (so this is a
+        # no-op vs. .float()), but a model loaded at bf16/fp16 for inference
+        # keeps features and head weights on the same dtype.
         head_dtype = next(self.head.parameters(), features).dtype
         return self.head(features.to(head_dtype), **head_kwargs)
 

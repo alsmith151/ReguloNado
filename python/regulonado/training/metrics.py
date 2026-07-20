@@ -24,8 +24,9 @@ def _make_preprocess_logits_for_metrics(topk_bins: int) -> Callable:
     Returns [B, T, 18] per batch:
       cols 0-5:  (sum_p, sum_t, sum_pt, sum_p², sum_t², n)  over all bins  — per-bin Pearson
       cols 6-11: same statistics restricted to the top-K bins by target signal
-      cols 12-17: (sp, st, sp*st, sp², st², 1.0)  where sp/st are per-example track totals
-                  — sufficient stats for pearson_total_median (Pearson of track sums across examples)
+      cols 12-17: (sp, st, sp*st, sp², st², 1.0)  where sp/st are per-example
+                  track totals — sufficient stats for pearson_total_median
+                  (Pearson of track sums across examples)
     """
     def preprocess(logits: torch.Tensor | tuple, labels: torch.Tensor) -> torch.Tensor:
         if isinstance(logits, tuple):

@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 from borzoi_pytorch import Borzoi as _Borzoi
 from borzoi_pytorch.config_borzoi import BorzoiConfig
-
 from enformer_pytorch import Enformer
 from enformer_pytorch.config_enformer import EnformerConfig
 

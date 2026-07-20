@@ -142,11 +142,20 @@ def train(
 
 @app.command()
 def scale(
-    bigwig_dir: Annotated[Path, typer.Argument(help="Directory containing .bw / .bigwig files")],
+    bigwig_dir: Annotated[
+        Path, typer.Argument(help="Directory containing .bw / .bigwig files")
+    ],
     output: Annotated[Path, typer.Option("--output", "-o", help="Output file path")],
-    fmt: Annotated[str, typer.Option("--format", "-f", help="Output format: csv or parquet")] = "parquet",
-    max_workers: Annotated[int, typer.Option("--workers", "-w", help="Thread pool size")] = 16,
-    glob: Annotated[str, typer.Option("--glob", help="Glob pattern for bigwig files")] = "*.bw",
+    fmt: Annotated[
+        str,
+        typer.Option("--format", "-f", help="Output format: csv or parquet"),
+    ] = "parquet",
+    max_workers: Annotated[
+        int, typer.Option("--workers", "-w", help="Thread pool size")
+    ] = 16,
+    glob: Annotated[
+        str, typer.Option("--glob", help="Glob pattern for bigwig files")
+    ] = "*.bw",
 ) -> None:
     """Infer scale factors for all bigwig files in a directory."""
     from regulonado.scaling import infer_scale_factors, save_scale_factors
@@ -167,10 +176,19 @@ def calculate_original_scaling(
     metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json")],
     output: Annotated[
         Optional[Path],
-        typer.Option("--output", "-o", help="Output file path (default: <metadata_dir>/scale_factors.parquet)"),
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output file path (default: <metadata_dir>/scale_factors.parquet)",
+        ),
     ] = None,
-    fmt: Annotated[str, typer.Option("--format", "-f", help="Output format: csv or parquet")] = "parquet",
-    max_workers: Annotated[int, typer.Option("--workers", "-w", help="Thread pool size")] = 16,
+    fmt: Annotated[
+        str,
+        typer.Option("--format", "-f", help="Output format: csv or parquet"),
+    ] = "parquet",
+    max_workers: Annotated[
+        int, typer.Option("--workers", "-w", help="Thread pool size")
+    ] = 16,
 ) -> None:
     """Infer original scale factors for the final_bigwig_paths recorded in a dataset metadata file.
 
@@ -218,7 +236,10 @@ def calculate_original_scaling(
     # Join track_index and resolved_path from the records, then sort so row i
     # corresponds to track i — enabling direct positional application.
     records_df = pd.DataFrame(
-        [{"track_index": r["track_index"], "resolved_path": r["resolved_path"]} for r in track_records]
+        [
+            {"track_index": r["track_index"], "resolved_path": r["resolved_path"]}
+            for r in track_records
+        ]
     )
     df = df.merge(records_df, left_on="path", right_on="resolved_path", how="left")
     df = df.drop(columns=["resolved_path"]).sort_values("track_index").reset_index(drop=True)
@@ -240,17 +261,52 @@ def calculate_tmm_scaling(
     metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json")],
     scale_factors: Annotated[
         Optional[Path],
-        typer.Option("--scale-factors", "-s", help="Scale-factors parquet from calculate-original-scaling (default: <metadata_dir>/scale_factors.parquet)"),
+        typer.Option(
+            "--scale-factors",
+            "-s",
+            help=(
+                "Scale-factors parquet from calculate-original-scaling "
+                "(default: <metadata_dir>/scale_factors.parquet)"
+            ),
+        ),
     ] = None,
     output: Annotated[
         Optional[Path],
-        typer.Option("--output", "-o", help="Output path (default: overwrites --scale-factors input)"),
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output path (default: overwrites --scale-factors input)",
+        ),
     ] = None,
-    fmt: Annotated[str, typer.Option("--format", "-f", help="Output format: csv or parquet")] = "parquet",
-    split: Annotated[str, typer.Option("--split", help="Dataset split to use for TMM estimation")] = "train",
-    trim_m: Annotated[float, typer.Option("--trim-m", help="Fraction to trim from each M-value tail (edgeR default 0.3)")] = 0.3,
-    trim_a: Annotated[float, typer.Option("--trim-a", help="Fraction to trim from each A-value tail (edgeR default 0.05)")] = 0.05,
-    min_count: Annotated[float, typer.Option("--min-count", help="Minimum pseudo-count for a region to be included")] = 1.0,
+    fmt: Annotated[
+        str,
+        typer.Option("--format", "-f", help="Output format: csv or parquet"),
+    ] = "parquet",
+    split: Annotated[
+        str,
+        typer.Option("--split", help="Dataset split to use for TMM estimation"),
+    ] = "train",
+    trim_m: Annotated[
+        float,
+        typer.Option(
+            "--trim-m",
+            help="Fraction to trim from each M-value tail (edgeR default 0.3)",
+        ),
+    ] = 0.3,
+    trim_a: Annotated[
+        float,
+        typer.Option(
+            "--trim-a",
+            help="Fraction to trim from each A-value tail (edgeR default 0.05)",
+        ),
+    ] = 0.05,
+    min_count: Annotated[
+        float,
+        typer.Option(
+            "--min-count",
+            help="Minimum pseudo-count for a region to be included",
+        ),
+    ] = 1.0,
 ) -> None:
     """Compute edgeR-style TMM normalisation factors from the Arrow dataset.
 
@@ -312,7 +368,13 @@ def calculate_tmm_scaling(
         typer.echo("Column 'library_size' missing from scale-factors file.", err=True)
         raise typer.Exit(1)
     if "scale_factor" not in sf_df.columns:
-        typer.echo("Column 'scale_factor' missing from scale-factors file.  Run calculate-original-scaling first.", err=True)
+        typer.echo(
+            (
+                "Column 'scale_factor' missing from scale-factors file.  "
+                "Run calculate-original-scaling first."
+            ),
+            err=True,
+        )
         raise typer.Exit(1)
 
     library_sizes = sf_df.sort_values("track_index")["library_size"].to_numpy(dtype=float)
@@ -349,12 +411,18 @@ def calculate_tmm_scaling(
 
     # Report
     sf_sorted = sf_df.sort_values("track_index").reset_index(drop=True)
-    typer.echo(f"{'Track':>5}  {'samplename':<30}  {'tmm_factor':>12}  {'old_sf':>12}  {'new_sf':>12}")
+    typer.echo(
+        f"{'Track':>5}  {'samplename':<30}  {'tmm_factor':>12}  "
+        f"{'old_sf':>12}  {'new_sf':>12}"
+    )
     for i, (_, row) in enumerate(sf_sorted.iterrows()):
         old_sf = float(row["scale_factor"])
         new_sf = old_sf / tmm[i]
         name = str(row.get("samplename", i))[:30]
-        typer.echo(f"{int(row['track_index']):>5}  {name:<30}  {tmm[i]:>12.6f}  {old_sf:>12.6f}  {new_sf:>12.6f}")
+        typer.echo(
+            f"{int(row['track_index']):>5}  {name:<30}  {tmm[i]:>12.6f}  "
+            f"{old_sf:>12.6f}  {new_sf:>12.6f}"
+        )
 
     # Write updated parquet: add tmm_factor, overwrite scale_factor
     sf_df = sf_df.sort_values("track_index").reset_index(drop=True)
@@ -403,11 +471,25 @@ def recompress_dataset(
 
 @app.command()
 def enrich_metadata(
-    metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json to update in-place")],
-    scale_factors: Annotated[Path, typer.Argument(help="Parquet (or CSV) produced by calculate-original-scaling")],
+    metadata: Annotated[
+        Path, typer.Argument(help="Path to regulonado_metadata.json to update in-place")
+    ],
+    scale_factors: Annotated[
+        Path,
+        typer.Argument(
+            help="Parquet (or CSV) produced by calculate-original-scaling"
+        ),
+    ],
     fields: Annotated[
         Optional[list[str]],
-        typer.Option("--field", "-f", help="Field to copy into final_track_records (repeat; default: all of scale_factor clip_soft clip_hard)"),
+        typer.Option(
+            "--field",
+            "-f",
+            help=(
+                "Field to copy into final_track_records "
+                "(repeat; default: all of scale_factor clip_soft clip_hard)"
+            ),
+        ),
     ] = None,
 ) -> None:
     """Write scale_factor / clip_soft / clip_hard into final_track_records in a metadata JSON.
@@ -429,7 +511,11 @@ def enrich_metadata(
         typer.echo(f"Scale-factors file not found: {scale_factors}", err=True)
         raise typer.Exit(1)
 
-    sf_df = pd.read_parquet(scale_factors) if str(scale_factors).endswith(".parquet") else pd.read_csv(scale_factors)
+    sf_df = (
+        pd.read_parquet(scale_factors)
+        if str(scale_factors).endswith(".parquet")
+        else pd.read_csv(scale_factors)
+    )
 
     missing = [f for f in fields_to_copy if f not in sf_df.columns]
     if missing:
@@ -545,7 +631,11 @@ def build(
         bool, typer.Option("--overwrite", help="Regenerate splits that already exist")
     ] = False,
     drop_missing: Annotated[
-        bool, typer.Option("--drop-missing", help="Drop missing BigWig paths instead of raising an error")
+        bool,
+        typer.Option(
+            "--drop-missing",
+            help="Drop missing BigWig paths instead of raising an error",
+        ),
     ] = False,
     dedupe_tracks: Annotated[
         str,
