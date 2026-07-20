@@ -48,14 +48,20 @@ and per-track binned coverage (`labels`, float32 `(T, B)`), split into
 - [Prediction](#prediction)
 - [Run outputs](#run-outputs)
 - [External dependencies](#external-dependencies)
+- [License](#license)
 - [Development & tests](#development--tests)
 - [Repository layout](#repository-layout)
+
+**Additional documentation:**
+- [ARCHITECTURE.md](ARCHITECTURE.md) — design rationale: what lives in Rust vs Python and why.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — developer setup, build instructions, testing, code style.
 
 ## Installation
 
 ReguloNado ships as layered extras so you only install what a given task needs.
-The Rust extension is compiled at install time, so a working Rust toolchain is
-required.
+Prebuilt wheels are published for Linux (x86_64, aarch64) and macOS (x86_64, aarch64) on Python 3.12 and 3.13,
+so most users need no Rust toolchain. Building from source (or on platforms without wheels) requires a working
+Rust toolchain.
 
 | Goal | Install |
 |------|---------|
@@ -99,7 +105,9 @@ After any change to the Rust sources in `src/`, rebuild the extension:
 
 ## End-to-end quickstart
 
-The full pipeline is four steps: **build → scale → enrich → train**.
+The full pipeline orchestrates: **build → recompress → scale factors → enrich metadata → train (multi-phase) → predict (optional)**.
+
+### Locally
 
 ```bash
 # 1. Build the Arrow dataset from BED + FASTA + a directory of BigWigs.
@@ -119,12 +127,28 @@ Steps 2–3 are only needed when your BigWigs are in RPKM / normalised units and
 you want the model to train on raw read counts. If they are already raw counts,
 set `apply_scale: false` in the experiment config and skip them.
 
-On a cluster, each step has a Slurm wrapper under `scripts/` (see below); the
-local CLI commands above accept the same options.
+### On a cluster (Snakemake)
+
+The workflow orchestrates all steps end-to-end. Copy `config/config.yaml`, edit the paths
+and experiment config, then run:
+
+```bash
+snakemake --configfile config/config.yaml -n                        # dry run, prints the DAG
+snakemake --configfile config/config.yaml --cores 8                 # run locally
+snakemake --configfile config/config.yaml --profile workflow/profiles/slurm   # run on SLURM
+```
+
+Cluster specifics (partition, account, GPU type) live in `workflow/profiles/slurm/config.yaml`,
+not in the workflow itself, so the pipeline is portable between sites. You will need to
+install `snakemake` and (for cluster runs) `snakemake-executor-plugin-slurm`:
+
+```bash
+pip install snakemake snakemake-executor-plugin-slurm
+```
 
 ## Building a dataset
 
-### Locally
+Build datasets locally or via the Snakemake workflow. The CLI is the same either way.
 
 ```bash
 regulonado build intervals.bed genome.fa out/ \
@@ -140,38 +164,20 @@ regulonado build intervals.bed genome.fa out/ \
   use the default `train` / `validation` / `test` split.
 - `--stage` copies FASTA + BigWigs to local scratch first (recommended on Ceph).
 - `--strategy chrom_pass` (default) writes one shard per chromosome with ~10×
-  fewer BigWig seeks; `--strategy fast` is the sample-batched fallback.
+  fewer BigWig seeks.
 
 Run `regulonado build --help` for the full set of context-length, bin-size,
-threading, compression, and dedupe options.
+threading, compression, shard sizing, and deduplication options.
 
-### On Slurm
+### Recompression
 
-```bash
-BED_FILE=/path/to/intervals.bed \
-FASTA_FILE=/path/to/genome.fa \
-OUTPUT_DIR=/path/to/output \
-BIGWIG_LIST=/path/to/bigwig_paths.txt \
-sbatch scripts/build_dataset_slurm.sh
-```
-
-`BIGWIG_LIST` is a newline-delimited file of BigWig paths. Optional env vars
-(defaults in the script header) control context length, bin size, staging,
-compression, rechunking, and worker counts. To rechunk to small ZSTD batches for
-streaming during the build:
-
-```bash
-RECHUNK=true MAX_BATCH_SIZE=4 ZSTD_LEVEL=3 \
-BED_FILE=... FASTA_FILE=... OUTPUT_DIR=... BIGWIG_LIST=... \
-sbatch scripts/build_dataset_slurm.sh
-```
-
-To rechunk an existing dataset separately:
+To rechunk an existing dataset into small ZSTD batches for faster random-access reads during training:
 
 ```bash
 regulonado recompress-dataset /path/to/src /path/to/dst --max-batch-size 4
-# or: SRC=... DST=... sbatch scripts/rechunk_dataset_slurm.sh
 ```
+
+The Snakemake workflow orchestrates this automatically when enabled in `config/config.yaml`.
 
 ## Scale factors
 
@@ -184,25 +190,15 @@ regulonado calculate-tmm-scaling dataset/regulonado_metadata.json        # optio
 regulonado enrich-metadata dataset/regulonado_metadata.json dataset/scale_factors.parquet
 ```
 
-- `calculate-original-scaling` reads BigWig header metadata (via BamNado) to infer
-  library sizes and the RPKM→raw-count factor per track.
-- `calculate-tmm-scaling` layers an edgeR-style TMM normalisation on top, estimated
-  from the Arrow shards.
+- `calculate-original-scaling` reads BigWig header metadata to infer library sizes
+  and the RPKM→raw-count factor per track. This command requires the BamNado binary
+  on PATH and cannot be installed via pip (see [BamNado](#bamnado) below).
+- `calculate-tmm-scaling` (the workflow default) layers an edgeR-style TMM normalisation
+  on top, estimated from the Arrow shards. It has no external dependencies.
 - `enrich-metadata` writes the resulting `scale_factor` / `clip_soft` / `clip_hard`
   into `final_track_records`, which `train.py` reads at training time.
 
 ## Training
-
-### Quick start (Slurm)
-
-```bash
-EXPERIMENT=head_only_borzoi \
-DATA_DIR=/path/to/dataset \
-sbatch scripts/train_slurm.sh
-```
-
-`EXPERIMENT` names a Hydra config; the launcher searches `python/configs/experiment/`
-for all built-in and production experiment configs.
 
 ### Local runs
 
@@ -215,47 +211,47 @@ regulonado train /path/to/dataset --nproc-per-node 2     # multi-GPU via torchru
 regulonado train /path/to/dataset --max-steps 10 --no-wandb   # smoke test
 ```
 
-Raw Hydra overrides can be appended to either the CLI or the Slurm script:
+Raw Hydra overrides can be appended:
 
 ```bash
 regulonado train /path/to/dataset trainer.max_steps=2000
 ```
 
-### Recommended progressive workflow
+### Multi-phase training
 
 Training works best in phases, each warm-starting from the previous one (model
-weights only, fresh optimizer):
+weights only, fresh optimizer). The Snakemake workflow orchestrates this automatically,
+reading phase definitions from `config/config.yaml`. Each phase can use a different
+experiment config.
+
+If running phases manually, use `--init-weights-from-checkpoint` for warm-start:
 
 ```bash
-# Phase 1 — head only, backbone frozen, fast convergence (~5k steps)
-EXPERIMENT=head_only_borzoi DATA_DIR=... sbatch scripts/train_slurm.sh
+# Phase 1 — head only, backbone frozen
+regulonado train /path/to/dataset \
+  --experiment head_only_borzoi \
+  --output-dir outputs/train/phase1
 
-# Phase 2 — unfreeze 2 output-end backbone stages
-EXPERIMENT=stage2_unfreeze2_borzoi \
-INIT_WEIGHTS_FROM_CHECKPOINT=outputs/train/head_only_borzoi-JOBID/checkpoint-NNNN \
-DATA_DIR=... sbatch scripts/train_slurm.sh
+# Phase 2 — unfreeze 2 stages, warm-start from phase 1
+regulonado train /path/to/dataset \
+  --experiment stage2_unfreeze2_borzoi \
+  --init-weights-from-checkpoint outputs/train/phase1/checkpoint-NNNN \
+  --output-dir outputs/train/phase2
 
-# Phase 3 — unfreeze 4 stages + reverse-complement augmentation
-EXPERIMENT=stage3_deep_finetune_borzoi \
-INIT_WEIGHTS_FROM_CHECKPOINT=outputs/train/stage2_unfreeze2_borzoi-JOBID/checkpoint-NNNN \
-DATA_DIR=... sbatch scripts/train_slurm.sh
+# Phase 3 — deeper unfreeze + RC augmentation
+regulonado train /path/to/dataset \
+  --experiment stage3_deep_finetune_borzoi \
+  --init-weights-from-checkpoint outputs/train/phase2/checkpoint-NNNN \
+  --output-dir outputs/train/phase3
 
 # Phase 4 (optional) — peak sharpening with top-K loss
-EXPERIMENT=stage4_peak_finetune_borzoi \
-INIT_WEIGHTS_FROM_CHECKPOINT=outputs/train/stage3_deep_finetune_borzoi-JOBID/checkpoint-NNNN \
-DATA_DIR=... sbatch scripts/train_slurm.sh
+regulonado train /path/to/dataset \
+  --experiment stage4_peak_finetune_borzoi \
+  --init-weights-from-checkpoint outputs/train/phase3/checkpoint-NNNN \
+  --output-dir outputs/train/phase4
 ```
 
-Submit all four phases as a dependency chain automatically:
-
-```bash
-DATA_DIR=/path/to/dataset bash scripts/train_pipeline_slurm.sh
-
-# variants:
-DATA_DIR=... STOP_AFTER_PHASE=3 bash scripts/train_pipeline_slurm.sh   # skip phase 4
-DATA_DIR=... START_FROM_PHASE=3 bash scripts/train_pipeline_slurm.sh   # resume from phase 3
-DATA_DIR=... PEAK_LOSS=topk_reweight bash scripts/train_pipeline_slurm.sh
-```
+The workflow handles checkpoint resolution from each phase's `trainer_state.json` automatically.
 
 ## Experiment & loss configs
 
@@ -268,7 +264,6 @@ nearest config in `python/configs/experiment/` and adjust what matters.
 | `stage2_unfreeze2_borzoi.yaml` | Phase 2: 2 output-end stages unfrozen, lr=2e-4/2e-6 |
 | `stage3_deep_finetune_borzoi.yaml` | Phase 3: 4 stages + RC augmentation, lr=5e-5/5e-7 |
 | `stage4_peak_finetune_borzoi.yaml` | Phase 4: topk_additive loss for peak sharpening |
-| `magnitude_fix_*.yaml` | Ablation templates for loss-function / squash sweeps |
 
 Loss configs live in `python/configs/loss/`. Select one in an experiment YAML with
 `defaults: - override /loss: <name>`.
@@ -282,14 +277,6 @@ Loss configs live in `python/configs/loss/`. Select one in an experiment YAML wi
 | `topk_additive` | poisson_multinomial + additive second pass on top-K bins |
 | `topk_reweight` | poisson_multinomial with per-bin rank weighting on the multinomial term |
 | `transfer_calibration` | Composite: low multinomial weight + per-bin log1p MSE + top-K Huber |
-
-To run all magnitude-fix ablations in parallel from a shared checkpoint:
-
-```bash
-INIT_WEIGHTS_FROM_CHECKPOINT=/path/to/checkpoint \
-DATA_DIR=/path/to/dataset \
-bash scripts/run_magnitude_experiments_slurm.sh
-```
 
 ## Checkpoint reuse
 
@@ -306,16 +293,15 @@ model = RegulonadoModel.from_pretrained("outputs/train/my_run/checkpoint-5000")
 to continue an interrupted run:
 
 ```bash
-EXPERIMENT=head_only_borzoi DATA_DIR=... \
-sbatch scripts/train_slurm.sh \
-  trainer.resume_from_checkpoint=outputs/train/head_only_borzoi-JOBID/checkpoint-NNNN
+regulonado train /path/to/dataset \
+  --experiment head_only_borzoi \
+  --resume-from-checkpoint outputs/train/head_only_borzoi-JOBID/checkpoint-NNNN
 ```
 
 **Warm start** loads model weights only with a fresh optimizer/scheduler — use when
-changing learning rate, scheduler, unfreezing policy, or training objective. Stage
-2–4 configs read the checkpoint from `INIT_WEIGHTS_FROM_CHECKPOINT` via
-`${oc.env:...}` interpolation, or set `init_weights_from_checkpoint` directly in the
-YAML.
+changing learning rate, scheduler, unfreezing policy, or training objective. Use
+`--init-weights-from-checkpoint` to warm-start from a previous phase's best checkpoint.
+Experiment configs can also set `init_weights_from_checkpoint` directly in the YAML.
 
 ## Prediction
 
@@ -462,6 +448,10 @@ If not on `PATH`, point to it with the `BAMNADO` environment variable:
 BAMNADO=/path/to/bamnado regulonado calculate-original-scaling metadata.json
 ```
 
+## License
+
+ReguloNado is released under the BSD 3-Clause License. See the [LICENSE](LICENSE) file for details.
+
 ## Development & tests
 
 `pytest` is included in the `dev` extra:
@@ -499,5 +489,10 @@ internals.
 - `python/regulonado/model/` — backbone adapters, prediction heads, `RegulonadoModel`
   (`PreTrainedModel`), and `RegulonadoConfig`.
 - `python/configs/` — Hydra configs for backbones, heads, losses, and experiments.
-- `scripts/` — Slurm launchers (see `scripts/README.md`).
+- `workflow/` — Snakemake rules for orchestrating the full pipeline (build → recompress
+  → scale factors → enrich → train → predict).
+- `workflow/profiles/slurm/` — SLURM executor profile for the workflow; adjust partition,
+  account, and GPU resource requests here.
+- `scripts/` — Environment setup scripts (`install_gpu_env_slurm.sh`, `install_flash_attn_slurm.sh`,
+  `jupyter_slurm.sh`).
 - `tests/` — model, dataset, and smoke coverage.
