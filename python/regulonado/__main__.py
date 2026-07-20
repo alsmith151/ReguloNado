@@ -651,13 +651,6 @@ def build(
             help="Emit per-phase timing summary to stderr after each split (fast path only)",
         ),
     ] = False,
-    no_fast_path: Annotated[
-        bool,
-        typer.Option(
-            "--no-fast-path",
-            help="Use the legacy pybigtools path instead of the two-phase Rust extraction",
-        ),
-    ] = False,
     n_extract_threads: Annotated[
         int,
         typer.Option(
@@ -762,7 +755,7 @@ def build(
     regulonado build intervals.bed genome.fa out/ \\
         --bigwig plus.bw --bigwig minus.bw
     """
-    from regulonado.dataset import DEFAULT_SPLITS, build_dataset, build_dataset_fast
+    from regulonado.dataset import DEFAULT_SPLITS, build_dataset_fast
 
     # --- resolve BigWig paths ------------------------------------------------
     if bigwig_dir is not None:
@@ -793,58 +786,36 @@ def build(
     typer.echo(f"Splits : {list(splits)}")
     typer.echo(f"Output : {output_dir}")
 
-    if no_fast_path:
-        build_dataset(
-            bed_file=bed_file,
-            fasta_file=fasta_file,
-            bigwig_paths=bw_paths,
-            output_dir=output_dir,
-            splits=splits,
-            context_length=context_length,
-            bin_size=bin_size,
-            n_pred_bins=n_pred_bins,
-            shift_max_bp=shift_max_bp,
-            n_io_threads=io_threads,
-            num_proc=num_proc,
-            cache_dir=cache_dir,
-            writer_batch_size=writer_batch_size,
-            stage_to_scratch=stage,
-            overwrite=overwrite,
-            drop_missing=drop_missing,
-            dedupe_tracks=dedupe_tracks,
-            return_dataset=False,
-        )
-    else:
-        build_dataset_fast(
-            bed_file=bed_file,
-            fasta_file=fasta_file,
-            bigwig_paths=bw_paths,
-            output_dir=output_dir,
-            splits=splits,
-            context_length=context_length,
-            bin_size=bin_size,
-            n_pred_bins=n_pred_bins,
-            shift_max_bp=shift_max_bp,
-            n_extract_threads=n_extract_threads,
-            signal_sample_chunk=signal_sample_chunk,
-            signal_track_chunk=signal_track_chunk,
-            arrow_batch_size=arrow_batch_size,
-            shard_size=shard_size,
-            shard_target_mb=shard_target_mb,
-            arrow_compression=arrow_compression,
-            arrow_write_threads=arrow_write_threads,
-            num_proc=num_proc,
-            cache_dir=cache_dir,
-            writer_batch_size=writer_batch_size,
-            stage_to_scratch=stage,
-            overwrite=overwrite,
-            drop_missing=drop_missing,
-            dedupe_tracks=dedupe_tracks,
-            profile=profile,
-            strategy=strategy,
-            chrom_filter=list(chrom) if chrom else None,
-            return_dataset=False,
-        )
+    build_dataset_fast(
+        bed_file=bed_file,
+        fasta_file=fasta_file,
+        bigwig_paths=bw_paths,
+        output_dir=output_dir,
+        splits=splits,
+        context_length=context_length,
+        bin_size=bin_size,
+        n_pred_bins=n_pred_bins,
+        shift_max_bp=shift_max_bp,
+        n_extract_threads=n_extract_threads,
+        signal_sample_chunk=signal_sample_chunk,
+        signal_track_chunk=signal_track_chunk,
+        arrow_batch_size=arrow_batch_size,
+        shard_size=shard_size,
+        shard_target_mb=shard_target_mb,
+        arrow_compression=arrow_compression,
+        arrow_write_threads=arrow_write_threads,
+        num_proc=num_proc,
+        cache_dir=cache_dir,
+        writer_batch_size=writer_batch_size,
+        stage_to_scratch=stage,
+        overwrite=overwrite,
+        drop_missing=drop_missing,
+        dedupe_tracks=dedupe_tracks,
+        profile=profile,
+        strategy=strategy,
+        chrom_filter=list(chrom) if chrom else None,
+        return_dataset=False,
+    )
 
 
 @app.command()
