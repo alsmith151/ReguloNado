@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
+from loguru import logger
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -459,14 +460,18 @@ def recompress_dataset(
     """Rechunk/recompress a saved Arrow DatasetDict with ZSTD IPC compression."""
     from regulonado.recompress import recompress_dataset as _recompress_dataset
 
-    _recompress_dataset(
-        src,
-        dst,
-        level=level,
-        workers=workers,
-        max_batch_size=max_batch_size,
-        remove_src=remove_src,
-    )
+    try:
+        _recompress_dataset(
+            src,
+            dst,
+            level=level,
+            workers=workers,
+            max_batch_size=max_batch_size,
+            remove_src=remove_src,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        logger.error(str(e))
+        raise typer.Exit(code=1)
 
 
 @app.command()
