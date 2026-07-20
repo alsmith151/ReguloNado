@@ -25,6 +25,25 @@ class BackboneAdapter(Iterable):
 
 @dataclass(slots=True)
 class FreezePolicy:
+    """Policy for freezing and unfreezing model components during training.
+
+    Controls which parts of the backbone are trainable. By default, the entire
+    backbone is frozen (backbone-as-feature-extractor). Stages can be
+    selectively unfrozen from the output end or by module name.
+
+    Parameters
+    ----------
+    freeze_backbone : bool, optional
+        If True (default), freeze all backbone parameters. Then selectively
+        unfreeze using other fields.
+    unfreeze_backbone_stages_from_output_end : int, optional
+        Number of backbone stages (blocks) to unfreeze starting from the end.
+        By default 0 (all frozen).
+    unfreeze_module_names : tuple[str, ...], optional
+        Names of specific modules to unfreeze (e.g., ("transformer.10",)).
+        Empty by default.
+    """
+
     freeze_backbone: bool = True
     unfreeze_backbone_stages_from_output_end: int = 0
     unfreeze_module_names: tuple[str, ...] = field(default_factory=tuple)

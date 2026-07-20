@@ -16,6 +16,30 @@ BackboneType = Literal["borzoi", "enformer"]
 
 @dataclass(slots=True)
 class BackboneSpec:
+    """Specification for building a sequence model backbone.
+
+    Specifies which pretrained model to load or whether to initialize randomly.
+    Requires either a ``pretrained_name`` or explicit ``allow_random_init=True``
+    to prevent silent training on randomly-initialized weights (a common bug).
+
+    Parameters
+    ----------
+    backbone_type : BackboneType
+        Model type: "borzoi" or "enformer".
+    pretrained_name : str | None, optional
+        HuggingFace model ID (e.g., "johahi/borzoi-replicate-0"). If None,
+        random initialization is used only if allow_random_init=True.
+    feature_dim : int | None, optional
+        Output feature dimension (inferred from model if not provided).
+    target_length : int | None, optional
+        Prediction length for Enformer-style models (default from dataset).
+    config_overrides : dict[str, Any] | None, optional
+        Config parameters to override when building from scratch.
+    allow_random_init : bool, optional
+        If False (default), raises ValueError when pretrained_name is None.
+        Set True to deliberately train from scratch.
+    """
+
     backbone_type: BackboneType
     pretrained_name: str | None = None
     feature_dim: int | None = None
@@ -71,19 +95,48 @@ class Borzoi(_Borzoi):
 
 
 class BaseBackboneAdapter(nn.Module):
+    """Base class for backbone adapters.
+
+    Adapters wrap sequence models (Borzoi, Enformer) and expose a unified
+    interface for feature extraction and staged unfreezing.
+
+    Attributes
+    ----------
+    feature_dim : int
+        Output feature dimension.
+    """
+
     feature_dim: int
 
     def iter_named_blocks(self) -> Iterable[tuple[str, nn.Module]]:
-        """Yield ordered trainable backbone stages from early layers toward the output side.
+        """Yield ordered trainable backbone stages from early layers toward
+        the output side.
 
-        Freeze-policy settings that unfreeze stages "from the end" operate on this ordered
-        sequence. For example, Borzoi returns transformer blocks followed by
-        ``final_joined_convs``, and Enformer returns transformer blocks followed by
-        ``final_pointwise``.
+        Freeze-policy settings that unfreeze stages "from the end" operate on
+        this ordered sequence. For example, Borzoi returns transformer blocks
+        followed by ``final_joined_convs``, and Enformer returns transformer
+        blocks followed by ``final_pointwise``.
+
+        Yields
+        ------
+        tuple[str, nn.Module]
+            (module_name, module) pairs in order from early to late layers.
         """
         raise NotImplementedError
 
     def forward_features(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Extract sequence features.
+
+        Parameters
+        ----------
+        input_ids : torch.Tensor
+            One-hot encoded sequence, shape [batch, channels, length].
+
+        Returns
+        -------
+        torch.Tensor
+            Sequence features, shape [batch, feature_dim, length].
+        """
         raise NotImplementedError
 
 
@@ -181,6 +234,36 @@ class EnformerBackboneAdapter(BaseBackboneAdapter):
 
 
 def build_backbone_adapter(spec: BackboneSpec) -> BaseBackboneAdapter:
+    """Build a backbone adapter from specification.
+
+    Instantiates the appropriate adapter (Borzoi or Enformer) based on the
+    spec's backbone_type. Loads pretrained weights if specified, or
+    initializes randomly if allowed.
+
+    Parameters
+    ----------
+    spec : BackboneSpec
+        Specification including backbone type and pretrained model name.
+
+    Returns
+    -------
+    BaseBackboneAdapter
+        Initialized adapter wrapping the backbone model.
+
+    Raises
+    ------
+    ValueError
+        If backbone_type is not recognized, or if no pretrained model is
+        specified and allow_random_init is False.
+
+    Examples
+    --------
+    >>> spec = BackboneSpec(
+    ...     backbone_type="borzoi",
+    ...     pretrained_name="johahi/borzoi-replicate-0"
+    ... )
+    >>> adapter = build_backbone_adapter(spec)  # doctest: +SKIP
+    """
     if spec.backbone_type == "borzoi":
         return BorzoiBackboneAdapter.from_spec(spec)
     if spec.backbone_type == "enformer":

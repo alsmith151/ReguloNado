@@ -1,89 +1,32 @@
 # Scripts
 
-Scripts are thin wrappers around the `regulonado` CLI for cluster workflows.
-All training policy lives in Hydra experiment configs under `python/configs/experiment/`;
-scripts handle only paths, Slurm resources, and machine-specific plumbing.
+Environment-setup helpers for GPU clusters. **These are not the pipeline.**
 
-## Training
-
-### Generic launcher
-
-`train_slurm.sh` is the single training entry point.  Set `EXPERIMENT` and
-`DATA_DIR`, then submit:
+The data and training pipeline is a Snakemake workflow — see [`workflow/`](../workflow/)
+and [`config/config.yaml`](../config/config.yaml). The SLURM launchers that used to live
+here (`build_dataset_slurm.sh`, `train_slurm.sh`, `train_pipeline_slurm.sh` and friends)
+have been replaced by it:
 
 ```bash
-EXPERIMENT=head_only_borzoi \
-DATA_DIR=/path/to/dataset \
-sbatch scripts/train_slurm.sh
+snakemake --configfile config/config.yaml -n                       # dry run
+snakemake --configfile config/config.yaml --profile workflow/profiles/slurm
 ```
 
-`EXPERIMENT` selects a Hydra config by name.  The launcher searches
-`python/configs/experiment/` for all available experiment configs.
+Cluster specifics — partition, account, GPU type — live in
+[`workflow/profiles/slurm/config.yaml`](../workflow/profiles/slurm/config.yaml), not in
+these scripts.
 
-One-off Hydra overrides can be appended as script arguments:
+Training hyperparameters still live in Hydra experiment configs under
+`python/configs/experiment/`; the workflow's `train.phases` list selects which ones run
+and in what order.
 
-```bash
-EXPERIMENT=head_only_borzoi DATA_DIR=... \
-sbatch scripts/train_slurm.sh trainer.max_steps=2000
-```
+## What remains here
 
-### Experiment configs
+| Script | Purpose |
+| --- | --- |
+| `install_gpu_env_slurm.sh` | Install the `[gpu]` extras on a CUDA node. `INSTALL_EXTRAS="--extra dev --extra gpu"` adds test dependencies. |
+| `install_flash_attn_slurm.sh` | Fetch a prebuilt FlashAttention wheel, falling back to a source build. |
+| `jupyter_slurm.sh` | Launch a Jupyter server on a compute node. |
 
-All training hyperparameters live in `python/configs/experiment/*.yaml`.  To start a
-new experiment, copy the nearest config, rename it, and adjust what matters.
-
-| Config | Purpose |
-|--------|---------|
-| `head_only_borzoi.yaml` | Phase 1: frozen backbone, head-only at lr=1e-3 for 5 k steps |
-| `stage2_unfreeze2_borzoi.yaml` | Phase 2: 2 output-end stages unfrozen, warm-start from phase 1 |
-| `stage3_deep_finetune_borzoi.yaml` | Phase 3: 4 stages + RC augmentation, low LR for 15 k steps |
-| `stage4_peak_finetune_borzoi.yaml` | Phase 4: topk_additive loss for peak sharpening, warm-start from phase 3 |
-
-### Recommended three-phase workflow
-
-Submit all three phases as a dependency chain with the pipeline script:
-
-```bash
-DATA_DIR=/path/to/dataset bash scripts/train_pipeline_slurm.sh
-```
-
-This queues three Slurm jobs immediately.  Each phase starts only after the
-previous one succeeds and automatically picks up that phase's best checkpoint.
-
-To run phases manually:
-
-```bash
-# Phase 1 — head only, fast convergence (~5 k steps)
-EXPERIMENT=head_only_borzoi DATA_DIR=... sbatch scripts/train_slurm.sh
-
-# Phase 2 — unfreeze 2 backbone stages, warm-start from best phase-1 checkpoint
-EXPERIMENT=stage2_unfreeze2_borzoi \
-INIT_WEIGHTS_FROM_CHECKPOINT=outputs/train/head_only_borzoi-JOBID/checkpoint-NNNN \
-DATA_DIR=... sbatch scripts/train_slurm.sh
-
-# Phase 3 — deep fine-tune with RC augmentation, warm-start from phase 2
-EXPERIMENT=stage3_deep_finetune_borzoi \
-INIT_WEIGHTS_FROM_CHECKPOINT=outputs/train/stage2_unfreeze2_borzoi-JOBID/checkpoint-NNNN \
-DATA_DIR=... sbatch scripts/train_slurm.sh
-```
-
-Configs for stages 2 and 3 read `INIT_WEIGHTS_FROM_CHECKPOINT` from the
-environment via `${oc.env:INIT_WEIGHTS_FROM_CHECKPOINT,}`.
-
-## Dataset Build and Preparation
-
-- `build_dataset_slurm.sh`: Slurm launcher for the production dataset builder.
-- `rechunk_dataset_slurm.sh`: Slurm wrapper around `regulonado recompress-dataset`.
-
-## Scaling
-
-- `calculate_original_scaling_slurm.sh`: Slurm wrapper for
-  `regulonado calculate-original-scaling`, with optional metadata enrichment.
-- `calculate_tmm_scaling_slurm.sh`: Slurm wrapper for
-  `regulonado calculate-tmm-scaling`, with optional metadata enrichment.
-
-## Environment
-
-- `install_gpu_env_slurm.sh`: CUDA-node installer for GPU extras (FlashAttention
-  etc.).  Use `INSTALL_EXTRAS="--extra dev --extra gpu"` to include test
-  dependencies.
+All three hardcode site-specific SLURM settings and assume a repo-local `.venv`. Edit
+them for your cluster before use — unlike the workflow, they are not portable as written.

@@ -79,6 +79,27 @@ def _normalise_checkpoint_mode(value: Any) -> str | bool | None:
 
 
 def load_model_weights_only(model: torch.nn.Module, checkpoint: str | Path) -> None:
+    """Load model weights from a checkpoint without re-initializing missing keys.
+
+    Accepts either a single weight file (safetensors or .bin) or a directory
+    containing ``model.safetensors`` or ``pytorch_model.bin``. Strips the
+    ``model.`` prefix from keys if present (set by HF Trainer). Raises on
+    unexpected keys or missing keys (beyond non-trainable BatchNorm counters).
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model to load weights into.
+    checkpoint : str | Path
+        Path to a single weight file or directory containing model weights.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no model weights file is found.
+    RuntimeError
+        If unexpected or missing keys are encountered (beyond num_batches_tracked).
+    """
     checkpoint_path = Path(checkpoint)
     if checkpoint_path.is_file():
         weight_path = checkpoint_path
@@ -145,6 +166,26 @@ def _load_dataset_streaming(data_path: Path) -> dict[str, Any]:
 
 
 def track_records(metadata: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Extract track metadata records from dataset metadata.
+
+    Looks for ``final_track_records`` first, then falls back to
+    ``track_records`` for backward compatibility.
+
+    Parameters
+    ----------
+    metadata : Mapping[str, Any]
+        Dataset metadata dictionary.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        List of track record dictionaries.
+
+    Raises
+    ------
+    ValueError
+        If no track records are found or the field is not a non-empty list.
+    """
     records = metadata.get("final_track_records") or metadata.get("track_records")
     if not isinstance(records, list) or not records:
         raise ValueError("Dataset metadata does not contain any track records")
@@ -171,6 +212,30 @@ def _track_array(
 
 
 def infer_cardinality(records: Sequence[Mapping[str, Any]], key: str) -> int:
+    """Infer the vocabulary size for a categorical metadata field.
+
+    Finds the maximum integer value in the specified field across all records,
+    then adds 1. Treats missing or negative values as absent. Returns 0 if no
+    valid values are found.
+
+    Parameters
+    ----------
+    records : Sequence[Mapping[str, Any]]
+        Track record list.
+    key : str
+        Metadata field name to inspect (e.g., "condition_id").
+
+    Returns
+    -------
+    int
+        Vocabulary size: max_value + 1, or 0 if no valid values found.
+
+    Examples
+    --------
+    >>> records = [{"condition_id": 0}, {"condition_id": 1}, {"condition_id": 2}]
+    >>> infer_cardinality(records, "condition_id")
+    3
+    """
     values = {
         int(record[key])
         for record in records
@@ -220,6 +285,25 @@ def constant_track_metadata(records: Sequence[Mapping[str, Any]]) -> dict[str, t
 def resolve_scale_and_clip(
     records: Sequence[Mapping[str, Any]],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Extract scale factors and clipping thresholds from track records.
+
+    Retrieves per-track normalization and clipping parameters from dataset
+    metadata. Uses default values if fields are missing: 1.0 for scale,
+    348.0 for soft clip, 796.0 for hard clip.
+
+    Parameters
+    ----------
+    records : Sequence[Mapping[str, Any]]
+        Track record list from dataset metadata.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        Three float32 arrays of shape [n_tracks]:
+        - scale_factors: per-track normalization factor (default 1.0)
+        - clip_soft: soft clipping threshold (default 348.0)
+        - clip_hard: hard clipping threshold (default 796.0)
+    """
     scale_factors = _track_array(records, "scale_factor", dtype=np.float32, fill_value=1.0)
     clip_soft = _track_array(records, "clip_soft", dtype=np.float32, fill_value=348.0)
     clip_hard = _track_array(records, "clip_hard", dtype=np.float32, fill_value=796.0)
@@ -494,6 +578,30 @@ def build_model(
     records: Sequence[Mapping[str, Any]],
     adapter_builder: Callable[[BackboneSpec], torch.nn.Module],
 ) -> RegulonadoModel:
+    """Build a RegulonadoModel from configuration and data metadata.
+
+    Constructs a backbone adapter and prediction head, then wraps them in a
+    RegulonadoModel. Derives head configuration (number of tracks, metadata
+    parameters, etc.) from dataset records and metadata. The returned model
+    is ready for training or inference.
+
+    Parameters
+    ----------
+    cfg : Mapping[str, Any]
+        Training configuration with keys: backbone, head, model, data.
+    metadata : Mapping[str, Any]
+        Dataset metadata (e.g., n_pred_bins, bin_size, context_length).
+    records : Sequence[Mapping[str, Any]]
+        Track metadata records used to build the head configuration.
+    adapter_builder : Callable[[BackboneSpec], torch.nn.Module]
+        Function to build backbone adapter from spec (default:
+        build_backbone_adapter).
+
+    Returns
+    -------
+    RegulonadoModel
+        Initialized model with backbone and prediction head.
+    """
     backbone_spec = _make_backbone_spec(cfg["backbone"], metadata)
     backbone = adapter_builder(backbone_spec)
     regulonado_config = _build_regulonado_config(cfg, metadata, records, backbone)
@@ -685,6 +793,28 @@ class RegulonadoTrainer(Trainer):
         return_outputs: bool = False,
         num_items_in_batch: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Compute loss and optionally return model outputs.
+
+        Extracts track metadata from inputs, passes them to the model alongside
+        input_ids, applies the loss function to logits and labels, and
+        optionally returns model outputs for metric computation.
+
+        Parameters
+        ----------
+        model : torch.nn.Module
+            Model to compute loss for.
+        inputs : dict[str, Any]
+            Batch with keys input_ids, labels, and optional track_* metadata.
+        return_outputs : bool, optional
+            Whether to return model outputs, by default False.
+        num_items_in_batch : int | None, optional
+            Not used; for compatibility with parent Trainer.
+
+        Returns
+        -------
+        torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]
+            Loss tensor, or (loss, outputs) if return_outputs=True.
+        """
         input_ids = inputs["input_ids"]
         labels: torch.Tensor | None = inputs.get("labels")
         track_metadata = {k: v for k, v in inputs.items() if k.startswith("track_")}
@@ -704,6 +834,20 @@ class RegulonadoTrainer(Trainer):
         return loss  # type: ignore[return-value]
 
     def save_model(self, output_dir: str | None = None, _internal_call: bool = False) -> None:
+        """Save model and training arguments to output directory.
+
+        Saves the bare RegulonadoModel with config.json and model.safetensors
+        (clean keys, no "model." prefix), plus training_args.json for
+        traceability. Checkpoint can be loaded with
+        ``RegulonadoModel.from_pretrained(output_dir)``.
+
+        Parameters
+        ----------
+        output_dir : str | None, optional
+            Output directory; defaults to trainer's output_dir if None.
+        _internal_call : bool, optional
+            For compatibility with parent Trainer (ignored).
+        """
         output_path = Path(output_dir or self.args.output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         # Save the RegulonadoModel directly — config.json + model.safetensors with clean keys.
@@ -722,6 +866,29 @@ class RegulonadoTrainer(Trainer):
         prediction_loss_only: bool,
         ignore_keys: list[str] | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        """Compute predictions and optionally preprocess for metrics.
+
+        Calls parent prediction_step then applies optional metrics preprocessing
+        (e.g., log-squashing, bin-wise averaging) to logits. Reduces label
+        dimension to [B, T] to conserve eval-set memory.
+
+        Parameters
+        ----------
+        model : torch.nn.Module
+            Model to generate predictions.
+        inputs : dict[str, Any]
+            Batch to predict on.
+        prediction_loss_only : bool
+            If True, only return loss (logits and labels are None).
+        ignore_keys : list[str] | None, optional
+            Keys to exclude from model output (unused).
+
+        Returns
+        -------
+        tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]
+            (loss, logits, labels) where logits and labels may be preprocessed
+            or reduced.
+        """
         loss, logits, labels = super().prediction_step(
             model, inputs, prediction_loss_only, ignore_keys
         )
@@ -751,6 +918,42 @@ def run_training(
     *,
     adapter_builder: Callable[[BackboneSpec], torch.nn.Module] = build_backbone_adapter,
 ) -> dict[str, Any]:
+    """Run end-to-end model training with dataset loading, model building, and
+    evaluation.
+
+    Loads a dataset from disk or streaming source, applies transforms,
+    builds a model, constructs optimizer and scheduler, and trains using
+    HuggingFace Trainer. Logs progress, saves checkpoints, and returns
+    training history.
+
+    Parameters
+    ----------
+    cfg : Mapping[str, Any]
+        Complete training configuration with keys:
+        - data.path: dataset directory or HF streaming path
+        - data.streaming: whether to stream the dataset (default False)
+        - backbone: backbone configuration
+        - head: head configuration
+        - model: model configuration (e.g. use_track_metadata)
+        - loss: loss function configuration
+        - trainer: training hyperparameters
+        - output_dir: checkpoint and output directory
+        - seed: random seed (default 42)
+    adapter_builder : Callable, optional
+        Function to build backbone adapter (default: build_backbone_adapter).
+
+    Returns
+    -------
+    dict[str, Any]
+        Training summary with keys:
+        - output_dir: where checkpoints were saved
+        - n_tracks: number of tracks
+        - backbone: backbone type
+        - head: head type
+        - resume_from_checkpoint: checkpoint path if resumed
+        - init_weights_from_checkpoint: path if warm-started
+        - history: dict with "train/loss" and "eval/loss" lists
+    """
     seed = int(cfg.get("seed", 42))
     _seed_everything(seed)
 
@@ -1065,6 +1268,16 @@ def run_training(
 
 @hydra.main(version_base=None, config_path="../configs", config_name="train")
 def hydra_entrypoint(cfg: DictConfig) -> None:
+    """Hydra entrypoint for training from YAML configuration.
+
+    Loads training config via Hydra, resolves interpolations, converts to
+    plain dict, and calls run_training.
+
+    Parameters
+    ----------
+    cfg : DictConfig
+        Hydra configuration object from configs/train.yaml.
+    """
     config = OmegaConf.to_container(cfg, resolve=True)
     if not isinstance(config, dict):
         raise TypeError("Hydra config did not resolve to a dictionary")
@@ -1072,6 +1285,10 @@ def hydra_entrypoint(cfg: DictConfig) -> None:
 
 
 def main() -> None:
+    """CLI entry point for training.
+
+    Calls hydra_entrypoint to load configuration and run training.
+    """
     hydra_entrypoint()
 
 
