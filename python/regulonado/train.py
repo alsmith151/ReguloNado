@@ -46,6 +46,7 @@ from regulonado.training.config import (
 )
 from regulonado.training.losses import (
     log1p_huber_loss,
+    poisson_multinomial_binwise_loss,
     poisson_multinomial_loss,
     poisson_nll_loss,
     scaled_poisson_multinomial_loss,
@@ -275,6 +276,12 @@ def _build_loss_fn(
         )
     if loss_name == "poisson_multinomial":
         return lambda pred, target: poisson_multinomial_loss(
+            pred,
+            target,
+            poisson_weight=poisson_weight,
+        )
+    if loss_name == "poisson_multinomial_binwise":
+        return lambda pred, target: poisson_multinomial_binwise_loss(
             pred,
             target,
             poisson_weight=poisson_weight,

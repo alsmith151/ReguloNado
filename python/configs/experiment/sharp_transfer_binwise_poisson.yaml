@@ -1,0 +1,73 @@
+# @package _global_
+# Sharp transfer learning — multinomial + PER-BIN Poisson loss.
+#
+# Drop-in twin of `sharp_transfer_poisson_aggressive` / `sharp_transfer_learning` that fixes
+# the "fake peak" failure mode at its source. The stock poisson_multinomial penalises only the
+# summed total count, so a window can keep the right total while parking mass on the wrong
+# bins — fake peaks are nearly free, and raising poisson_weight does not help (wrong axis).
+# This loss adds a per-bin Poisson term: every bin's predicted rate is compared to its own
+# target, so a true-zero bin with a predicted peak is charged directly (cost ~lambda,
+# gradient 1). The multinomial term is kept only as a profile-shape regulariser.
+#
+# Keep apply_squash: false — Poisson is a count model and is only well-specified in count space.
+#
+# Usage:
+#   DATA_DIR=/ceph/.../<sharp-target-dataset> \
+#   EXPERIMENT=sharp_transfer_binwise_poisson \
+#   [INIT_WEIGHTS_FROM_CHECKPOINT=<head-only checkpoint>] \
+#   sbatch scripts/train_slurm.sh
+
+defaults:
+  - override /backbone: borzoi
+  - override /head: transfer_mlp
+  - override /loss: poisson_multinomial_binwise
+
+data:
+  streaming: true
+  enable_rc_aug: true
+  apply_scale: true
+  apply_clip: true
+  apply_squash: false
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+loss:
+  # Per-bin Poisson is the workhorse; raise toward 2.0 if background is still over-active,
+  # lower toward 0.5 if real peaks over-sharpen or training destabilises.
+  poisson_weight: 1.0
+
+trainer:
+  batch_size: 8
+  eval_batch_size: 8
+  num_workers: 8
+
+  learning_rate: 5.0e-4
+  backbone_learning_rate: 1.0e-5
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_steps: 500
+  max_steps: 10000
+
+  gradient_accumulation_steps: 2
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+
+  log_every_n_steps: 10
+  eval_every_n_steps: 500
+  checkpoint_every_n_steps: 500
+
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 2
+
+  report_to: [wandb]
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+  topk_bins: 128
+
+  max_eval_samples: 500
+  num_plot_examples: 8
+  early_stopping_patience: 5
+
+  init_weights_from_checkpoint: ${oc.env:INIT_WEIGHTS_FROM_CHECKPOINT,""}
