@@ -477,9 +477,59 @@ def _signal_intervals(
     return out
 
 
+# Filesystem types that are network-backed, and therefore slow enough for Arrow I/O
+# that it is worth warning about. Used only for diagnostics.
+_NETWORK_FS_TYPES = frozenset(
+    {"ceph", "nfs", "nfs4", "lustre", "gpfs", "beegfs", "glusterfs", "cifs", "smb3", "fuse.sshfs"}
+)
+
+
 def _is_remote_fs(path: Path) -> bool:
-    resolved = str(path.resolve())
-    return resolved.startswith("/ceph") or resolved.startswith("/project")
+    """Return True when ``path`` lives on a network filesystem.
+
+    Used only to decide whether to warn that Arrow I/O will cross the network.
+
+    This used to test for the literal prefixes ``/ceph`` and ``/project``, which
+    made it a no-op on any machine that did not happen to use those mount points.
+    Reading the actual filesystem type from ``/proc/mounts`` works anywhere Linux
+    does; on platforms without ``/proc/mounts`` it returns False, which only costs
+    a diagnostic message.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Path to test. Resolved before matching, so symlinks are followed.
+
+    Returns
+    -------
+    bool
+        True if the longest matching mount point is a known network filesystem.
+    """
+    try:
+        mounts = Path("/proc/mounts").read_text().splitlines()
+    except OSError:
+        return False
+
+    resolved = path.resolve()
+    best_len = -1
+    best_is_network = False
+    for line in mounts:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mount_point, fs_type = parts[1], parts[2]
+        try:
+            mount_path = Path(mount_point)
+            if resolved != mount_path and mount_path not in resolved.parents:
+                continue
+        except (OSError, ValueError):
+            continue
+        # Longest matching mount point wins, so a network mount nested under "/"
+        # is not masked by the root filesystem entry.
+        if len(mount_point) > best_len:
+            best_len = len(mount_point)
+            best_is_network = fs_type in _NETWORK_FS_TYPES
+    return best_is_network
 
 
 def _is_contiguous(indices: Sequence[int]) -> bool:

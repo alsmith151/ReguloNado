@@ -11,10 +11,14 @@
 # LR is reduced to 25% of phase-2 values and warmup is extended to compensate
 # for fresh Adam second moments accumulated under the deeper parameter set.
 #
-# Usage:
-#   EXPERIMENT=stage3_deep_finetune_borzoi \
-#   INIT_WEIGHTS_FROM_CHECKPOINT=/path/to/stage2/checkpoint-NNNN \
-#   DATA_DIR=... sbatch scripts/train_slurm.sh
+# Usage — add to the `train.phases` list in config/config.yaml, then:
+#   snakemake --configfile config/config.yaml --profile workflow/profiles/slurm
+#
+# The workflow warm-starts each phase from the previous phase's best checkpoint,
+# so INIT_WEIGHTS_FROM_CHECKPOINT does not need setting by hand.
+#
+# To run this config alone:
+#   regulonado train --experiment stage3_deep_finetune_borzoi --data-dir <dataset> --run-dir <output>
 
 defaults:
   - override /backbone: borzoi

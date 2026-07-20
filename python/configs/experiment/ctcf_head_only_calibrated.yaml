@@ -35,9 +35,14 @@
 #   EXPERIMENT=stage2_unfreeze2_borzoi \
 #   INIT_WEIGHTS_FROM_CHECKPOINT=<this run's best checkpoint> ...
 #
-# Usage:
-#   DATA_DIR=/ceph/.../2026-06-22-regulonado-ctcf-test \
-#   EXPERIMENT=ctcf_head_only_calibrated sbatch scripts/train_slurm.sh
+# Usage — add to the `train.phases` list in config/config.yaml, then:
+#   snakemake --configfile config/config.yaml --profile workflow/profiles/slurm
+#
+# The workflow warm-starts each phase from the previous phase's best checkpoint,
+# so INIT_WEIGHTS_FROM_CHECKPOINT does not need setting by hand.
+#
+# To run this config alone:
+#   regulonado train --experiment ctcf_head_only_calibrated --data-dir <dataset> --run-dir <output>
 
 defaults:
   - override /backbone: borzoi

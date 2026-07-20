@@ -11,11 +11,14 @@
 #
 # Keep apply_squash: false — Poisson is a count model and is only well-specified in count space.
 #
-# Usage:
-#   DATA_DIR=/ceph/.../<sharp-target-dataset> \
-#   EXPERIMENT=sharp_transfer_binwise_poisson \
-#   [INIT_WEIGHTS_FROM_CHECKPOINT=<head-only checkpoint>] \
-#   sbatch scripts/train_slurm.sh
+# Usage — add to the `train.phases` list in config/config.yaml, then:
+#   snakemake --configfile config/config.yaml --profile workflow/profiles/slurm
+#
+# The workflow warm-starts each phase from the previous phase's best checkpoint,
+# so INIT_WEIGHTS_FROM_CHECKPOINT does not need setting by hand.
+#
+# To run this config alone:
+#   regulonado train --experiment sharp_transfer_binwise_poisson --data-dir <dataset> --run-dir <output>
 
 defaults:
   - override /backbone: borzoi

@@ -14,10 +14,14 @@
 # topk_additive is the conservative default here; swap loss=topk_reweight
 # to try the in-place reweighting variant instead.
 #
-# Usage:
-#   EXPERIMENT=stage4_peak_finetune_borzoi \
-#   INIT_WEIGHTS_FROM_CHECKPOINT=/path/to/stage3/checkpoint-NNNN \
-#   DATA_DIR=... sbatch scripts/train_slurm.sh
+# Usage — add to the `train.phases` list in config/config.yaml, then:
+#   snakemake --configfile config/config.yaml --profile workflow/profiles/slurm
+#
+# The workflow warm-starts each phase from the previous phase's best checkpoint,
+# so INIT_WEIGHTS_FROM_CHECKPOINT does not need setting by hand.
+#
+# To run this config alone:
+#   regulonado train --experiment stage4_peak_finetune_borzoi --data-dir <dataset> --run-dir <output>
 
 defaults:
   - override /backbone: borzoi

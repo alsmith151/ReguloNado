@@ -30,11 +30,14 @@
 # Running cold (no warm-start) is also safe here: the long warmup + low backbone
 # LR + gradient clipping keep early head gradients from corrupting the backbone.
 #
-# Usage:
-#   DATA_DIR=/ceph/.../<sharp-target-dataset> \
-#   EXPERIMENT=sharp_transfer_learning \
-#   [INIT_WEIGHTS_FROM_CHECKPOINT=<head-only checkpoint>] \
-#   sbatch scripts/train_slurm.sh
+# Usage — add to the `train.phases` list in config/config.yaml, then:
+#   snakemake --configfile config/config.yaml --profile workflow/profiles/slurm
+#
+# The workflow warm-starts each phase from the previous phase's best checkpoint,
+# so INIT_WEIGHTS_FROM_CHECKPOINT does not need setting by hand.
+#
+# To run this config alone:
+#   regulonado train --experiment sharp_transfer_learning --data-dir <dataset> --run-dir <output>
 
 defaults:
   - override /backbone: borzoi

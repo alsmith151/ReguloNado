@@ -12,11 +12,14 @@
 # much total signal a window gets but not where it goes. To penalise per-bin fake peaks
 # directly, use a per-bin Poisson loss instead (see the plan / poisson_multinomial_binwise).
 #
-# Usage:
-#   DATA_DIR=/ceph/.../<sharp-target-dataset> \
-#   EXPERIMENT=sharp_transfer_poisson_aggressive \
-#   [INIT_WEIGHTS_FROM_CHECKPOINT=<head-only checkpoint>] \
-#   sbatch scripts/train_slurm.sh
+# Usage — add to the `train.phases` list in config/config.yaml, then:
+#   snakemake --configfile config/config.yaml --profile workflow/profiles/slurm
+#
+# The workflow warm-starts each phase from the previous phase's best checkpoint,
+# so INIT_WEIGHTS_FROM_CHECKPOINT does not need setting by hand.
+#
+# To run this config alone:
+#   regulonado train --experiment sharp_transfer_poisson_aggressive --data-dir <dataset> --run-dir <output>
 
 defaults:
   - override /backbone: borzoi
