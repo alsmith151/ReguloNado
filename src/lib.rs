@@ -21,6 +21,7 @@
 mod bigwig_io;
 mod binning;
 mod chrom_pass;
+#[cfg(feature = "debug-writers")]
 mod debug;
 mod fasta;
 mod io_utils;

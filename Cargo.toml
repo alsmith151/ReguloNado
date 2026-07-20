@@ -16,21 +16,19 @@ name = "regulonado_rs"
 crate-type = ["cdylib"]
 
 [features]
-debug-writers = []
+debug-writers = ["dep:numpy", "dep:ndarray"]
 
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
-numpy = "0.23"
-ndarray = "0.16"
+numpy = { version = "0.23", optional = true }
+ndarray = { version = "0.16", optional = true }
 bigtools = { version = "0.5", default-features = false, features = ["read"] }
 rayon = "1"
-byteorder = "1"
 arrow-array = "56"
 arrow-buffer = "56"
 arrow-ipc = { version = "56", features = ["lz4", "zstd"] }
 arrow-schema = "56"
 serde_json = "1"
-wide = "0.7"
 
 [profile.release]
 lto = true

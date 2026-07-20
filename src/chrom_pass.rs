@@ -482,7 +482,7 @@ pub(crate) fn write_arrow_split_chrom_pass(
         eprintln!(
             "[regulonado_rs] chrom_pass profile chroms={n_chroms_used}\n  \
              chrom_scan: total_wall_s={:.1}\n  \
-             binner:     direct_calls={} dense_calls={} direct_intervals={} dense_intervals={}\n  \
+             binner:     direct_calls={} direct_intervals={}\n  \
              writer:     total_wall_s={:.1} summed_worker_s={:.1} threads={}\n  \
              slice:      total_worker_s={:.1}\n  \
              fasta:      total_worker_s={:.1}\n  \
@@ -493,9 +493,7 @@ pub(crate) fn write_arrow_split_chrom_pass(
              total_wall_s={:.1}",
             sum(&prof_chrom_scan_s),
             prof_binning.direct_calls,
-            prof_binning.dense_calls,
             prof_binning.direct_intervals,
-            prof_binning.dense_intervals,
             sum(&prof_writer_wall_s),
             prof_write.wall_ns as f64 / 1e9,
             write_threads,
@@ -862,7 +860,7 @@ pub(crate) fn write_arrow_splits_chrom_pass(
         eprintln!(
             "[regulonado_rs] chrom_pass(all_splits) profile chroms={}\n  \
              chrom_scan: total_wall_s={:.1}\n  \
-             binner:     direct_calls={} dense_calls={} direct_intervals={} dense_intervals={}\n  \
+             binner:     direct_calls={} direct_intervals={}\n  \
              writer:     total_wall_s={:.1} summed_worker_s={:.1} threads={}\n  \
              slice:      total_worker_s={:.1}\n  \
              fasta:      total_worker_s={:.1}\n  \
@@ -874,9 +872,7 @@ pub(crate) fn write_arrow_splits_chrom_pass(
             chrom_order.len(),
             sum(&prof_chrom_scan_s),
             prof_binning.direct_calls,
-            prof_binning.dense_calls,
             prof_binning.direct_intervals,
-            prof_binning.dense_intervals,
             sum(&prof_writer_wall_s),
             prof_write.wall_ns as f64 / 1e9,
             write_threads,
