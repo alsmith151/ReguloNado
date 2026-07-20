@@ -1,10 +1,18 @@
 use std::collections::HashMap;
 
+/// A single samtools .fai index record.
+///
+/// Represents one contig from a FASTA index file, enabling random access to
+/// sequences by computing byte offsets directly.
 #[derive(Clone, Debug)]
 pub(crate) struct FastaIndexRecord {
+    /// Length of the sequence in bases.
     pub(crate) len: u64,
+    /// Byte offset of the sequence data in the FASTA file.
     pub(crate) offset: u64,
+    /// Number of bases per line in the FASTA file (before newline).
     pub(crate) line_bases: u64,
+    /// Number of bytes per line in the FASTA file (including newline).
     pub(crate) line_width: u64,
 }
 

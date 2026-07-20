@@ -1,5 +1,10 @@
 use bigtools::{BBIFileRead, BigWigRead};
 
+/// Statistics from a binning operation.
+///
+/// Tracks the number of direct binning calls and the total number of BigWig intervals
+/// processed across all those calls. Intended for profiling to understand BigWig
+/// iteration patterns.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BinningUsage {
     pub direct_calls: u64,
@@ -20,6 +25,11 @@ impl BinningUsage {
     }
 }
 
+/// Reusable scratch buffers for binning operations.
+///
+/// Holds vectors for accumulating bin sums (f64) and covered bases per bin (u64),
+/// allocated lazily and resized as needed. Passed through per-chromosome and per-thread
+/// operations to avoid repeated allocations in tight loops.
 #[derive(Default)]
 pub(crate) struct BinningScratch {
     sums: Vec<f64>,

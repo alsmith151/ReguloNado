@@ -34,6 +34,11 @@ use crate::fasta::{load_fasta_index, read_one_hot_sequence};
 use crate::io_utils::{ipc_write_options, maybe_log_progress};
 use crate::schema::{hf_arrow_schema, make_2d_f32_array, make_2d_i8_array};
 
+/// Timing profile for a single Arrow shard write.
+///
+/// Tracks raw and wall-clock time spent in each stage of writing one shard
+/// file, along with row and byte counts. Aggregated across shards for
+/// per-stage analysis when profiling is enabled.
 #[derive(Clone, Copy, Debug, Default)]
 struct WriteShardProfile {
     rows: usize,
@@ -57,6 +62,10 @@ impl WriteShardProfile {
     }
 }
 
+/// Specification for writing a single Arrow shard file.
+///
+/// Describes the output location, shard numbering (for the `data-NNNNN-of-MMMMM.arrow`
+/// filename), and the range of samples within the split that this shard covers.
 struct WriteShardSpec<'a> {
     out_dir: &'a str,
     shard_idx: usize,
@@ -67,6 +76,12 @@ struct WriteShardSpec<'a> {
     samples: &'a [(usize, usize)],
 }
 
+/// Context passed to each shard-write task.
+///
+/// Contains references to all shared data (schema, decoded chromosome signals,
+/// FASTA index, BED rows) and settings (bin/batch/context dimensions, compression).
+/// Each worker thread (via `write_chrom_shard`) reads from this context to construct
+/// its shard file without copying the large signal matrix.
 struct WriteShardCtx<'a> {
     schema: Arc<arrow_schema::Schema>,
     compression: &'a str,
@@ -86,6 +101,15 @@ struct WriteShardCtx<'a> {
     fai: &'a HashMap<String, crate::fasta::FastaIndexRecord>,
 }
 
+/// Write a single Arrow shard file for one chromosome.
+///
+/// For each sample in the shard, slices the decoded chromosome signal matrix to extract
+/// the binned labels for that sample's interval, reads its FASTA sequence, and appends
+/// a record batch to the Arrow file. The decoded signal was already read once during
+/// the per-chromosome scan phase; this function only slices per-sample rows from it.
+///
+/// Returns a profile with timing breakdowns and byte count for later aggregation,
+/// or a String error if file I/O, Arrow construction, or FASTA read fails.
 fn write_chrom_shard(
     spec: &WriteShardSpec<'_>,
     ctx: &WriteShardCtx<'_>,
@@ -204,6 +228,12 @@ fn write_chrom_shard(
     })
 }
 
+/// State for writing one split's shards across all chromosomes.
+///
+/// Tracks which samples belong to this split (by chromosome), how many shards total
+/// will be written, and the next shard index to assign. Updated as each chromosome's
+/// shards are written to produce monotonically increasing `data-NNNNN-of-MMMMM.arrow`
+/// filenames.
 struct SplitChromSamples {
     name: String,
     out_dir: String,
@@ -213,6 +243,12 @@ struct SplitChromSamples {
     next_shard: usize,
 }
 
+/// Validate that a batch size does not exceed Arrow i32 offset limits.
+///
+/// The 2D arrays (labels and input sequences) are stored as Arrow List arrays with
+/// i32 offsets. This function checks that `batch_size * n_tracks * n_bins` and
+/// `batch_size * 4 * context_len` both fit in i32::MAX, returning an error with
+/// a suggested safe batch size if either would overflow.
 fn validate_batch_size(
     batch_size: usize,
     n_tracks: usize,
@@ -231,6 +267,14 @@ fn validate_batch_size(
     Ok(())
 }
 
+/// Build split-wide state and determine chromosome scan order.
+///
+/// Validates that split_names, out_dirs, and split_sample_indices all have the
+/// same length, then groups each split's samples by chromosome. Returns both a
+/// per-split state struct (holding samples_by_chrom and total_shards for progress
+/// tracking) and a sorted list of chromosomes ordered descending by length (so the
+/// longest chromosome lands in shard `00000`). Chromosomes with zero bins after
+/// division by bin_size are excluded from the scan.
 fn build_split_chrom_samples(
     split_names: Vec<String>,
     out_dirs: Vec<String>,
@@ -299,6 +343,59 @@ fn build_split_chrom_samples(
     Ok((splits, chrom_order))
 }
 
+/// Write Arrow datasets using the chromosome-pass strategy.
+///
+/// Scans each chromosome once, decoding the binned signal of all tracks into a
+/// single (n_tracks, n_chrom_bins) matrix in RAM, then slices per-sample rows out of
+/// that matrix. This collapses ~N_samples random BigWig seeks per chromosome into one
+/// sequential scan per (chrom, track) pair, achieving much better BigWig I/O locality.
+///
+/// All splits share a single chromosome scan. For each split, writes one Arrow IPC shard
+/// file per chromosome per shard (ordered chrom-major, with shard `00000` on the longest
+/// chromosome). Each shard file holds one or more Arrow record batches (decoupling on-disk
+/// shard size from per-batch RAM usage). Within a shard, rows are in original BED order;
+/// a `local_index` column preserves the original position for sorting.
+///
+/// Releases the GIL during the per-chromosome scan and during shard file writing, and
+/// fans out over tracks within each chromosome using Rayon parallelism.
+///
+/// # Parameters
+///
+/// - `bw_paths`: paths to BigWig files, one per track.
+/// - `minus_flags`: boolean flags indicating whether each track's values should be
+///   negated if the majority (≥80%) of non-zero values are already negative.
+/// - `signal_intervals`: list of (chrom, region_start, region_end) tuples defining
+///   the binned signal region for each sample, aligned to bin boundaries.
+/// - `split_names`: names of the splits being written (train, val, test, etc.).
+/// - `out_dirs`: output directories, one per split, where Arrow shards will be written.
+/// - `split_sample_indices`: for each split, a list of indices into `bed_rows` and
+///   `signal_intervals` specifying which samples belong to that split.
+/// - `bed_rows`: list of (chrom, start, end, name) tuples from the BED file; defines
+///   sample intervals and metadata.
+/// - `fasta_path`: path to a .fasta file with a corresponding .fasta.fai index.
+/// - `n_bins`: number of bins in the signal output (rows of the labels matrix).
+/// - `context_len`: length of the DNA context window (rows of the input matrix).
+/// - `bin_size`: size of each bin in basepairs; used to convert between BED coordinates
+///   and bin indices.
+/// - `batch_size`: maximum rows per Arrow record batch (default 4). Keeps peak RAM
+///   bounded regardless of shard size.
+/// - `shard_size`: rows per Arrow shard file (default 0, meaning use `batch_size`).
+///   Decouples on-disk shard size from per-batch RAM usage.
+/// - `n_threads`: Rayon thread pool size for BigWig scanning and track parallelism.
+///   If unset, uses available cores.
+/// - `arrow_write_threads`: thread pool size for parallel shard writes (default 8 or
+///   n_threads, whichever is smaller).
+/// - `compression`: Arrow IPC compression codec ("zstd", "lz4", or "none"; default "zstd").
+/// - `profile`: if true, collect and log timing breakdowns per stage.
+///
+/// # Errors
+///
+/// Returns a PyRuntimeError if:
+/// - The FASTA file cannot be opened or the .fai index is missing.
+/// - A BED index falls outside the bed_rows array.
+/// - A sample's signal region references a contig absent from the FASTA index.
+/// - `batch_size` causes Arrow i32 offset overflow (a limit around 1e8 rows depending
+///   on dimensions).
 #[pyfunction]
 #[pyo3(signature = (
     bw_paths,
