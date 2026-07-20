@@ -496,7 +496,9 @@ class RegionPredictor:
             model_config.track_names or [f"track{i}" for i in range(int(model_config.n_tracks))]
         )
         self.selected_tracks = _resolve_tracks(config.tracks, self.track_names)
-        self.model_device = str(next(self.model.parameters()).device)
+        first_param = next(self.model.parameters())
+        self.model_device = str(first_param.device)
+        self.model_dtype = first_param.dtype
         self.track_metadata = _model_track_metadata(self.model, self.model_device)
         self.fasta = pyfaidx.Fasta(
             str(config.fasta_path),
@@ -565,7 +567,7 @@ class RegionPredictor:
             self.context_length,
             self.chrom_sizes[chrom],
         )
-        x = torch.from_numpy(seq[None]).to(dtype=torch.float32, device=self.model_device)
+        x = torch.from_numpy(seq[None]).to(dtype=self.model_dtype, device=self.model_device)
         with torch.no_grad():
             preds = self.model(x, **self.track_metadata)
         values = preds[0].float().cpu().numpy()
@@ -638,7 +640,9 @@ def predict_to_bigwig(
     n_pred_bins = int(config.n_pred_bins)
     bin_size = int(config.bin_size)
     track_names = list(config.track_names or [f"track{i}" for i in range(int(config.n_tracks))])
-    model_device = str(next(model.parameters()).device)
+    first_param = next(model.parameters())
+    model_device = str(first_param.device)
+    model_dtype = first_param.dtype
     track_metadata = _model_track_metadata(model, model_device)
     log.info(
         "Model ready — %d tracks, %d bins × %d bp, device=%s",
@@ -688,7 +692,7 @@ def predict_to_bigwig(
         seqs = np.stack(
             [one_hot_context(fasta, w, context_length, chrom_sizes[w.chrom]) for w in batch]
         )
-        x = torch.from_numpy(seqs).to(dtype=torch.float32, device=model_device)
+        x = torch.from_numpy(seqs).to(dtype=model_dtype, device=model_device)
         with torch.no_grad():
             preds = model(x, **track_metadata)
         preds = preds.float().cpu().numpy()  # (B, n_tracks, n_pred_bins)
