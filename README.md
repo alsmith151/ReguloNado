@@ -23,7 +23,7 @@ friendly CLI on top of the Hugging Face `Trainer`.
           input_ids: one-hot (4, L)
           labels:    binned signal (T, B)
                        ▼
-            regulonado scale / *-scaling    ← per-track RPKM → raw-count factors
+            regulonado normalization ...     ← grouped per-track normalisation commands
                        ▼
             regulonado train               ← Borzoi/Enformer + prediction head
                        ▼
@@ -113,10 +113,10 @@ The full pipeline orchestrates: **build → recompress → scale factors → enr
 # 1. Build the Arrow dataset from BED + FASTA + a directory of BigWigs.
 regulonado build intervals.bed genome.fa dataset/ --bigwig-dir bw/ --stage
 
-# 2. Infer RPKM → raw-count scale factors for each track.
-regulonado calculate-original-scaling dataset/regulonado_metadata.json
+# 2. Infer per-track scale factors (choose `original` or `tmm`).
+regulonado normalization original dataset/regulonado_metadata.json
 
-# 3. Write those factors into the dataset metadata train.py reads.
+# 3. Write those factors into the dataset metadata training reads.
 regulonado enrich-metadata dataset/regulonado_metadata.json dataset/scale_factors.parquet
 
 # 4. Train (smoke test shown; drop the limits for a real run).
@@ -133,9 +133,9 @@ The workflow orchestrates all steps end-to-end. Copy `config/config.yaml`, edit 
 and experiment config, then run:
 
 ```bash
-snakemake --configfile config/config.yaml -n                        # dry run, prints the DAG
-snakemake --configfile config/config.yaml --cores 8                 # run locally
-snakemake --configfile config/config.yaml --profile workflow/profiles/slurm   # run on SLURM
+regulonado pipeline --configfile config/config.yaml --dry-run
+regulonado pipeline --configfile config/config.yaml --cores 8
+regulonado pipeline --configfile config/config.yaml --profile workflow/profiles/slurm
 ```
 
 Cluster specifics (partition, account, GPU type) live in `workflow/profiles/slurm/config.yaml`,
@@ -143,7 +143,7 @@ not in the workflow itself, so the pipeline is portable between sites. You will 
 install `snakemake` and (for cluster runs) `snakemake-executor-plugin-slurm`:
 
 ```bash
-pip install snakemake snakemake-executor-plugin-slurm
+pip install "regulonado[workflow]" snakemake-executor-plugin-slurm
 ```
 
 ## Building a dataset
@@ -185,15 +185,15 @@ Scale factors convert per-track BigWig signal (typically RPKM) to raw read count
 before loss computation. Compute and apply them after building:
 
 ```bash
-regulonado calculate-original-scaling dataset/regulonado_metadata.json
-regulonado calculate-tmm-scaling dataset/regulonado_metadata.json        # optional TMM correction
+regulonado normalization original dataset/regulonado_metadata.json
+regulonado normalization tmm dataset/regulonado_metadata.json initial_scale_factors.parquet
 regulonado enrich-metadata dataset/regulonado_metadata.json dataset/scale_factors.parquet
 ```
 
-- `calculate-original-scaling` reads BigWig header metadata to infer library sizes
+- `normalization original` reads BigWig header metadata to infer library sizes
   and the RPKM→raw-count factor per track. This command requires the BamNado binary
   on PATH and cannot be installed via pip (see [BamNado](#bamnado) below).
-- `calculate-tmm-scaling` (the workflow default) layers an edgeR-style TMM normalisation
+- `normalization tmm` layers an edgeR-style TMM normalisation
   on top, estimated from the Arrow shards. It has no external dependencies.
 - `enrich-metadata` writes the resulting `scale_factor` / `clip_soft` / `clip_hard`
   into `final_track_records`, which `train.py` reads at training time.
@@ -430,7 +430,7 @@ Count is set by `trainer.num_plot_examples` (default 4); set to 0 to disable.
 
 ### BamNado
 
-`regulonado calculate-original-scaling` requires the
+`regulonado normalization original` requires the
 [BamNado](https://github.com/alsmith151/BamNado) binary (`bamnado`) on `PATH`. It
 reads BigWig header metadata to infer library size and compute RPKM→raw-count
 factors.
@@ -445,7 +445,7 @@ mv bamnado ~/.local/bin/      # or any directory on PATH
 If not on `PATH`, point to it with the `BAMNADO` environment variable:
 
 ```bash
-BAMNADO=/path/to/bamnado regulonado calculate-original-scaling metadata.json
+BAMNADO=/path/to/bamnado regulonado normalization original metadata.json
 ```
 
 ## License
@@ -480,7 +480,7 @@ internals.
 
 ## Repository layout
 
-- `src/` — Rust/PyO3 BigWig + FASTA readers and Arrow writers (`chrom_pass.rs` is the
+- `src/` — Rust/PyO3 BigWig + FASTA readers and Arrow writers (`chromosome_scan_writer.rs` is the
   production writer).
 - `python/regulonado/dataset.py` — dataset construction, transforms, scaling, augmentation.
 - `python/regulonado/train.py` — training entrypoint (Hydra + HF `Trainer`).

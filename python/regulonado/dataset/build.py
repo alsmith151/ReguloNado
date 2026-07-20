@@ -24,6 +24,7 @@ Example::
     ds = datasets.load_from_disk("dataset/hf-v1")
     ds["train"].set_transform(make_transform(scale_factors, clip_soft, clip_hard))
 """
+
 from __future__ import annotations
 
 import concurrent.futures
@@ -96,6 +97,7 @@ def _recommend_shard_size(
     n_batches = max(1, -(-est_samples // batch_size))
     return n_batches * batch_size
 
+
 DEFAULT_SPLITS: dict[str, list[str]] = {
     "train": ["fold0", "fold1", "fold2", "fold5", "fold6", "fold7"],
     "validation": ["fold4"],
@@ -166,8 +168,7 @@ def _stage_files(
         logger.info(f"Staging {n} file(s) → {scratch} (workers={workers})")
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = {
-            pool.submit(_rsync_one, src, scratch, companion_suffixes): src
-            for src in unique_srcs
+            pool.submit(_rsync_one, src, scratch, companion_suffixes): src for src in unique_srcs
         }
         staged_map: dict[str, str] = {}
         for done, fut in enumerate(concurrent.futures.as_completed(futs), 1):
@@ -182,6 +183,7 @@ def _stage_files(
 # ---------------------------------------------------------------------------
 # Track filtering/provenance
 # ---------------------------------------------------------------------------
+
 
 def _hash_file_blake2b(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
     h = hashlib.blake2b(digest_size=32)
@@ -319,13 +321,13 @@ def _resolve_bigwig_tracks(
         track_index = len(final_records)
         final_track_index_by_source[source_index] = track_index
         content_hash = content_hash_by_source.get(source_index)
-        dedupe_method = "content" if content_hash is not None else (
-            "identity" if dedupe_tracks in {"identity", "content"} else "none"
+        dedupe_method = (
+            "content"
+            if content_hash is not None
+            else ("identity" if dedupe_tracks in {"identity", "content"} else "none")
         )
         dedupe_key = (
-            f"content:{content_hash}"
-            if content_hash is not None
-            else str(rec["identity_key"])
+            f"content:{content_hash}" if content_hash is not None else str(rec["identity_key"])
         )
         out = {
             "track_index": track_index,
@@ -358,7 +360,8 @@ def _resolve_bigwig_tracks(
             "duplicate_of_source_index": duplicate_of_source_index,
             "dedupe_method": dedupe_method,
             "dedupe_key": (
-                f"content:{content_hash}" if dedupe_method == "content" and content_hash is not None
+                f"content:{content_hash}"
+                if dedupe_method == "content" and content_hash is not None
                 else str(rec["identity_key"])
             ),
         }
@@ -407,15 +410,14 @@ def _resolve_bigwig_tracks(
 # BigWig helpers
 # ---------------------------------------------------------------------------
 
+
 def _is_minus_strand(path: str) -> bool:
     stem = Path(path).stem.lower()
     return stem.endswith("_minus") or stem.endswith("-minus") or ".minus" in stem
 
 
 def _read_track(reader, chrom: str, start: int, end: int, n_bins: int) -> np.ndarray:
-    return np.asarray(
-        reader.values(chrom, start, end, bins=n_bins, exact=True), dtype=np.float32
-    )
+    return np.asarray(reader.values(chrom, start, end, bins=n_bins, exact=True), dtype=np.float32)
 
 
 def _read_all_tracks(
@@ -443,6 +445,7 @@ def _read_all_tracks(
 # ---------------------------------------------------------------------------
 # Fast-path helpers
 # ---------------------------------------------------------------------------
+
 
 def _load_bed_rows(bed_file: str | Path) -> list[tuple[str, int, int, str]]:
     """Return all (chrom, start, end, fold) tuples from a BED file (gzipped ok)."""
@@ -562,6 +565,7 @@ def _sample_major_signal_generator(
     # Build a GenomeIntervalDataset over the FULL BED (no fold filter) so we can
     # index by global row number via sample_indices.
     from enformer_pytorch.data import GenomeIntervalDataset  # noqa: PLC0415
+
     gid = GenomeIntervalDataset(
         str(bed_file),
         fasta_file=str(fasta_file),
@@ -678,8 +682,7 @@ def build_dataset_fast(
         splits = DEFAULT_SPLITS
     if shift_max_bp % bin_size != 0:
         raise ValueError(
-            f"shift_max_bp ({shift_max_bp}) must be a multiple of "
-            f"bin_size ({bin_size})"
+            f"shift_max_bp ({shift_max_bp}) must be a multiple of bin_size ({bin_size})"
         )
 
     bed_file = Path(bed_file)
@@ -757,13 +760,9 @@ def build_dataset_fast(
     label_batch_gb = effective_arrow_batch * n_tracks * stored_n_bins * 4 / 1e9
     seq_batch_gb = effective_arrow_batch * 4 * stored_context / 1e9
     effective_arrow_write_threads = (
-        4
-        if arrow_write_threads is None
-        else max(1, arrow_write_threads)
+        4 if arrow_write_threads is None else max(1, arrow_write_threads)
     )
-    chrom_pass_writer_peak_gb = effective_arrow_write_threads * (
-        label_batch_gb + seq_batch_gb
-    )
+    chrom_pass_writer_peak_gb = effective_arrow_write_threads * (label_batch_gb + seq_batch_gb)
     chrom_lengths: dict[str, int] = {}
     fai_path = Path(str(active_fasta) + ".fai")
     if fai_path.exists():
@@ -796,13 +795,15 @@ def build_dataset_fast(
 
     from datasets import Array2D, Dataset, DatasetDict, Features, Value  # noqa: PLC0415
 
-    features = Features({
-        "input_ids": Array2D(dtype="int8", shape=(4, stored_context)),
-        "labels": Array2D(dtype="float32", shape=(n_tracks, stored_n_bins)),
-        "interval": Value(dtype="string"),
-        "index": Value(dtype="int64"),
-        "local_index": Value(dtype="int64"),
-    })
+    features = Features(
+        {
+            "input_ids": Array2D(dtype="int8", shape=(4, stored_context)),
+            "labels": Array2D(dtype="float32", shape=(n_tracks, stored_n_bins)),
+            "interval": Value(dtype="string"),
+            "index": Value(dtype="int64"),
+            "local_index": Value(dtype="int64"),
+        }
+    )
 
     chrom_filter_set = set(chrom_filter) if chrom_filter else None
 
@@ -902,17 +903,13 @@ def build_dataset_fast(
 
         for split, split_scratch_str in zip(chrom_split_names, chrom_split_out_dirs, strict=True):
             split_scratch = Path(split_scratch_str)
-            arrow_filenames = sorted(
-                p.name for p in split_scratch.glob("data-*-of-*.arrow")
-            )
+            arrow_filenames = sorted(p.name for p in split_scratch.glob("data-*-of-*.arrow"))
             if not arrow_filenames:
                 raise RuntimeError(
                     f"chrom_pass produced no shards in {split_scratch}; "
                     f"check that the FASTA contains the BED chromosomes"
                 )
-            logger.info(
-                f"Arrow shard(s) for '{split}' written ({len(arrow_filenames)} file(s))"
-            )
+            logger.info(f"Arrow shard(s) for '{split}' written ({len(arrow_filenames)} file(s))")
             _write_hf_split_metadata(
                 split_scratch, features=features, arrow_filenames=arrow_filenames
             )
@@ -993,8 +990,7 @@ def build_dataset_fast(
     logger.info(f"Dataset saved to {output_dir}")
     if not return_dataset:
         logger.info(
-            "Skipping final DatasetDict.load_from_disk(); "
-            "caller can reopen output_dir if needed"
+            "Skipping final DatasetDict.load_from_disk(); caller can reopen output_dir if needed"
         )
         return None
     return DatasetDict.load_from_disk(str(output_dir))
@@ -1003,6 +999,7 @@ def build_dataset_fast(
 # ---------------------------------------------------------------------------
 # Read-time transform
 # ---------------------------------------------------------------------------
+
 
 def build_rc_permutation(
     track_records: list[dict],
@@ -1064,8 +1061,8 @@ def transform_signal(
     Returns float32.
     """
     sf = np.asarray(scale_factors, dtype=np.float32).reshape(-1, 1)
-    cs = np.broadcast_to(np.asarray(clip_soft,  dtype=np.float32), (sf.shape[0],)).reshape(-1, 1)
-    ch = np.broadcast_to(np.asarray(clip_hard,  dtype=np.float32), (sf.shape[0],)).reshape(-1, 1)
+    cs = np.broadcast_to(np.asarray(clip_soft, dtype=np.float32), (sf.shape[0],)).reshape(-1, 1)
+    ch = np.broadcast_to(np.asarray(clip_hard, dtype=np.float32), (sf.shape[0],)).reshape(-1, 1)
 
     out = np.asarray(signal, dtype=np.float32).copy()
     np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
@@ -1168,7 +1165,10 @@ def make_transform(
         labels: np.ndarray, _sf: np.ndarray, _cs: np.ndarray, _ch: np.ndarray
     ) -> np.ndarray:
         return transform_signal(
-            labels, _sf, _cs, _ch,
+            labels,
+            _sf,
+            _cs,
+            _ch,
             apply_scale=apply_scale,
             apply_squash=apply_squash,
             apply_clip=apply_clip,

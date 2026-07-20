@@ -10,11 +10,11 @@ Regulonado is a mixed Rust/Python package for building Arrow datasets from BigWi
 
 The production hot path is **entirely in Rust**. Its centerpiece is the chromosome-pass writer:
 
-- **`chrom_pass.rs`** — the production Arrow writer. For each chromosome, it decodes the binned signal of all tracks once into an in-RAM `(n_tracks, n_chrom_bins)` matrix, then slices per-sample rows out of it. This collapses ~N_samples random BigWig seeks per chromosome into one sequential pass per (chrom, track) pair. It releases the GIL and fans out over tracks with Rayon, and over shard writers with a second thread pool. A Python port using pybigtools would have to re-serialise on the GIL to hold and slice that matrix — this is the exact reason this is not pure Python.
-- **`writers.rs`** — the sample-batched fallback writer (`write_arrow_split_from_bigwigs`), kept for parity testing.
+- **`chromosome_scan_writer.rs`** — the production Arrow writer. For each chromosome, it decodes the binned signal of all tracks once into an in-RAM `(n_tracks, n_chrom_bins)` matrix, then slices per-sample rows out of it. This collapses ~N_samples random BigWig seeks per chromosome into one sequential pass per (chrom, track) pair. It releases the GIL and fans out over tracks with Rayon, and over shard writers with a second thread pool. A Python port using pybigtools would have to re-serialise on the GIL to hold and slice that matrix — this is the exact reason this is not pure Python.
+- **`sample_batch_writer.rs`** — the sample-batched fallback writer (`write_arrow_split_from_bigwigs`), kept for parity testing.
 - **`binning.rs`** — interval-to-bin accumulation. Holds reusable scratch buffers (`BinningScratch`) to avoid repeated allocations in tight loops.
 - **`fasta.rs`** — `.fai` index parsing and one-hot sequence loading. Computes byte offsets directly from samtools-style FASTA indices; avoids Python and avoids constructing a GenomeIntervalDataset during Arrow writing.
-- **`schema.rs`** — Arrow schema construction and HuggingFace metadata. Builds HF-compatible nested-list Arrow types with extension metadata for `Array2D` features.
+- **`arrow_schema.rs`** — Arrow schema construction and HuggingFace metadata. Builds HF-compatible nested-list Arrow types with extension metadata for `Array2D` features.
 - **`io_utils.rs`** — progress logging, IPC write options, Rayon pool configuration. Exposes Rayon thread count control without rebuilding the global pool (which can only be built once per process).
 - **`bigwig_io.rs`** — BigWig extraction and interval iteration via the `bigtools` crate.
 
@@ -24,11 +24,11 @@ All error handling is via `Result<_, String>` funnelled into `PyRuntimeError`. P
 
 Everything except the hot path:
 
-- **`dataset.py`** — the only call site of the production Rust writer. Orchestrates split logic, metadata assembly, and dataset staging. Exports `build_dataset_fast`.
-- **`__main__.py`** — Typer CLI entry point. Commands: `build`, `train`, `scale`, `calculate-original-scaling`, `calculate-tmm-scaling`, `recompress-dataset`, `enrich-metadata`, `predict`.
-- **`train.py`** — PyTorch/HuggingFace Lightning trainer. Hydra orchestration, checkpoint resumption, logging.
-- **`predict.py`** — inference engine. Converts model predictions to BigWig tracks with bin collapsing.
-- **`scaling.py`** — BigWig scale-factor inference (RPKM, TMM, clip thresholds).
+- **`dataset/build.py`** — dataset construction, staging, metadata assembly, and Rust writer orchestration.
+- **`cli/app.py`** — Typer CLI entry point, with grouped `normalization` and API-backed `pipeline` commands.
+- **`training/runner.py`** — PyTorch/HuggingFace trainer. Hydra orchestration, checkpoint resumption, logging.
+- **`inference.py`** — inference engine. Converts model predictions to BigWig tracks with bin collapsing.
+- **`normalization.py`** — BigWig scale-factor inference (RPKM, TMM, clip thresholds).
 - **`metrics.py`** — evaluation metrics for training callbacks.
 - **`recompress.py`** — utility to rechunk/recompress Arrow shards with different compression.
 
@@ -59,12 +59,12 @@ The only production `#[pyfunction]` is `write_arrow_splits_chrom_pass` called fr
 ```
 src/
   lib.rs                           PyO3 module registration
-  chrom_pass.rs                    Production chromosome-pass writer
-  writers.rs                       Sample-batched fallback + feature-gated debug writers
+  chromosome_scan_writer.rs       Production chromosome-scan writer
+  sample_batch_writer.rs           Sample-batched fallback + feature-gated debug writers
   bigwig_io.rs                     BigWig extraction and binning
   binning.rs                       Interval→bin accumulation and scratch buffers
   fasta.rs                         FASTA index and one-hot encoding
-  schema.rs                        Arrow schema / HuggingFace metadata
+  arrow_schema.rs                  Arrow schema / HuggingFace metadata
   io_utils.rs                      Progress logging, IPC options, Rayon pool config
 
 python/regulonado/
@@ -128,7 +128,7 @@ CLAUDE.md                          Developer notes (this repo)
 |------|----------|-------|
 | New CLI command | `python/regulonado/__main__.py` | Add a Typer `@app.command()` |
 | New loss function | `python/regulonado/training/losses.py` + `python/configs/loss/*.yaml` | Implement class, add config |
-| Change Arrow output schema | `src/chrom_pass.rs`, `src/schema.rs` | Rebuild with `maturin develop --release`, run tests/test_chrom_pass.py |
+| Change Arrow output schema | `src/chromosome_scan_writer.rs`, `src/arrow_schema.rs` | Rebuild with `maturin develop --release`, run tests/test_chrom_pass.py |
 | New BigWig feature extraction | `src/bigwig_io.rs` | Rebuild extension |
 | New training metric | `python/regulonado/training/metrics.py` | Called during training callbacks |
 | Training callback (plots, logging) | `python/regulonado/training/callbacks.py` | Integrated with PyTorch Lightning |
@@ -141,7 +141,7 @@ CLAUDE.md                          Developer notes (this repo)
 
 1. **Error handling** — All Rust errors are `Result<_, String>` funnelled into `PyRuntimeError`. Python callers cannot distinguish root causes (missing FASTA index vs out-of-range BED row vs Arrow overflow). Consider wrapping with more structured exceptions if debugging becomes painful.
 
-2. **Duplicate Arrow assembly** — `writers.rs` duplicates some of `chrom_pass.rs`'s record-batch construction logic. Refactoring to share the batch-building code would reduce maintenance burden but requires careful handling of the different I/O patterns.
+2. **Duplicate Arrow assembly** — `sample_batch_writer.rs` duplicates some of `chromosome_scan_writer.rs`'s record-batch construction logic. Refactoring to share the batch-building code would reduce maintenance burden but requires careful handling of the different I/O patterns.
 
 3. **Rayon pool rebuilding** — Rayon's global thread pool can only be configured once per process. When `write_arrow_splits_chrom_pass` is called multiple times from the same interpreter, the `n_threads` parameter on the second call is silently ignored. This is unavoidable but now logs a warning.
 

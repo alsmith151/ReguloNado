@@ -15,13 +15,18 @@
 
 mod bigwig_io;
 mod binning;
-mod chrom_pass;
+mod chromosome_scan_writer;
 mod fasta;
 mod io_utils;
-mod schema;
-mod writers;
+mod arrow_schema;
+mod sample_batch_writer;
 
 use pyo3::prelude::*;
+
+#[pyfunction]
+fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
 
 // ---------------------------------------------------------------------------
 // Module registration
@@ -29,12 +34,13 @@ use pyo3::prelude::*;
 
 #[pymodule]
 fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(
-        writers::write_arrow_split_from_bigwigs,
+        sample_batch_writer::write_arrow_split_from_bigwigs,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
-        chrom_pass::write_arrow_splits_chrom_pass,
+        chromosome_scan_writer::write_arrow_splits_chrom_pass,
         m
     )?)?;
     Ok(())

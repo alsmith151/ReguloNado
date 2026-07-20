@@ -32,7 +32,7 @@ use crate::bigwig_io::{open_bigwig_handles, BwHandle};
 use crate::binning::{bin_region_into, BinningScratch, BinningUsage};
 use crate::fasta::{load_fasta_index, read_one_hot_sequence};
 use crate::io_utils::{ipc_write_options, maybe_log_progress};
-use crate::schema::{hf_arrow_schema, make_2d_f32_array, make_2d_i8_array};
+use crate::arrow_schema::{hf_arrow_schema, make_2d_f32_array, make_2d_i8_array};
 
 /// Timing profile for a single Arrow shard write.
 ///
