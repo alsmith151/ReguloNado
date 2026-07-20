@@ -2,6 +2,14 @@
 name = "regulonado_rs"
 version = "0.1.0"
 edition = "2021"
+description = "Fast BigWig/FASTA to Arrow dataset construction for sequence-to-function genomics models"
+license = "BSD-3-Clause"
+repository = "https://github.com/alsmith151/ReguloNado"
+readme = "README.md"
+authors = ["alsmith <asmith151@googlemail.com>"]
+keywords = ["genomics", "bioinformatics", "bigwig", "arrow"]
+categories = ["science"]
+rust-version = "1.85"
 
 [lib]
 name = "regulonado_rs"
@@ -28,3 +36,5 @@ wide = "0.7"
 lto = true
 codegen-units = 1
 opt-level = 3
+
+[workspace]
