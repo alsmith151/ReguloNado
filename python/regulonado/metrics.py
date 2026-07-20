@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
 import torch
-from scipy.stats import pearsonr, spearmanr
+from scipy.stats import spearmanr
+from torchmetrics.functional import (
+    mean_absolute_error,
+    mean_squared_error,
+    pearson_corrcoef,
+)
 
 
 def _paired_group_masks(
@@ -33,12 +39,62 @@ def _paired_group_masks(
     return pair_masks
 
 
-def _corr_stat(result: Any) -> float:
-    if hasattr(result, "statistic"):
-        return float(result.statistic)
-    if isinstance(result, tuple):
-        return float(result[0])
-    return float(result)
+def _as_tensor(values: np.ndarray) -> torch.Tensor:
+    return torch.as_tensor(np.ascontiguousarray(values), dtype=torch.float64)
+
+
+def _pearson(pred_vals: np.ndarray, target_vals: np.ndarray) -> float:
+    """Pearson r via torchmetrics. Callers must pre-filter non-finite and degenerate input."""
+    return float(pearson_corrcoef(_as_tensor(pred_vals), _as_tensor(target_vals)))
+
+
+def _spearman(pred_vals: np.ndarray, target_vals: np.ndarray) -> float:
+    """Spearman rho via scipy.
+
+    torchmetrics' ``spearman_corrcoef`` adds ``eps=1e-6`` to the denominator, which biases the
+    result by roughly ``eps / std(ranks)``; that reaches ~4e-6 for two-element inputs. scipy is
+    kept here so results stay bit-comparable with the previous implementation.
+    """
+    return float(spearmanr(pred_vals, target_vals).statistic)
+
+
+def _finite_track_pairs(
+    preds: np.ndarray,
+    targets: np.ndarray,
+) -> list[tuple[int, np.ndarray, np.ndarray]]:
+    """Split into per-track (index, preds, targets) triples with non-finite entries dropped."""
+    preds = np.asarray(preds, dtype=np.float64)
+    targets = np.asarray(targets, dtype=np.float64)
+    if preds.shape != targets.shape:
+        raise ValueError(f"preds shape {preds.shape} != targets shape {targets.shape}")
+
+    pairs: list[tuple[int, np.ndarray, np.ndarray]] = []
+    for track_idx in range(preds.shape[-1]):
+        pred_vals = preds[:, track_idx]
+        target_vals = targets[:, track_idx]
+        finite_mask = np.isfinite(pred_vals) & np.isfinite(target_vals)
+        pairs.append((track_idx, pred_vals[finite_mask], target_vals[finite_mask]))
+    return pairs
+
+
+def _per_track_metric(
+    preds: np.ndarray,
+    targets: np.ndarray,
+    statistic: Callable[[np.ndarray, np.ndarray], float],
+    *,
+    min_count: int,
+    require_variance: bool,
+) -> dict[int, float]:
+    """Apply ``statistic`` per track, returning NaN for empty or degenerate-variance tracks."""
+    metrics: dict[int, float] = {}
+    for track_idx, pred_vals, target_vals in _finite_track_pairs(preds, targets):
+        if pred_vals.size < min_count:
+            metrics[track_idx] = float("nan")
+        elif require_variance and (np.std(pred_vals) < 1e-8 or np.std(target_vals) < 1e-8):
+            metrics[track_idx] = float("nan")
+        else:
+            metrics[track_idx] = float(statistic(pred_vals, target_vals))
+    return metrics
 
 
 def _concat_chunks(chunks: list[np.ndarray]) -> np.ndarray:
@@ -124,7 +180,7 @@ def delta_log2fc_pearson(pred_lfc: np.ndarray, meas_lfc: np.ndarray) -> float:
 
     if len(pred_lfc) < 2 or np.std(pred_lfc) < 1e-8 or np.std(meas_lfc) < 1e-8:
         return float("nan")
-    return float(_corr_stat(pearsonr(pred_lfc, meas_lfc)))
+    return _pearson(pred_lfc, meas_lfc)
 
 
 def delta_log2fc_metrics(pred_lfc: np.ndarray, meas_lfc: np.ndarray) -> dict[str, float]:
@@ -141,12 +197,12 @@ def delta_log2fc_metrics(pred_lfc: np.ndarray, meas_lfc: np.ndarray) -> dict[str
             "top_variance_pearson": float("nan"),
         }
 
-    pearson_r = _corr_stat(pearsonr(pred_lfc, meas_lfc))
-    spearman_r = _corr_stat(spearmanr(pred_lfc, meas_lfc))
+    pearson_r = _pearson(pred_lfc, meas_lfc)
+    spearman_r = _spearman(pred_lfc, meas_lfc)
     var_thresh = np.percentile(np.abs(meas_lfc), 80)
     top_mask = np.abs(meas_lfc) >= var_thresh
     if top_mask.sum() >= 2 and np.std(pred_lfc[top_mask]) > 1e-8:
-        top_r = _corr_stat(pearsonr(pred_lfc[top_mask], meas_lfc[top_mask]))
+        top_r = _pearson(pred_lfc[top_mask], meas_lfc[top_mask])
     else:
         top_r = float("nan")
     return {
@@ -255,49 +311,11 @@ def finalize_validation_metric_state(state: dict[str, Any]) -> dict[str, float]:
 
 
 def per_track_pearson(preds: np.ndarray, targets: np.ndarray) -> dict[int, float]:
-    preds = np.asarray(preds, dtype=np.float64)
-    targets = np.asarray(targets, dtype=np.float64)
-    if preds.shape != targets.shape:
-        raise ValueError(f"preds shape {preds.shape} != targets shape {targets.shape}")
-
-    metrics: dict[int, float] = {}
-    for track_idx in range(preds.shape[-1]):
-        pred_vals = preds[:, track_idx]
-        target_vals = targets[:, track_idx]
-        finite_mask = np.isfinite(pred_vals) & np.isfinite(target_vals)
-        if finite_mask.sum() < 2:
-            metrics[track_idx] = float("nan")
-            continue
-        pred_vals = pred_vals[finite_mask]
-        target_vals = target_vals[finite_mask]
-        if np.std(pred_vals) < 1e-8 or np.std(target_vals) < 1e-8:
-            metrics[track_idx] = float("nan")
-        else:
-            metrics[track_idx] = float(_corr_stat(pearsonr(pred_vals, target_vals)))
-    return metrics
+    return _per_track_metric(preds, targets, _pearson, min_count=2, require_variance=True)
 
 
 def per_track_spearman(preds: np.ndarray, targets: np.ndarray) -> dict[int, float]:
-    preds = np.asarray(preds, dtype=np.float64)
-    targets = np.asarray(targets, dtype=np.float64)
-    if preds.shape != targets.shape:
-        raise ValueError(f"preds shape {preds.shape} != targets shape {targets.shape}")
-
-    metrics: dict[int, float] = {}
-    for track_idx in range(preds.shape[-1]):
-        pred_vals = preds[:, track_idx]
-        target_vals = targets[:, track_idx]
-        finite_mask = np.isfinite(pred_vals) & np.isfinite(target_vals)
-        if finite_mask.sum() < 2:
-            metrics[track_idx] = float("nan")
-            continue
-        pred_vals = pred_vals[finite_mask]
-        target_vals = target_vals[finite_mask]
-        if np.std(pred_vals) < 1e-8 or np.std(target_vals) < 1e-8:
-            metrics[track_idx] = float("nan")
-        else:
-            metrics[track_idx] = float(_corr_stat(spearmanr(pred_vals, target_vals)))
-    return metrics
+    return _per_track_metric(preds, targets, _spearman, min_count=2, require_variance=True)
 
 
 def amplitude_calibration_per_track(
@@ -305,62 +323,23 @@ def amplitude_calibration_per_track(
     targets: np.ndarray,
     quantile: float = 0.99,
 ) -> dict[int, float]:
-    preds = np.asarray(preds, dtype=np.float64)
-    targets = np.asarray(targets, dtype=np.float64)
-    if preds.shape != targets.shape:
-        raise ValueError(f"preds shape {preds.shape} != targets shape {targets.shape}")
-
-    metrics: dict[int, float] = {}
-    for track_idx in range(preds.shape[-1]):
-        pred_vals = preds[:, track_idx]
-        target_vals = targets[:, track_idx]
-        finite_mask = np.isfinite(pred_vals) & np.isfinite(target_vals)
-        if finite_mask.sum() < 2:
-            metrics[track_idx] = float("nan")
-            continue
-        pred_vals = pred_vals[finite_mask]
-        target_vals = target_vals[finite_mask]
+    def _ratio(pred_vals: np.ndarray, target_vals: np.ndarray) -> float:
         pred_p = np.percentile(np.abs(pred_vals), quantile * 100)
         target_p = np.percentile(np.abs(target_vals), quantile * 100)
-        metrics[track_idx] = float(pred_p / target_p) if target_p > 1e-8 else float("nan")
-    return metrics
+        return float(pred_p / target_p) if target_p > 1e-8 else float("nan")
+
+    return _per_track_metric(preds, targets, _ratio, min_count=2, require_variance=False)
 
 
 def per_track_mse(preds: np.ndarray, targets: np.ndarray) -> dict[int, float]:
-    preds = np.asarray(preds, dtype=np.float64)
-    targets = np.asarray(targets, dtype=np.float64)
-    if preds.shape != targets.shape:
-        raise ValueError(f"preds shape {preds.shape} != targets shape {targets.shape}")
+    def _mse(pred_vals: np.ndarray, target_vals: np.ndarray) -> float:
+        return float(mean_squared_error(_as_tensor(pred_vals), _as_tensor(target_vals)))
 
-    metrics: dict[int, float] = {}
-    for track_idx in range(preds.shape[-1]):
-        pred_vals = preds[:, track_idx]
-        target_vals = targets[:, track_idx]
-        finite_mask = np.isfinite(pred_vals) & np.isfinite(target_vals)
-        if finite_mask.sum() == 0:
-            metrics[track_idx] = float("nan")
-        else:
-            pred_vals = pred_vals[finite_mask]
-            target_vals = target_vals[finite_mask]
-            metrics[track_idx] = float(np.mean(np.square(pred_vals - target_vals)))
-    return metrics
+    return _per_track_metric(preds, targets, _mse, min_count=1, require_variance=False)
 
 
 def per_track_mae(preds: np.ndarray, targets: np.ndarray) -> dict[int, float]:
-    preds = np.asarray(preds, dtype=np.float64)
-    targets = np.asarray(targets, dtype=np.float64)
-    if preds.shape != targets.shape:
-        raise ValueError(f"preds shape {preds.shape} != targets shape {targets.shape}")
+    def _mae(pred_vals: np.ndarray, target_vals: np.ndarray) -> float:
+        return float(mean_absolute_error(_as_tensor(pred_vals), _as_tensor(target_vals)))
 
-    metrics: dict[int, float] = {}
-    for track_idx in range(preds.shape[-1]):
-        pred_vals = preds[:, track_idx]
-        target_vals = targets[:, track_idx]
-        finite_mask = np.isfinite(pred_vals) & np.isfinite(target_vals)
-        if finite_mask.sum() == 0:
-            metrics[track_idx] = float("nan")
-        else:
-            pred_vals = pred_vals[finite_mask]
-            target_vals = target_vals[finite_mask]
-            metrics[track_idx] = float(np.mean(np.abs(pred_vals - target_vals)))
-    return metrics
+    return _per_track_metric(preds, targets, _mae, min_count=1, require_variance=False)

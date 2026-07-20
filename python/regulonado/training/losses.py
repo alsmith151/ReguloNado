@@ -3,35 +3,11 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from regulonado.metrics import _paired_group_masks
+
 
 def squash(y: torch.Tensor, eps: float = 1e-2) -> torch.Tensor:
     return torch.sign(y) * (torch.sqrt(torch.abs(y).clamp(min=0) + 1) - 1) + eps * y
-
-
-def _paired_group_masks(
-    condition_ids: torch.Tensor,
-    shared_track_index: torch.Tensor | None = None,
-    *,
-    baseline_condition_id: int = 0,
-    perturbed_condition_id: int = 1,
-) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    condition_ids = condition_ids.to(dtype=torch.long)
-    if shared_track_index is None:
-        baseline_mask = condition_ids == baseline_condition_id
-        perturbed_mask = condition_ids == perturbed_condition_id
-        if baseline_mask.any() and perturbed_mask.any():
-            return [(baseline_mask, perturbed_mask)]
-        return []
-
-    shared_track_index = shared_track_index.to(device=condition_ids.device, dtype=torch.long)
-    pair_masks: list[tuple[torch.Tensor, torch.Tensor]] = []
-    for group_id in torch.unique(shared_track_index, sorted=True):
-        in_group = shared_track_index == group_id
-        baseline_mask = in_group & (condition_ids == baseline_condition_id)
-        perturbed_mask = in_group & (condition_ids == perturbed_condition_id)
-        if baseline_mask.any() and perturbed_mask.any():
-            pair_masks.append((baseline_mask, perturbed_mask))
-    return pair_masks
 
 
 def scaled_poisson_multinomial_loss(

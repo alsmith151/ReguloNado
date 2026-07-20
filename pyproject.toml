@@ -58,6 +58,7 @@ train = [
     "matplotlib",
     "peft",
     "torch>=2.5",
+    "torchmetrics>=1.0",
     "transformers>=5.12.1",
     "wandb>=0.16",
 ]
