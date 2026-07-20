@@ -7,12 +7,27 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # Needed to start release.yml via the API. Tags pushed by GITHUB_TOKEN cannot
+  # trigger workflows, but workflow_dispatch is an explicit exemption — so the
+  # release is kicked off by dispatch rather than by the tag push itself.
+  actions: write
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      - name: Build wheels and publish to PyPI
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run release.yml \
+            --repo "${{ github.repository }}" \
+            --ref main \
+            -f tag="${{ steps.release.outputs.tag_name }}"
