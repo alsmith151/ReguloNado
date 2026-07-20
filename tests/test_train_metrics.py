@@ -10,8 +10,6 @@ import unittest.mock
 import numpy as np
 import pytest
 import torch
-from scipy import stats as scipy_stats
-from transformers import Trainer
 
 # Import the private helpers directly so the test is self-contained.
 from regulonado.train import (
@@ -19,7 +17,8 @@ from regulonado.train import (
     _make_compute_metrics,
     _make_preprocess_logits_for_metrics,
 )
-
+from scipy import stats as scipy_stats
+from transformers import Trainer
 
 # ---------------------------------------------------------------------------
 # Helpers

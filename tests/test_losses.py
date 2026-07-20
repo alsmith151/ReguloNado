@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import pytest
 import torch
-
 from regulonado.training.losses import (
     log1p_huber_loss,
     paired_binwise_log2fc_loss,

@@ -21,11 +21,7 @@ jobs:
         run: pip install ruff
 
       - name: ruff check
-        run: ruff check python/
-
-      - name: ruff format --check
-        run: ruff format --check python/
-        continue-on-error: true
+        run: ruff check python/ tests/
 
   clippy:
     name: Clippy
