@@ -11,7 +11,6 @@ use arrow_array::{
 use arrow_ipc::writer::StreamWriter;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use rayon;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -37,6 +36,9 @@ use std::time::Instant;
     n_threads=None,
     compression=None
 ))]
+// Arity is dictated by the Python-facing signature above, so grouping the
+// parameters into a struct would only move the problem to the call site.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_arrow_split_from_bigwigs(
     py: Python<'_>,
     bw_paths: Vec<String>,

@@ -41,11 +41,8 @@ jobs:
             target/
           key: ${{ runner.os }}-clippy-${{ hashFiles('Cargo.lock') }}
 
-      # Not yet gated on -D warnings: the remaining lints are almost all
-      # too_many_arguments on writer functions that are being removed. Tighten this
-      # to `-- -D warnings` once that cleanup lands.
       - name: cargo clippy
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets -- -D warnings
 
   test:
     name: "Data tests — Python ${{ matrix.python-version }}"

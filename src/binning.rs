@@ -195,19 +195,3 @@ pub(crate) fn bin_region_into<R: BBIFileRead>(
     BinningUsage::direct(interval_count)
 }
 
-/// Convenience wrapper returning a Vec.
-///
-/// This exists for the NumPy-returning debug helper. Production extraction
-/// reuses caller-owned row and scratch buffers through `bin_region_into`.
-pub(crate) fn bin_region<R: BBIFileRead>(
-    reader: &mut BigWigRead<R>,
-    chrom: &str,
-    region_start: u32,
-    region_end: u32,
-    n_bins: usize,
-) -> Vec<f32> {
-    let mut out = vec![0.0f32; n_bins];
-    let mut scratch = BinningScratch::default();
-    let _ = bin_region_into(reader, chrom, region_start, region_end, &mut out, &mut scratch);
-    out
-}

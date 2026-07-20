@@ -72,7 +72,7 @@ pub(crate) fn hf_arrow_schema(context_len: usize, n_tracks: usize, n_bins: usize
 /// i32 offsets.  Callers that build large 2D arrays should validate the batch
 /// size before calling this.
 pub(crate) fn offsets(count: usize, width: usize) -> OffsetBuffer<i32> {
-    let max_offset: usize = count.checked_mul(width).unwrap_or(usize::MAX);
+    let max_offset: usize = count.saturating_mul(width);
     assert!(
         max_offset <= i32::MAX as usize,
         "Arrow i32 offset overflow: {count} * {width} = {max_offset} > i32::MAX ({}). \

@@ -267,6 +267,12 @@ fn validate_batch_size(
     Ok(())
 }
 
+/// Per-split sample grouping paired with the chromosome scan order.
+///
+/// The second element is `(chromosome_name, length_bp)` sorted by descending
+/// length, which fixes the order chromosomes are scanned in.
+type SplitPlan = (Vec<SplitChromSamples>, Vec<(String, u64)>);
+
 /// Build split-wide state and determine chromosome scan order.
 ///
 /// Validates that split_names, out_dirs, and split_sample_indices all have the
@@ -283,7 +289,7 @@ fn build_split_chrom_samples(
     chrom_lengths: &HashMap<String, crate::fasta::FastaIndexRecord>,
     bin_size: u32,
     shard_size: usize,
-) -> Result<(Vec<SplitChromSamples>, Vec<(String, u64)>), String> {
+) -> Result<SplitPlan, String> {
     if split_names.len() != out_dirs.len() || split_names.len() != split_sample_indices.len() {
         return Err(format!(
             "split_names, out_dirs, and split_sample_indices must have the same length \
@@ -298,8 +304,8 @@ fn build_split_chrom_samples(
     let mut splits = Vec::with_capacity(split_names.len());
     for ((name, out_dir), sample_indices) in split_names
         .into_iter()
-        .zip(out_dirs.into_iter())
-        .zip(split_sample_indices.into_iter())
+        .zip(out_dirs)
+        .zip(split_sample_indices)
     {
         let mut samples_by_chrom: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
         for (local_idx, global_idx) in sample_indices.iter().copied().enumerate() {
