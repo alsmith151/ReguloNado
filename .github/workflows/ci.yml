@@ -110,8 +110,14 @@ jobs:
       - name: Install CPU-only torch
         run: pip install torch --index-url https://download.pytorch.org/whl/cpu
 
+      # regulonado.model imports borzoi_pytorch at module scope, and train.py imports
+      # hydra, so these are needed just to collect the tests. The models themselves
+      # need CUDA to run, but these tests use dummy adapters and stay on CPU.
       - name: Install package and model test dependencies
-        run: pip install ".[test]" transformers torchmetrics
+        run: |
+          pip install ".[test]" \
+            transformers torchmetrics accelerate peft \
+            hydra-core borzoi-pytorch enformer-pytorch matplotlib
 
       - name: Run model, loss, prediction and metric tests
         run: |
