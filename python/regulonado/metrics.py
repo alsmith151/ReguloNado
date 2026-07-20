@@ -239,11 +239,18 @@ def finalize_validation_metric_state(state: dict[str, Any]) -> dict[str, float]:
         "reconstruction/raw_mae": raw_mae,
         "reconstruction/raw_rmse": raw_rmse,
     }
+    # balanced_score averages the delta and reconstruction correlations, falling back to
+    # whichever is available. The reconstruction half is only populated if the caller has
+    # been feeding update_validation_reconstruction_state; without it raw_pearson is NaN,
+    # and previously *neither* branch fired, so the key was silently absent altogether
+    # rather than degrading to the delta-only score.
     delta_pearson = delta_metrics.get("delta_lfc/pearson", float("nan"))
     if np.isfinite(delta_pearson) and np.isfinite(raw_pearson):
         metrics["selection/balanced_score"] = float(0.5 * (delta_pearson + raw_pearson))
     elif np.isfinite(raw_pearson):
         metrics["selection/balanced_score"] = raw_pearson
+    elif np.isfinite(delta_pearson):
+        metrics["selection/balanced_score"] = float(delta_pearson)
     return metrics
 
 

@@ -681,8 +681,13 @@ def predict_to_bigwig(
 
     accum: dict[int, list[tuple[str, int, int, float]]] = {t: [] for t in selected}
 
+    # Bound to a local rather than left as a bare conditional import: the call site below
+    # sits under a separate `if inverse_squash` guard, so the name being defined depended
+    # on two guards staying in sync. Importing lazily still avoids pulling in
+    # regulonado.dataset (and its Arrow/datasets deps) when no inverse transform is needed.
+    inverse_signal = None
     if inverse_squash:
-        from regulonado.dataset import inverse_transform_signal
+        from regulonado.dataset import inverse_transform_signal as inverse_signal
 
     from tqdm import tqdm
 
@@ -696,8 +701,8 @@ def predict_to_bigwig(
         with torch.no_grad():
             preds = model(x, **track_metadata)
         preds = preds.float().cpu().numpy()  # (B, n_tracks, n_pred_bins)
-        if inverse_squash:
-            preds = inverse_transform_signal(preds, apply_squash=True, apply_scale=False)
+        if inverse_signal is not None:
+            preds = inverse_signal(preds, apply_squash=True, apply_scale=False)
         for batch_index, window in enumerate(batch):
             if window.chrom != current_chrom:
                 current_chrom = window.chrom

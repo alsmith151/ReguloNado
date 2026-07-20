@@ -243,12 +243,7 @@ pub(crate) fn write_arrow_split_chrom_pass(
     compression: Option<String>,
     profile: bool,
 ) -> PyResult<()> {
-    if let Some(nt) = n_threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(nt)
-            .build_global()
-            .ok();
-    }
+    crate::io_utils::configure_global_rayon(n_threads);
 
     let n_tracks = bw_paths.len();
     let schema = hf_arrow_schema(context_len, n_tracks, n_bins);
@@ -653,12 +648,7 @@ pub(crate) fn write_arrow_splits_chrom_pass(
     compression: Option<String>,
     profile: bool,
 ) -> PyResult<()> {
-    if let Some(nt) = n_threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(nt)
-            .build_global()
-            .ok();
-    }
+    crate::io_utils::configure_global_rayon(n_threads);
 
     let n_tracks = bw_paths.len();
     let batch_size = batch_size.max(1);

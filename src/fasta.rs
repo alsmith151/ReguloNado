@@ -67,8 +67,16 @@ pub(crate) fn read_one_hot_sequence(
     use std::os::unix::fs::FileExt;
 
     let mut out = vec![0i8; 4 * context_len];
+    // A contig present in the BED but absent from the FASTA index used to yield an
+    // all-zero one-hot, so a misspelled or mismatched contig name silently produced blank
+    // training rows instead of failing. Treat it as an error: a caller that genuinely
+    // wants to skip such regions should filter the BED before building.
     let Some(rec) = fai.get(chrom) else {
-        return Ok(out);
+        return Err(format!(
+            "Contig '{chrom}' is not present in the FASTA index. Check that the BED and \
+             FASTA use the same contig naming (e.g. 'chr1' vs '1'), or filter the BED to \
+             contigs present in the FASTA."
+        ));
     };
 
     let center = (bed_start as i64 + bed_end as i64) / 2;
