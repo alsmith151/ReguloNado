@@ -1,9 +1,8 @@
 # Scripts
 
 Scripts are thin wrappers around the `regulonado` CLI for cluster workflows.
-All training policy lives in Hydra experiment configs under `scripts/experiment/`
-(run-specific) or `python/configs/experiment/` (canonical baselines); scripts
-handle only paths, Slurm resources, and machine-specific plumbing.
+All training policy lives in Hydra experiment configs under `python/configs/experiment/`;
+scripts handle only paths, Slurm resources, and machine-specific plumbing.
 
 ## Training
 
@@ -18,9 +17,8 @@ DATA_DIR=/path/to/dataset \
 sbatch scripts/train_slurm.sh
 ```
 
-`EXPERIMENT` selects a Hydra config by name.  The launcher searches both
-`python/configs/experiment/` (built-in baselines) and `scripts/experiment/`
-(production runs).
+`EXPERIMENT` selects a Hydra config by name.  The launcher searches
+`python/configs/experiment/` for all available experiment configs.
 
 One-off Hydra overrides can be appended as script arguments:
 
@@ -31,7 +29,7 @@ sbatch scripts/train_slurm.sh trainer.max_steps=2000
 
 ### Experiment configs
 
-All training hyperparameters live in `scripts/experiment/*.yaml`.  To start a
+All training hyperparameters live in `python/configs/experiment/*.yaml`.  To start a
 new experiment, copy the nearest config, rename it, and adjust what matters.
 
 | Config | Purpose |

@@ -202,7 +202,7 @@ sbatch scripts/train_slurm.sh
 ```
 
 `EXPERIMENT` names a Hydra config; the launcher searches `python/configs/experiment/`
-(built-in) and `scripts/experiment/` (production).
+for all built-in and production experiment configs.
 
 ### Local runs
 
@@ -499,6 +499,5 @@ internals.
 - `python/regulonado/model/` — backbone adapters, prediction heads, `RegulonadoModel`
   (`PreTrainedModel`), and `RegulonadoConfig`.
 - `python/configs/` — Hydra configs for backbones, heads, losses, and experiments.
-- `scripts/` — Slurm launchers (see `scripts/README.md`); `scripts/experiment/` holds
-  production run configs.
+- `scripts/` — Slurm launchers (see `scripts/README.md`).
 - `tests/` — model, dataset, and smoke coverage.
