@@ -1,0 +1,55 @@
+# SLURM executor profile.
+#
+#   snakemake --configfile config/config.yaml --profile workflow/profiles/slurm
+#
+# Every site-specific value lives here rather than in the workflow, so the rules
+# stay portable. EDIT THE PARTITION AND ACCOUNT NAMES — the defaults below are
+# placeholders and will not exist on your cluster.
+#
+# Requires the SLURM executor plugin:
+#   pip install snakemake-executor-plugin-slurm
+
+executor: slurm
+jobs: 8
+latency-wait: 60
+rerun-incomplete: true
+printshellcmds: true
+
+default-resources:
+  slurm_partition: "CHANGEME_CPU_PARTITION"
+  slurm_account: "CHANGEME_ACCOUNT"
+  runtime: 240          # minutes
+  mem_mb: 16000
+  cpus_per_task: 1
+
+# Per-rule resources. The three heavy rules are called out; everything else
+# takes the defaults above.
+set-resources:
+  build_dataset:
+    # Dataset construction is memory- and I/O-hungry rather than GPU-bound.
+    runtime: 1440
+    mem_mb: 256000
+    cpus_per_task: 32
+
+  recompress_dataset:
+    runtime: 720
+    mem_mb: 128000
+    cpus_per_task: 8
+
+  train_phase:
+    # GPU rule. slurm_extra carries the GRES request; adjust the GPU count and
+    # type to match your cluster's naming.
+    slurm_partition: "CHANGEME_GPU_PARTITION"
+    slurm_account: "CHANGEME_GPU_ACCOUNT"
+    slurm_extra: "'--gres=gpu:2'"
+    runtime: 1440
+    mem_mb: 256000
+    cpus_per_task: 16
+
+  predict:
+    slurm_partition: "CHANGEME_GPU_PARTITION"
+    slurm_account: "CHANGEME_GPU_ACCOUNT"
+    slurm_extra: "'--gres=gpu:1'"
+    runtime: 720
+    mem_mb: 64000
+    cpus_per_task: 8
