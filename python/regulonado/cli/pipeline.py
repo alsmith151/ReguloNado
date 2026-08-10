@@ -74,6 +74,44 @@ def _deployment_settings(values: dict):
     )
 
 
+def _executor_settings(executor: str, values: dict):
+    """Build optional executor plugin settings from profile-like config values."""
+    if executor != "slurm":
+        return None
+
+    try:
+        from snakemake_executor_plugin_slurm import ExecutorSettings as SlurmExecutorSettings
+    except ImportError as exc:
+        raise typer.BadParameter(
+            "The 'slurm' executor requires snakemake-executor-plugin-slurm.",
+            param_hint="--executor",
+        ) from exc
+
+    merged = values.get("executor-settings")
+    settings: dict[str, object] = dict(merged) if isinstance(merged, dict) else {}
+
+    # Accept common profile key spellings used with Snakemake CLI profiles.
+    aliases = {
+        "slurm-logdir": "logdir",
+        "slurm-keep-successful-logs": "keep_successful_logs",
+        "slurm-delete-logfiles-older-than": "delete_logfiles_older_than",
+        "slurm-init-seconds-before-status-checks": "init_seconds_before_status_checks",
+        "slurm-status-attempts": "status_attempts",
+        "slurm-requeue": "requeue",
+        "slurm-no-account": "no_account",
+        "slurm-reservation": "reservation",
+    }
+    for key, target in aliases.items():
+        value = values.get(key)
+        if value is not None:
+            settings[target] = value
+
+    if "logdir" in settings and settings["logdir"] is not None:
+        settings["logdir"] = Path(str(settings["logdir"]))
+
+    return SlurmExecutorSettings(**settings)
+
+
 def _key_value_config(values: list[str]) -> dict[str, str]:
     config: dict[str, str] = {}
     for value in values:
@@ -293,6 +331,10 @@ def pipeline(
     )
     # Merged so a --cluster-config can add deployment keys on top of the profile.
     deployment_settings = _deployment_settings({**profile_values, **cluster_values})
+    executor_settings = _executor_settings(
+        selected_executor,
+        {**profile_values, **cluster_values},
+    )
     retries = int(cluster_values.get("retries", profile_values.get("retries", 0)))
 
     try:
@@ -318,15 +360,18 @@ def pipeline(
             if rulegraph:
                 dag_api.printrulegraph()
                 return
-            dag_api.execute_workflow(
-                executor="dryrun" if dry_run else selected_executor,
-                execution_settings=ExecutionSettings(
+            execution_kwargs = {
+                "executor": "dryrun" if dry_run else selected_executor,
+                "execution_settings": ExecutionSettings(
                     lock=not unlock,
                     keep_going=keep_going,
                     latency_wait=int(profile_values.get("latency-wait", 3)),
                     retries=retries,
                 ),
-            )
+            }
+            if executor_settings is not None:
+                execution_kwargs["executor_settings"] = executor_settings
+            dag_api.execute_workflow(**execution_kwargs)
             if report is not None:
                 from snakemake.report.html_reporter import ReportSettings
 
