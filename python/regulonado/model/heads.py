@@ -25,6 +25,8 @@ _CONDITION_COLLAPSE_IGNORED_FIELDS = {
 _CONDITION_COLLAPSE_PREFERRED_FIELDS = (
     "assay_type_id",
     "assay_type",
+    "source_id",
+    "source",
     "cell_line_id",
     "cell_line",
     "timepoint_minutes",

@@ -12,7 +12,13 @@ import typer
 def _profile_values(profile: Path | None) -> dict:
     if profile is None:
         return {}
-    config_path = profile / "config.yaml" if profile.is_dir() else profile
+    if profile.is_dir():
+        # Snakemake accepts a version-qualified name alongside the plain one;
+        # SeqNado's test profile uses 'config.v8+.yaml'.
+        candidates = [profile / "config.yaml", *sorted(profile.glob("config.v*.yaml"))]
+        config_path = next((path for path in candidates if path.exists()), profile / "config.yaml")
+    else:
+        config_path = profile
     if not config_path.exists():
         raise typer.BadParameter(f"Snakemake profile/config not found: {config_path}")
     try:
@@ -21,6 +27,51 @@ def _profile_values(profile: Path | None) -> dict:
         return yaml.safe_load(config_path.read_text()) or {}
     except ImportError as exc:
         raise typer.BadParameter("PyYAML is required to read a Snakemake profile") from exc
+
+
+def _deployment_settings(values: dict):
+    """Translate a profile's software-deployment keys into Snakemake settings.
+
+    Profiles shared with SeqNado carry `use-conda` / `use-apptainer` /
+    `software-deployment-method`. Because we drive Snakemake through its Python
+    API rather than the command line, these have to be mapped explicitly —
+    otherwise a container-based preset would run in the ambient environment
+    without saying so.
+    """
+    from snakemake.settings.types import DeploymentSettings
+    from snakemake_interface_executor_plugins.settings import DeploymentMethod
+
+    methods = set()
+
+    declared = values.get("software-deployment-method")
+    if declared is not None:
+        names = [declared] if isinstance(declared, str) else list(declared)
+        for name in names:
+            try:
+                methods.add(DeploymentMethod[str(name).upper().replace("-", "_")])
+            except KeyError:
+                raise typer.BadParameter(
+                    f"Unknown software-deployment-method in profile: {name!r}"
+                ) from None
+
+    if values.get("use-conda"):
+        methods.add(DeploymentMethod.CONDA)
+    if values.get("use-apptainer") or values.get("use-singularity"):
+        methods.add(DeploymentMethod.APPTAINER)
+
+    conda_prefix = values.get("conda-prefix")
+    apptainer_prefix = values.get("apptainer-prefix") or values.get("singularity-prefix")
+    apptainer_args = values.get("apptainer-args") or values.get("singularity-args") or ""
+
+    if not methods and not conda_prefix and not apptainer_prefix and not apptainer_args:
+        return None
+
+    return DeploymentSettings(
+        deployment_method=frozenset(methods),
+        conda_prefix=Path(conda_prefix) if conda_prefix else None,
+        apptainer_prefix=Path(apptainer_prefix) if apptainer_prefix else None,
+        apptainer_args=str(apptainer_args),
+    )
 
 
 def _key_value_config(values: list[str]) -> dict[str, str]:
@@ -113,9 +164,25 @@ def pipeline(
     config: Annotated[
         Optional[list[str]], typer.Option("--config", help="Override config with KEY=VALUE.")
     ] = None,
+    preset: Annotated[
+        Optional[str],
+        # Deliberately no '-p' short flag: 'regulonado train -p' already means a
+        # training preset (head_only, deep_finetune), which is unrelated.
+        typer.Option(
+            "--preset",
+            help=(
+                "Snakemake execution preset shortcode resolved from "
+                "~/.config/snakemake/ (shared with SeqNado). Run 'regulonado init' "
+                "to install them."
+            ),
+        ),
+    ] = None,
     profile: Annotated[
         Optional[Path],
-        typer.Option("--profile", help="Snakemake profile directory or config.yaml."),
+        typer.Option(
+            "--profile",
+            help="Snakemake profile directory or config.yaml (overrides --preset).",
+        ),
     ] = None,
     cluster_config: Annotated[
         Optional[Path], typer.Option("--cluster-config", help="Additional YAML resource config.")
@@ -168,8 +235,25 @@ def pipeline(
         )
         raise typer.Exit(127) from exc
 
+    # An explicit --profile path wins over a --preset shortcode.
+    if profile is None and preset is not None:
+        from regulonado.cli.profiles import format_available_presets, resolve_profile_path
+
+        profile = resolve_profile_path(preset)
+        if profile is None:
+            raise typer.BadParameter(
+                f"Unknown preset {preset!r}. Available: {format_available_presets()}",
+                param_hint="--preset",
+            )
+
     profile_values = _profile_values(profile)
     cluster_values = _profile_values(cluster_config)
+
+    if preset is not None and profile is not None:
+        from regulonado.cli.profiles import warn_if_undersized
+
+        warn_if_undersized(preset, {**profile_values, **cluster_values})
+
     profile_jobs = profile_values.get("jobs") or profile_values.get("max-jobs")
     selected_executor = executor or profile_values.get("executor") or "local"
     max_jobs = jobs or profile_jobs
@@ -207,6 +291,9 @@ def pipeline(
         targets=frozenset({target}) if target else frozenset(),
         force_incomplete=bool(profile_values.get("rerun-incomplete", False)),
     )
+    # Merged so a --cluster-config can add deployment keys on top of the profile.
+    deployment_settings = _deployment_settings({**profile_values, **cluster_values})
+    retries = int(cluster_values.get("retries", profile_values.get("retries", 0)))
 
     try:
         with SnakemakeApi(output_settings) as api:
@@ -219,6 +306,7 @@ def pipeline(
                 ),
                 resource_settings=resource_settings,
                 storage_settings=StorageSettings(),
+                deployment_settings=deployment_settings,
             )
             dag_api = workflow.dag(dag_settings)
             if unlock:
@@ -236,6 +324,7 @@ def pipeline(
                     lock=not unlock,
                     keep_going=keep_going,
                     latency_wait=int(profile_values.get("latency-wait", 3)),
+                    retries=retries,
                 ),
             )
             if report is not None:

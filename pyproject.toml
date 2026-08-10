@@ -107,8 +107,19 @@ workflow = [
     "snakemake>=9.12,<10",
 ]
 
+# SeqNado interoperability: read tracks, sample metadata and normalisation
+# factors straight out of a SeqNado project. Kept optional because SeqNado pins
+# pydantic exactly and pulls in a full NGS stack that model training never needs.
+# The project API (seqnado.open_project) is not in any published release yet;
+# until 1.1 ships, install it from the development branch:
+#   pip install "seqnado @ git+https://github.com/Milne-Group/SeqNado@develop"
+seqnado = [
+    "seqnado>=1.1",
+]
+
 # ── convenience meta-extra ────────────────────────────────────────────────────
 all = ["regulonado[data,train,viz]"]
+
 
 [project.urls]
 Repository = "https://github.com/alsmith151/ReguloNado"

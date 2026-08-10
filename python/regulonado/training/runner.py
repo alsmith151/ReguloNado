@@ -250,10 +250,28 @@ def infer_cardinality(records: Sequence[Mapping[str, Any]], key: str) -> int:
     return max(values) + 1 if values else 0
 
 
+def infer_cardinality_any(records: Sequence[Mapping[str, Any]], *keys: str) -> int:
+    """Cardinality for the first key that any record actually carries.
+
+    Used where a field has been renamed and both spellings must be accepted
+    (``source_id`` superseding ``cell_line_id``).
+    """
+    for key in keys:
+        cardinality = infer_cardinality(records, key)
+        if cardinality:
+            return cardinality
+    return 0
+
+
+# Metadata key(s) per model input, most preferred first. `source_id` is the
+# current name for the biological source of a track (cell line, primary cells,
+# tissue, organoid); `cell_line_id` is its narrower predecessor, kept so datasets
+# built before the rename still load. The model-side tensor name stays
+# `track_cell_line_ids` because it is baked into saved checkpoints.
 _TRACK_METADATA_FIELD_MAP = {
     "track_condition_ids": ("condition_id",),
     "track_timepoint_minutes": ("timepoint_minutes",),
-    "track_cell_line_ids": ("cell_line_id",),
+    "track_cell_line_ids": ("source_id", "cell_line_id"),
     "track_assay_type_ids": ("assay_type_id",),
     "track_target_ids": ("target_id",),
 }
@@ -562,7 +580,11 @@ def _build_regulonado_config(
         use_track_metadata=use_track_metadata,
         activation_type=str(model_cfg.get("activation_type", "softplus")),
         num_conditions=infer_cardinality(records, "condition_id") if use_track_metadata else 0,
-        num_cell_lines=infer_cardinality(records, "cell_line_id") if use_track_metadata else 0,
+        num_cell_lines=(
+            infer_cardinality_any(records, "source_id", "cell_line_id")
+            if use_track_metadata
+            else 0
+        ),
         num_assay_types=infer_cardinality(records, "assay_type_id") if use_track_metadata else 0,
         num_targets=infer_cardinality(records, "target_id") if use_track_metadata else 0,
         metadata_hidden=int(model_cfg.get("metadata_hidden", 32)),

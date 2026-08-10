@@ -18,7 +18,7 @@ Use the packaged workflow for dataset and training jobs:
 ```bash
 regulonado pipeline examples/flashzoi_four_replicates.yaml --dry-run
 regulonado pipeline examples/flashzoi_four_replicates.yaml \
-  --profile examples/slurm
+  --preset sg
 ```
 
-See [the Slurm guide](../docs/slurm.md) for profile setup.
+See [the Slurm guide](../docs/slurm.md) for preset setup (`regulonado init`).

@@ -25,6 +25,35 @@ source .venv/bin/activate
 The optional `gpu` extra builds FlashAttention and therefore needs a compatible
 CUDA toolkit and `nvcc`.
 
+## Working alongside SeqNado
+
+[SeqNado](https://github.com/Milne-Group/SeqNado) produces the BigWigs
+ReguloNado trains on. The two tools share one set of Snakemake execution presets
+in `~/.config/snakemake/`, one genome registry in
+`~/.config/seqnado/genome_config.json`, and one sample-sheet vocabulary. With
+the optional extra installed, ReguloNado reads track paths, BAMs, per-sample
+annotation and spike-in normalisation factors straight out of a SeqNado output
+directory.
+
+```bash
+pip install "regulonado[seqnado]"
+regulonado init                                  # install the shared presets
+regulonado config --from-seqnado expA=/data/expA/seqnado_output --genome hg38
+regulonado pipeline config.yaml --preset sg
+```
+
+`regulonado config` writes `config.yaml` plus a `track_sheet.csv` derived from
+the project; add `source` and `timepoint_minutes` to that sheet, since SeqNado
+has no equivalent columns. Draw on several projects by repeating the flag:
+
+```bash
+regulonado config --from-seqnado expA=/data/expA/seqnado_output \
+                  --from-seqnado expB=/data/expB/seqnado_output
+```
+
+See [Work alongside SeqNado](docs/seqnado-interop.md) for the sheet columns,
+what aggregation guarantees, and what is shared rather than duplicated.
+
 ## A small end-to-end run
 
 Build an Arrow dataset from a BED file, an indexed FASTA, and a directory of
@@ -100,6 +129,7 @@ regulonado predict results/train/flashzoi_0/peak_finetune/checkpoint-N \
 ## Guides
 
 - [Build a dataset](docs/building-datasets.md)
+- [Work alongside SeqNado](docs/seqnado-interop.md)
 - [Calculate and apply normalization](docs/normalization.md)
 - [Train and change configuration](docs/training.md)
 - [Run on Slurm](docs/slurm.md)

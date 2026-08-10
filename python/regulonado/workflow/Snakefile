@@ -12,6 +12,39 @@ from snakemake.utils import validate
 
 validate(config, str(Path(workflow.basedir) / "schemas" / "config.schema.yaml"))
 
+if config["scaling"]["method"] == "bamnado" and not config["inputs"].get("bam_dir"):
+    raise ValueError("inputs.bam_dir is required when scaling.method is 'bamnado'")
+
+SEQNADO_PROJECTS = config["inputs"].get("seqnado_projects") or []
+
+if config["scaling"]["method"] == "seqnado":
+    # SeqNado's normalisation factors are only comparable within one project, so
+    # reusing them across an aggregated dataset would put tracks on different
+    # scales without saying so. TMM is derived from the merged dataset instead.
+    # Naming a single project does not rescue an aggregated dataset: tracks from
+    # the other projects have no entry in that project's table, so scaling would
+    # fail once it ran. Reject it here instead.
+    if len(SEQNADO_PROJECTS) > 1:
+        raise ValueError(
+            "scaling.method 'seqnado' reuses one project's normalisation factors, "
+            f"but {len(SEQNADO_PROJECTS)} projects are configured. Use scaling.method "
+            "'tmm' — it is derived from the merged dataset and so is comparable "
+            "across all of them."
+        )
+    if not SEQNADO_PROJECTS and not config["scaling"].get("seqnado_project"):
+        raise ValueError(
+            "scaling.method 'seqnado' requires scaling.seqnado_project or "
+            "inputs.seqnado_projects"
+        )
+
+
+def seqnado_scaling_project():
+    """The project whose normalisation factors scaling.method 'seqnado' reuses."""
+    explicit = config["scaling"].get("seqnado_project")
+    if explicit:
+        return explicit
+    return SEQNADO_PROJECTS[0]["path"]
+
 
 def _require_unique_names(items, section):
     names = [item["name"] for item in items]

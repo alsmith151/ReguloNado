@@ -222,8 +222,15 @@ def _resolve_bigwig_tracks(
     *,
     drop_missing: bool,
     dedupe_tracks: str,
+    annotations: dict[str, dict] | None = None,
 ) -> tuple[list[str], dict]:
-    """Filter requested tracks and return final paths plus provenance metadata."""
+    """Filter requested tracks and return final paths plus provenance metadata.
+
+    `annotations` maps a resolved BigWig path to biological annotation
+    (``condition_id``, ``target_id``, …) from a track sheet. Annotation is merged
+    into each surviving track record; provenance fields always win on a key
+    clash, so a sheet can never overwrite dedupe bookkeeping.
+    """
     if dedupe_tracks not in _DEDUPE_TRACK_MODES:
         raise ValueError(
             f"dedupe_tracks must be one of {sorted(_DEDUPE_TRACK_MODES)}, got {dedupe_tracks!r}"
@@ -340,6 +347,11 @@ def _resolve_bigwig_tracks(
         }
         if content_hash is not None:
             out["content_hash"] = content_hash
+        if annotations:
+            annotation = annotations.get(str(rec["resolved_path"]))
+            if annotation:
+                # Provenance keys take precedence over sheet-supplied ones.
+                out = {**annotation, **out}
         final_records.append(out)
 
     dropped_records: list[dict] = []
@@ -373,6 +385,29 @@ def _resolve_bigwig_tracks(
         dropped_records.append(dropped)
 
     final_paths = [str(rec["path"]) for rec in final_records]
+
+    if annotations:
+        annotated = {
+            str(rec["resolved_path"])
+            for rec in final_records
+            if str(rec["resolved_path"]) in annotations
+        }
+        unannotated = len(final_records) - len(annotated)
+        if unannotated:
+            # Silently unannotated tracks would train with condition_id=-1, so
+            # name the problem rather than letting it look like a sheet worked.
+            logger.warning(
+                f"{unannotated}/{len(final_records)} track(s) have no track-sheet "
+                f"annotation; their categorical ids will be -1"
+            )
+        unused = set(annotations) - annotated
+        if unused:
+            sample = "\n".join(f"  {path}" for path in sorted(unused)[:5])
+            logger.warning(
+                f"{len(unused)} track-sheet row(s) matched no built track "
+                f"(dropped as missing or duplicate):\n{sample}"
+            )
+
     if dedupe_tracks != "none":
         logger.info(
             f"Track dedupe mode={dedupe_tracks}: {len(final_paths)} final track(s) from "
@@ -646,6 +681,8 @@ def build_dataset_fast(
     overwrite: bool = False,
     drop_missing: bool = False,
     dedupe_tracks: str = "none",
+    annotations: dict[str, dict] | None = None,
+    track_metadata_vocab: dict[str, list[str]] | None = None,
     profile: bool = False,
     strategy: str = "chrom_pass",
     chrom_filter: list[str] | None = None,
@@ -691,6 +728,7 @@ def build_dataset_fast(
         bigwig_paths,
         drop_missing=drop_missing,
         dedupe_tracks=dedupe_tracks,
+        annotations=annotations,
     )
     n_tracks = len(bw_paths)
     stored_context = context_length + 2 * shift_max_bp
@@ -984,6 +1022,11 @@ def build_dataset_fast(
         "build_strategy": strategy,
         "arrow_write_threads": effective_arrow_write_threads,
     }
+    if track_metadata_vocab:
+        # Ordered label list per categorical field. The training code recovers
+        # cardinality from max(id)+1, which cannot recover the labels themselves,
+        # so store them here to keep predictions decodable.
+        metadata["track_metadata_vocab"] = track_metadata_vocab
     metadata_file = output_dir / "regulonado_metadata.json"
     metadata_file.write_text(json.dumps(metadata, indent=2))
 
@@ -1005,6 +1048,7 @@ def build_rc_permutation(
     track_records: list[dict],
     pairing_fields: tuple[str, ...] = (
         "condition_id",
+        "source_id",
         "cell_line_id",
         "assay_type_id",
         "target_id",

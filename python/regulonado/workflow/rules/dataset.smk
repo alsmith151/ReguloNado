@@ -1,5 +1,25 @@
 """Dataset construction rules: BigWig + FASTA -> Arrow DatasetDict."""
 
+import shlex
+
+
+def track_source(input):
+    """CLI flags naming where tracks and their annotation come from.
+
+    Three sources, in precedence order: an explicit track sheet, one or more
+    SeqNado projects, or a plain directory of BigWigs. A sheet and projects can
+    be combined — rows that give only a `sample_id` are resolved against the
+    named project.
+    """
+    parts = []
+    if input.track_sheet:
+        parts += ["--track-sheet", shlex.quote(str(input.track_sheet[0]))]
+    for project in SEQNADO_PROJECTS:
+        parts += ["--seqnado-project", shlex.quote(f"{project['name']}={project['path']}")]
+    if not parts:
+        parts += ["--bigwig-dir", shlex.quote(config["inputs"]["bigwig_dir"])]
+    return " ".join(parts)
+
 
 rule build_dataset:
     """Build the Arrow dataset from BigWig tracks and a reference FASTA.
@@ -16,8 +36,13 @@ rule build_dataset:
     input:
         intervals=config["inputs"]["intervals"],
         fasta=config["inputs"]["fasta"],
+        # A track sheet is an input, not a param: editing it must rebuild.
+        track_sheet=(
+            [config["inputs"]["track_sheet"]] if config["inputs"].get("track_sheet") else []
+        ),
     params:
-        bigwig_dir=config["inputs"]["bigwig_dir"],
+        # Resolves to --track-sheet / --seqnado-project / --bigwig-dir flags.
+        track_source=lambda w, input: track_source(input),
         out_dir=lambda w, output: str(Path(output.info).parent),
         context_length=config["build"]["context_length"],
         bin_size=config["build"]["bin_size"],
@@ -42,7 +67,7 @@ rule build_dataset:
             {input.intervals} \
             {input.fasta} \
             {params.out_dir} \
-            --bigwig-dir {params.bigwig_dir} \
+            {params.track_source} \
             --context-length {params.context_length} \
             --bin-size {params.bin_size} \
             --n-pred-bins {params.n_pred_bins} \

@@ -251,6 +251,60 @@ def compute_tmm_factors(
     return tmm
 
 
+def compute_bamnado_norm_factors(
+    bam_paths: list[Path],
+    *,
+    method: str = "csaw-background",
+    bin_size_bp: int = 10_000,
+    exclude_top_percent: float = 5.0,
+    reference_sample: str | None = None,
+    logratio_trim: float = 0.3,
+    sum_trim: float = 0.05,
+    exogenous_prefix: str | None = None,
+) -> np.ndarray:
+    """Run ``bamnado bam-normalize`` over BAM files and return per-track norm factors.
+
+    Returns bamnado's ``norm_factors`` (geometric-mean-normalised correction
+    factors), in the same order as ``bam_paths`` — the direct analogue of
+    :func:`compute_tmm_factors`'s output, but estimated by bamnado directly
+    from whole-genome BAM coverage rather than regulonado's own TMM
+    implementation restricted to the dataset's region subset.
+    """
+    _check_bamnado()
+
+    cmd = [BAMNADO, "bam-normalize"]
+    for bam in bam_paths:
+        cmd += ["--bams", str(Path(bam).resolve())]
+    cmd += [
+        "--method", method,
+        "--bin-size", str(bin_size_bp),
+        "--exclude-top-percent", str(exclude_top_percent),
+        "--logratio-trim", str(logratio_trim),
+        "--sum-trim", str(sum_trim),
+        "--format", "json",
+    ]
+    if reference_sample is not None:
+        cmd += ["--reference-sample", reference_sample]
+    if exogenous_prefix is not None:
+        cmd += ["--exogenous-prefix", exogenous_prefix]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"'{BAMNADO} bam-normalize' failed (exit {proc.returncode}): {proc.stderr.strip()}"
+        )
+
+    result = json.loads(proc.stdout)
+    sample_names = result["sample_names"]
+    expected = [Path(bam).stem for bam in bam_paths]
+    if sample_names != expected:
+        raise RuntimeError(
+            "bamnado returned samples in an unexpected order: "
+            f"expected {expected}, got {sample_names}"
+        )
+    return np.asarray(result["norm_factors"], dtype=np.float64)
+
+
 def save_scale_factors(
     df: pd.DataFrame,
     output: Path,

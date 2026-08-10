@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version
@@ -45,6 +46,232 @@ def _main_callback(
     ),
 ) -> None:
     """Build datasets, train models, run inference, and manage workflows."""
+
+
+def _parse_seqnado_projects(values: Optional[list[str]]) -> dict[str, str]:
+    """Parse repeated ``PATH`` / ``NAME=PATH`` project options.
+
+    Without an explicit name a project is labelled by the directory containing
+    its output dir, which for a SeqNado layout is the project folder itself
+    (``2026-08-10_myproj/seqnado_output`` -> ``2026-08-10_myproj``).
+    """
+    projects: dict[str, str] = {}
+    for value in values or []:
+        name, sep, path = value.partition("=")
+        if not sep:
+            path = name
+            name = Path(path).expanduser().resolve().parent.name
+        if not path:
+            raise typer.BadParameter(
+                f"Expected PATH or NAME=PATH, got {value!r}", param_hint="--seqnado-project"
+            )
+        if name in projects:
+            raise typer.BadParameter(
+                f"Duplicate project name {name!r}; give each one an explicit NAME=PATH",
+                param_hint="--seqnado-project",
+            )
+        projects[name] = path
+    return projects
+
+
+@app.command()
+def config(
+    output: Annotated[
+        Optional[Path], typer.Option("-o", "--output", help="Where to write the config YAML.")
+    ] = None,
+    interactive: Annotated[
+        bool,
+        typer.Option(
+            "--interactive/--no-interactive",
+            help="Prompt for values, or take every default without asking.",
+        ),
+    ] = True,
+    from_seqnado: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--from-seqnado",
+            help=(
+                "SeqNado output directory as PATH or NAME=PATH (repeatable). "
+                "Tracks and their annotation are read from the project."
+            ),
+        ),
+    ] = None,
+    genome: Annotated[
+        Optional[str],
+        typer.Option("--genome", help="Genome name from the shared SeqNado genome registry."),
+    ] = None,
+    project_name: Annotated[
+        Optional[str], typer.Option("--name", help="Project name; seeds the results directory.")
+    ] = None,
+    fill_missing: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--fill-missing",
+            help=(
+                "Load an existing config and fill in what was left unset. "
+                "Overwrites in place unless -o/--output or --new-file is given."
+            ),
+        ),
+    ] = None,
+    new_file: Annotated[
+        bool,
+        typer.Option(
+            "--new-file",
+            help="With --fill-missing, write '<name>.filled.yaml' instead of overwriting.",
+        ),
+    ] = False,
+    track_sheet_out: Annotated[
+        Optional[Path],
+        typer.Option("--track-sheet-out", help="Where to write the derived track sheet."),
+    ] = None,
+    assume_same_genome: Annotated[
+        bool,
+        typer.Option(
+            "--assume-same-genome",
+            help="Aggregate projects whose reference genome cannot be read from their config.",
+        ),
+    ] = False,
+) -> None:
+    """Generate a workflow config, interactively or from flags.
+
+    Follows the same shape as `seqnado config`: sequential prompts with defaults
+    in brackets, validated as you answer. Pass --no-interactive to take every
+    default instead, which is the scripting and CI path.
+    """
+    import yaml
+    from regulonado.config.generator import build_config
+
+    base = None
+    if fill_missing is not None:
+        if not fill_missing.exists():
+            typer.echo(f"Config not found: {fill_missing}", err=True)
+            raise typer.Exit(1)
+        try:
+            # Parsed as a plain mapping, not validated: the whole point of
+            # --fill-missing is that the input is incomplete.
+            base = yaml.safe_load(fill_missing.read_text()) or {}
+        except yaml.YAMLError as exc:
+            typer.echo(f"Could not parse {fill_missing}: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        if not isinstance(base, dict):
+            typer.echo(f"{fill_missing} is not a YAML mapping", err=True)
+            raise typer.Exit(1)
+
+    try:
+        built = build_config(
+            interactive=interactive,
+            project_name=project_name,
+            genome=genome,
+            from_seqnado=list(from_seqnado) if from_seqnado else None,
+            base=base,
+        )
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    if output is not None:
+        destination = output
+    elif fill_missing is not None:
+        destination = (
+            fill_missing.parent / f"{fill_missing.stem}.filled{fill_missing.suffix}"
+            if new_file
+            else fill_missing
+        )
+    else:
+        destination = Path("config.yaml")
+
+    # A sheet is only written when tracks came from SeqNado; a hand-written
+    # sheet named in the config is left exactly as the user wrote it.
+    if built.inputs.seqnado_projects:
+        sheet_path = track_sheet_out or destination.parent / "track_sheet.csv"
+        try:
+            from regulonado.tracks import TrackSheet
+
+            sheet = TrackSheet.from_seqnado_projects(
+                [
+                    {"name": p.name, "path": p.path, "method": p.method, "scale": p.scale}
+                    for p in built.inputs.seqnado_projects
+                ],
+                assume_same_genome=assume_same_genome,
+            )
+            sheet.to_csv(sheet_path)
+            built.inputs.track_sheet = str(sheet_path)
+            logger.info(f"Wrote track sheet with {len(sheet)} track(s) -> {sheet_path}")
+        except Exception as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1) from exc
+
+    built.to_yaml(destination)
+    logger.success(f"Wrote config -> {destination}")
+
+
+@app.command()
+def init(
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", "-n", help="Show what would be written.")
+    ] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite presets that already exist.")
+    ] = False,
+) -> None:
+    """Install Snakemake execution presets into ~/.config/snakemake/.
+
+    Uses the same directory and naming scheme as `seqnado init`, so a machine
+    running both pipelines keeps one set of execution configs. Presets already
+    present are left alone — including SeqNado's — so this is safe to re-run.
+    """
+    import shutil
+    from importlib import resources
+
+    from regulonado.cli.profiles import _packaged_profiles
+
+    target_root = Path.home() / ".config" / "snakemake"
+    packaged = _packaged_profiles()
+    if not packaged:
+        typer.echo("No packaged presets found; the installation may be incomplete.", err=True)
+        raise typer.Exit(1)
+
+    if not dry_run:
+        target_root.mkdir(parents=True, exist_ok=True)
+
+    installed, skipped = 0, 0
+    for shortcode, directory in sorted(packaged.items()):
+        destination = target_root / directory
+        if destination.exists() and not force:
+            logger.info(f"Preset '{shortcode}' already installed: {destination}")
+            skipped += 1
+            continue
+
+        source = resources.files("regulonado.workflow.profiles").joinpath(directory)
+        if dry_run:
+            typer.echo(f"[dry-run] would install '{shortcode}' -> {destination}")
+            installed += 1
+            continue
+
+        with resources.as_file(source) as source_path:
+            if destination.exists():
+                shutil.rmtree(destination)
+            shutil.copytree(source_path, destination)
+        logger.info(f"Installed preset '{shortcode}' -> {destination}")
+        installed += 1
+
+    logger.info(f"{installed} preset(s) installed, {skipped} left unchanged.")
+
+    genome_config = Path(os.environ.get("SEQNADO_CONFIG", Path.home()))
+    genome_config = genome_config / ".config" / "seqnado" / "genome_config.json"
+    if genome_config.exists():
+        logger.info(f"Genome registry: {genome_config}")
+    else:
+        # Shared with SeqNado on purpose: one place to record where the FASTA,
+        # chrom.sizes and blacklist for a genome live.
+        logger.warning(
+            f"No genome registry at {genome_config}. Run 'seqnado init' to create one, "
+            f"or pass --genome paths to 'regulonado config' directly."
+        )
+
+    from regulonado.cli.profiles import format_available_presets
+
+    typer.echo(f"Available presets: {format_available_presets()}")
 
 
 @app.command()
@@ -497,6 +724,362 @@ def calculate_tmm_scaling(
     typer.echo("Run 'regulonado enrich-metadata' to write these values into final_track_records.")
 
 
+@normalization_app.command("seqnado")
+def calculate_seqnado_scaling(
+    metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json")],
+    project: Annotated[
+        Path,
+        typer.Option("--project", help="SeqNado output directory (seqnado_output/)."),
+    ],
+    scale_factors: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--scale-factors",
+            "-s",
+            help="Scale-factors parquet from 'normalization original'.",
+        ),
+    ] = None,
+    method: Annotated[
+        Optional[str],
+        typer.Option(
+            "--method", "-m", help="Spike-in method, e.g. orlando. Default: the only one."
+        ),
+    ] = None,
+    output: Annotated[
+        Optional[Path],
+        typer.Option("--output", "-o", help="Output path (default: overwrites --scale-factors)."),
+    ] = None,
+    fmt: Annotated[
+        str, typer.Option("--format", "-f", help="Output format: csv or parquet")
+    ] = "parquet",
+) -> None:
+    """Apply SeqNado's spike-in normalisation factors instead of estimating our own.
+
+    Takes library-size factors from 'normalization original' and corrects them
+    with the factors SeqNado already computed, exactly as 'normalization tmm'
+    applies a TMM correction: ``scale_factor = old_scale_factor / factor``, with
+    factors normalised to a geometric mean of 1 so the overall magnitude is
+    unchanged.
+
+    Only valid within a single SeqNado project — its factors are not comparable
+    across projects. Use 'tmm' when aggregating several.
+    """
+    import json
+
+    import numpy as np
+    import pandas as pd
+    from regulonado.normalization import save_scale_factors
+
+    if not metadata.exists():
+        typer.echo(f"Metadata file not found: {metadata}", err=True)
+        raise typer.Exit(1)
+
+    ext = "parquet" if fmt == "parquet" else "csv"
+    sf_path = (
+        scale_factors if scale_factors is not None else metadata.parent / f"scale_factors.{ext}"
+    )
+    if not sf_path.exists():
+        typer.echo(
+            f"Scale factors not found: {sf_path}. Run 'regulonado normalization original' first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    out_path = output if output is not None else sf_path
+
+    from regulonado._seqnado import SeqNadoUnavailableError, open_project
+
+    try:
+        seqnado_project = open_project(project)
+        factors = seqnado_project.load_normalisation_factors(method)
+    except SeqNadoUnavailableError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    except FileNotFoundError as exc:
+        typer.echo(
+            f"No normalisation factors in {project}: {exc}. SeqNado writes these "
+            f"under resources/<method>/normalisation_factors.tsv when spike-in "
+            f"normalisation is enabled.",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
+
+    sample_column = next((c for c in ("sample", "sample_id", "sample_name") if c in factors), None)
+    factor_column = next(
+        (c for c in ("norm_factor", "scale_factor", "factor") if c in factors), None
+    )
+    if sample_column is None or factor_column is None:
+        typer.echo(
+            f"Could not find sample and factor columns in SeqNado's normalisation "
+            f"table; got columns: {', '.join(map(str, factors.columns))}",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # load_normalisation_factors(None) concatenates every method's table and
+    # tags each row with its method. Silently keeping the first row per sample
+    # would pick a spike-in method at random, so make the caller choose.
+    if method is None and "method" in factors.columns:
+        present = sorted(factors["method"].dropna().unique())
+        if len(present) > 1:
+            typer.echo(
+                f"{project} has normalisation factors for several spike-in methods "
+                f"({', '.join(map(str, present))}). Pass --method to choose one.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+    lookup = (
+        factors.dropna(subset=[sample_column, factor_column])
+        .drop_duplicates(subset=[sample_column], keep="first")
+        .set_index(sample_column)[factor_column]
+        .astype(float)
+    )
+
+    with metadata.open() as fh:
+        meta = json.load(fh)
+    records = sorted(meta.get("final_track_records", []), key=lambda r: r["track_index"])
+    if not records:
+        typer.echo("No 'final_track_records' found in metadata.", err=True)
+        raise typer.Exit(1)
+
+    # Tracks carry both names; SeqNado keys its table on the sample name, which
+    # for IP assays is '<sample>_<ip>' — the same string as the bigwig stem.
+    names = [
+        record.get("sample_id") or record.get("track_name") or Path(record["path"]).stem
+        for record in records
+    ]
+    missing = [name for name in names if name not in lookup.index]
+    if missing:
+        available = ", ".join(map(str, lookup.index[:8]))
+        typer.echo(
+            f"{len(missing)}/{len(names)} track(s) have no SeqNado normalisation "
+            f"factor: {', '.join(missing[:8])}.\nFactors are available for: {available}",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    values = np.asarray([lookup[name] for name in names], dtype=float)
+    if np.any(values <= 0):
+        typer.echo("SeqNado normalisation factors must be positive.", err=True)
+        raise typer.Exit(1)
+    # Normalise to geometric mean 1, matching how the TMM correction is applied.
+    values = values / float(np.exp(np.mean(np.log(values))))
+
+    df = pd.read_parquet(sf_path) if fmt == "parquet" else pd.read_csv(sf_path)
+    df = df.sort_values("track_index").reset_index(drop=True)
+    if len(df) != len(records):
+        typer.echo(
+            f"Scale factors have {len(df)} row(s) but metadata has {len(records)} track(s).",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    df["seqnado_norm_factor"] = values
+    df["scale_factor"] = df["scale_factor"] / values
+
+    save_scale_factors(df, out_path, fmt=fmt)  # type: ignore[arg-type]
+    typer.echo(f"Applied {len(values)} SeqNado normalisation factor(s) -> {out_path}")
+    typer.echo("Run 'regulonado enrich-metadata' to write these values into final_track_records.")
+
+
+@normalization_app.command("bamnado")
+def calculate_bamnado_scaling(
+    metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json")],
+    bam_dir: Annotated[
+        Path,
+        typer.Option(
+            "--bam-dir",
+            help="Directory of BAM files, one per track, named <track-stem>.bam",
+        ),
+    ],
+    method: Annotated[
+        str,
+        typer.Option(
+            "--method",
+            "-m",
+            help=("bamnado bam-normalize method: tmm, csaw-background, cpm, "
+                  "median-of-ratios, spike-in"),
+        ),
+    ] = "csaw-background",
+    scale_factors: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--scale-factors",
+            "-s",
+            help=(
+                "Scale-factors parquet from normalization original "
+                "(default: <metadata_dir>/scale_factors.parquet)"
+            ),
+        ),
+    ] = None,
+    output: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output path (default: overwrites --scale-factors input)",
+        ),
+    ] = None,
+    fmt: Annotated[
+        str,
+        typer.Option("--format", "-f", help="Output format: csv or parquet"),
+    ] = "parquet",
+    bin_size_bp: Annotated[
+        int,
+        typer.Option("--bin-size-bp", help="bamnado background bin size in bp"),
+    ] = 10_000,
+    exclude_top_percent: Annotated[
+        float,
+        typer.Option(
+            "--exclude-top-percent", help="Drop this percentage of highest-count bins first"
+        ),
+    ] = 5.0,
+    reference_sample: Annotated[
+        Optional[str],
+        typer.Option(
+            "--reference-sample", help="Sample name to use as reference (default: bamnado's choice)"
+        ),
+    ] = None,
+    logratio_trim: Annotated[
+        float,
+        typer.Option("--logratio-trim", help="TMM trim fraction for M-values"),
+    ] = 0.3,
+    sum_trim: Annotated[
+        float,
+        typer.Option("--sum-trim", help="TMM trim fraction for A-values"),
+    ] = 0.05,
+    exogenous_prefix: Annotated[
+        Optional[str],
+        typer.Option(
+            "--exogenous-prefix",
+            help="Reference-name prefix for spike-in sequences (--method spike-in)",
+        ),
+    ] = None,
+) -> None:
+    """Correct scale factors using bamnado's own between-sample normalisation.
+
+    Runs ``bamnado bam-normalize`` directly on BAM files to get a correction
+    factor per track, then divides the existing scale_factor (from
+    'normalization original') by that correction — same convention as
+    'normalization tmm', but the correction comes from bamnado's TMM,
+    csaw-background, CPM, median-of-ratios, or spike-in estimator over the
+    full BAM rather than regulonado's own dataset-restricted TMM.
+
+    BAM files are matched to tracks by filename stem: track N's bigwig
+    'sample1.bw' must have a matching 'sample1.bam' in --bam-dir.
+
+    Run ``regulonado enrich-metadata`` afterwards to write the updated values
+    into ``final_track_records`` in the metadata JSON.
+    """
+    import json
+
+    import pandas as pd
+    from regulonado.normalization import compute_bamnado_norm_factors, save_scale_factors
+
+    if not metadata.exists():
+        typer.echo(f"Metadata file not found: {metadata}", err=True)
+        raise typer.Exit(1)
+    if not bam_dir.is_dir():
+        typer.echo(f"BAM directory not found: {bam_dir}", err=True)
+        raise typer.Exit(1)
+
+    with metadata.open() as fh:
+        meta = json.load(fh)
+
+    dataset_dir = metadata.parent
+    track_records = sorted(meta.get("final_track_records", []), key=lambda r: r["track_index"])
+    if not track_records:
+        typer.echo("No 'final_track_records' found in metadata.", err=True)
+        raise typer.Exit(1)
+
+    ext = "parquet" if fmt == "parquet" else "csv"
+    sf_path = scale_factors if scale_factors is not None else dataset_dir / f"scale_factors.{ext}"
+    out_path = output if output is not None else sf_path
+
+    if not sf_path.exists():
+        typer.echo(
+            f"Scale-factors file not found: {sf_path}\n"
+            "Run 'regulonado normalization original' first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    bam_paths = []
+    missing = []
+    for record in track_records:
+        stem = Path(record["resolved_path"]).stem
+        bam_path = bam_dir / f"{stem}.bam"
+        if not bam_path.exists():
+            missing.append(str(bam_path))
+        bam_paths.append(bam_path)
+    if missing:
+        typer.echo(
+            "Missing BAM file(s) for these tracks (expected filename stem to match the bigwig):\n"
+            + "\n".join(f"  {m}" for m in missing),
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    typer.echo(f"Metadata : {metadata}")
+    typer.echo(f"BAM dir  : {bam_dir}")
+    typer.echo(f"Method   : {method}")
+    typer.echo(f"Tracks   : {len(bam_paths)}")
+    typer.echo("")
+
+    norm_factors = compute_bamnado_norm_factors(
+        bam_paths,
+        method=method,
+        bin_size_bp=bin_size_bp,
+        exclude_top_percent=exclude_top_percent,
+        reference_sample=reference_sample,
+        logratio_trim=logratio_trim,
+        sum_trim=sum_trim,
+        exogenous_prefix=exogenous_prefix,
+    )
+
+    sf_df = pd.read_parquet(sf_path) if str(sf_path).endswith(".parquet") else pd.read_csv(sf_path)
+    if "scale_factor" not in sf_df.columns:
+        typer.echo(
+            (
+                "Column 'scale_factor' missing from scale-factors file.  "
+                "Run 'regulonado normalization original' first."
+            ),
+            err=True,
+        )
+        raise typer.Exit(1)
+    if len(sf_df) != len(norm_factors):
+        typer.echo(
+            f"Track count mismatch: scale-factors file has {len(sf_df)}, "
+            f"bamnado returned {len(norm_factors)}.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    sf_df = sf_df.sort_values("track_index").reset_index(drop=True)
+    sf_df["bamnado_method"] = method
+    sf_df["bamnado_norm_factor"] = norm_factors
+    sf_df["scale_factor"] = sf_df["scale_factor"] / sf_df["bamnado_norm_factor"]
+
+    typer.echo(
+        f"{'Track':>5}  {'samplename':<30}  {'norm_factor':>12}  {'old_sf':>12}  {'new_sf':>12}"
+    )
+    for i, row in sf_df.iterrows():
+        old_sf = float(row["scale_factor"]) * float(row["bamnado_norm_factor"])
+        name = str(row.get("samplename", i))[:30]
+        typer.echo(
+            f"{int(row['track_index']):>5}  {name:<30}  {norm_factors[i]:>12.6f}  "
+            f"{old_sf:>12.6f}  {float(row['scale_factor']):>12.6f}"
+        )
+
+    priority = ["track_index", "scale_factor", "bamnado_norm_factor", "clip_soft", "clip_hard"]
+    rest = [c for c in sf_df.columns if c not in priority]
+    sf_df = sf_df[priority + rest]
+
+    save_scale_factors(sf_df, out_path, fmt=fmt)  # type: ignore[arg-type]
+    typer.echo(f"\nSaved updated scale factors to {out_path}")
+    typer.echo("Run 'regulonado enrich-metadata' to write these values into final_track_records.")
+
+
 @app.command()
 def recompress_dataset(
     src: Annotated[Path, typer.Argument(help="Source saved dataset directory")],
@@ -649,8 +1232,37 @@ def build(
         ),
     ] = None,
     bigwig_glob: Annotated[
-        str, typer.Option("--bigwig-glob", help="Glob when using --bigwig-dir")
-    ] = "*.bw",
+        Optional[list[str]],
+        typer.Option(
+            "--bigwig-glob",
+            help=(
+                "Glob when using --bigwig-dir (repeatable). "
+                "Default: '*.bw' and '*.bigWig', so SeqNado output is matched too."
+            ),
+        ),
+    ] = None,
+    track_sheet: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--track-sheet",
+            help=(
+                "CSV mapping tracks to annotation (condition, cell_line, ip, …). "
+                "Supplies the ordered track list and populates the categorical "
+                "ids the training code reads. Overrides --bigwig/--bigwig-dir."
+            ),
+        ),
+    ] = None,
+    seqnado_project: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--seqnado-project",
+            help=(
+                "SeqNado output directory as PATH or NAME=PATH (repeatable). "
+                "Resolves track sheet rows that give only a sample_id, and with "
+                "no --track-sheet builds the sheet from the project(s) directly."
+            ),
+        ),
+    ] = None,
     split: Annotated[
         Optional[list[str]],
         typer.Option(
@@ -833,16 +1445,44 @@ def build(
     """
     from regulonado.dataset import DEFAULT_SPLITS, build_dataset_fast
 
-    # --- resolve BigWig paths ------------------------------------------------
-    if bigwig_dir is not None:
-        bw_paths: list[str] = [str(p) for p in sorted(bigwig_dir.glob(bigwig_glob))]
+    projects = _parse_seqnado_projects(seqnado_project)
+
+    # --- resolve BigWig paths and annotation ---------------------------------
+    annotations: Optional[dict] = None
+    vocab: Optional[dict] = None
+
+    if track_sheet is not None or projects:
+        from regulonado.tracks import TrackSheet
+
+        try:
+            if track_sheet is not None:
+                sheet = TrackSheet.from_csv(track_sheet, projects=projects or None)
+            else:
+                sheet = TrackSheet.from_seqnado_projects(
+                    [{"name": name, "path": path} for name, path in projects.items()]
+                )
+        except Exception as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1) from exc
+
+        bw_paths: list[str] = [str(p) for p in sheet.bigwig_paths]
+        annotations = sheet.annotations_by_path()
+        _, vocab = sheet.to_track_records()
+    elif bigwig_dir is not None:
+        # Default covers both extensions: ReguloNado writes '.bw', SeqNado '.bigWig'.
+        globs = list(bigwig_glob) if bigwig_glob else ["*.bw", "*.bigWig"]
+        matched = {p for pattern in globs for p in bigwig_dir.glob(pattern)}
+        bw_paths = [str(p) for p in sorted(matched)]
         if not bw_paths:
-            typer.echo(f"No files matching '{bigwig_glob}' in {bigwig_dir}", err=True)
+            typer.echo(f"No files matching {globs} in {bigwig_dir}", err=True)
             raise typer.Exit(1)
     elif bigwig:
         bw_paths = [str(p) for p in bigwig]
     else:
-        typer.echo("Provide --bigwig files or --bigwig-dir.", err=True)
+        typer.echo(
+            "Provide --bigwig files, --bigwig-dir, --track-sheet or --seqnado-project.",
+            err=True,
+        )
         raise typer.Exit(1)
 
     typer.echo(f"Tracks : {len(bw_paths)}")
@@ -887,6 +1527,8 @@ def build(
         overwrite=overwrite,
         drop_missing=drop_missing,
         dedupe_tracks=dedupe_tracks,
+        annotations=annotations,
+        track_metadata_vocab=vocab,
         profile=profile,
         strategy=strategy,
         chrom_filter=list(chrom) if chrom else None,

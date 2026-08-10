@@ -1,6 +1,10 @@
-# SLURM executor profile.
+# SLURM executor profile with GPU training (shortcode: sg).
 #
-#   regulonado pipeline my_runs.yaml --profile examples/slurm
+#   regulonado pipeline my_runs.yaml --preset sg
+#
+# `regulonado init` installs this into ~/.config/snakemake/profile_slurm_gpu/,
+# where you can edit the partitions and accounts once and reuse them across
+# every project.
 #
 # Every site-specific value lives here rather than in the workflow, so the rules
 # stay portable. EDIT THE PARTITION AND ACCOUNT NAMES — the defaults below are
