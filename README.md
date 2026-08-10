@@ -87,6 +87,53 @@ regulonado train dataset/ --preset head_only \
 `--set` accepts known configuration keys only. Use `--print-config` after adding
 overrides when you want to check what will be submitted.
 
+## Run the Snakemake pipeline
+
+Use `regulonado pipeline` when you want one reproducible DAG that builds the
+dataset, computes normalization, and runs every configured training phase. It
+is not the SeqNado FASTQ pipeline: ReguloNado starts with a reference FASTA,
+interval BED, and BigWig tracks (or a track sheet/SeqNado project).
+
+Create or edit a workflow config, then inspect the DAG before submitting it:
+
+```bash
+regulonado config -o config.yaml
+regulonado pipeline config.yaml --dry-run --cores 4
+```
+
+For a cluster, choose a Snakemake execution preset; `--preset` selects where
+jobs run, while the `train.phases` and `train.runs` entries select what is
+trained:
+
+```bash
+regulonado pipeline config.yaml --preset sg --cores 4
+```
+
+The workflow contains these stages:
+
+```text
+build_dataset
+    └─ recompress_dataset (when recompress.enabled: true)
+        └─ scale_factors → enrich_metadata
+            └─ train_phase for each run and phase
+```
+
+`build_dataset` reads the FASTA, BED, and track source, bins signal, and writes
+the Arrow dataset and metadata. `recompress_dataset` is optional. The scaling
+stage writes per-track factors and enriched metadata; its method is selected by
+`scaling.method` (`original`, `tmm`, `bamnado`, or `seqnado`). Each
+`train_phase` runs one training preset. Phases are sequential within a run
+(later phases warm-start from the previous checkpoint), while separate runs
+can execute concurrently.
+
+The pipeline does not run prediction, create BigWigs, align reads, call peaks,
+or perform QC. Those are separate commands or upstream SeqNado work. It also
+does not replace the standalone commands: use `regulonado build`,
+`regulonado normalization ...`, or `regulonado train` when you need to run one
+stage manually. Snakemake records outputs under `results_dir` and skips stages
+whose declared outputs already exist, so rerunning the same command resumes
+completed work.
+
 ## Four independent FlashZoi runs
 
 The pipeline is the easiest way to train the four published FlashZoi
