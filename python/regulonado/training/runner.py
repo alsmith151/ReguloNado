@@ -16,6 +16,7 @@ from datasets import DatasetDict, load_from_disk
 from datasets import IterableDataset as HFIterableDataset
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import OmegaConfBaseException
 from torch.optim import AdamW
 from transformers import (
     EarlyStoppingCallback,
@@ -39,11 +40,7 @@ from regulonado.training.callbacks import (
     _LRLogCallback,
     _WandbConfigCallback,
 )
-from regulonado.training.config import (
-    ProvenanceConfig,
-    TrainerConfig,
-    nested_config,
-)
+from regulonado.training.config import TrainerConfig
 from regulonado.training.losses import (
     log1p_huber_loss,
     poisson_multinomial_binwise_loss,
@@ -145,7 +142,16 @@ def _seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def load_dataset_metadata(data_path: Path) -> dict[str, Any]:
+def load_dataset_metadata(
+    data_path: Path,
+    metadata_path: Path | None = None,
+) -> dict[str, Any]:
+    """Load dataset metadata, preferring an explicit enriched sidecar."""
+    if metadata_path is not None:
+        if not metadata_path.is_file():
+            raise FileNotFoundError(f"Dataset metadata JSON not found: {metadata_path}")
+        return json.loads(metadata_path.read_text())
+
     candidates = [data_path / "regulonado_metadata.json", data_path / "track_metadata.json"]
     for candidate in candidates:
         if candidate.exists():
@@ -974,7 +980,9 @@ def run_training(
         sizes = {split: len(dataset_dict[split]) for split in dataset_dict}
         logger.info(f"[rank {rank}] dataset loaded in {perf_counter() - t0:.1f}s | splits={sizes}")
 
-    metadata = load_dataset_metadata(data_path)
+    metadata_path_value = cfg["data"].get("metadata_path")
+    metadata_path = Path(str(metadata_path_value)) if metadata_path_value else None
+    metadata = load_dataset_metadata(data_path, metadata_path)
     records = track_records(metadata)
     logger.info(f"[rank {rank}] metadata loaded | {len(records)} tracks")
 
@@ -1043,92 +1051,18 @@ def run_training(
         labels_already_scaled=labels_already_scaled,
     )
 
-    trainer_cfg = TrainerConfig(
-        batch_size=int(cfg["trainer"].get("batch_size", 1)),
-        eval_batch_size=int(
-            cfg["trainer"].get("eval_batch_size") or cfg["trainer"].get("batch_size", 1)
-        ),
-        num_workers=int(cfg["trainer"].get("num_workers", 4)),
-        learning_rate=float(cfg["trainer"].get("learning_rate", 1e-3)),
-        backbone_learning_rate=float(
-            cfg["trainer"].get(
-                "backbone_learning_rate",
-                cfg["trainer"].get("learning_rate", 1e-3),
-            )
-        ),
-        weight_decay=float(cfg["trainer"].get("weight_decay", 1e-2)),
-        scheduler=str(cfg["trainer"].get("scheduler", "linear")),
-        warmup_steps=int(cfg["trainer"].get("warmup_steps", 0)),
-        max_epochs=int(cfg["trainer"].get("max_epochs", 1)),
-        max_steps=(
-            int(cfg["trainer"].get("max_steps"))
-            if cfg["trainer"].get("max_steps") is not None
-            else None
-        ),
-        gradient_accumulation_steps=int(cfg["trainer"].get("gradient_accumulation_steps", 1)),
-        mixed_precision=str(cfg["trainer"].get("mixed_precision", "bf16")),
-        gradient_clip_norm=(
-            float(cfg["trainer"].get("gradient_clip_norm", 1.0))
-            if cfg["trainer"].get("gradient_clip_norm") is not None
-            else None
-        ),
-        eval_every_n_steps=(
-            int(cfg["trainer"].get("eval_every_n_steps"))
-            if cfg["trainer"].get("eval_every_n_steps") is not None
-            else None
-        ),
-        checkpoint_every_n_steps=(
-            int(cfg["trainer"].get("checkpoint_every_n_steps"))
-            if cfg["trainer"].get("checkpoint_every_n_steps") is not None
-            else None
-        ),
-        persistent_workers=bool(cfg["trainer"].get("persistent_workers", True)),
-        prefetch_factor=(
-            int(cfg["trainer"]["prefetch_factor"])
-            if cfg["trainer"].get("prefetch_factor") is not None
-            else 2
-        ),
-        freeze_backbone=bool(cfg["trainer"].get("freeze_backbone", True)),
-        unfreeze_backbone_stages_from_output_end=int(
-            cfg["trainer"].get(
-                "unfreeze_backbone_stages_from_output_end",
-                cfg["trainer"].get(
-                    "unfreeze_backbone_blocks_from_end",
-                    cfg["trainer"].get("unfreeze_last_n_blocks", 0),
-                ),
-            )
-        ),
-        unfreeze_module_names=tuple(cfg["trainer"].get("unfreeze_module_names", [])),
-        report_to=list(cfg["trainer"].get("report_to", [])),
-        resume_from_checkpoint=_normalise_checkpoint_mode(
-            cfg["trainer"].get("resume_from_checkpoint")
-        ),
-        init_weights_from_checkpoint=(
-            str(cfg["trainer"].get("init_weights_from_checkpoint"))
-            if cfg["trainer"].get("init_weights_from_checkpoint") not in (None, "")
-            else None
-        ),
-        metric_for_best_model=str(cfg["trainer"].get("metric_for_best_model", "eval_loss")),
-        greater_is_better=bool(cfg["trainer"].get("greater_is_better", False)),
-        early_stopping_patience=(
-            int(cfg["trainer"]["early_stopping_patience"])
-            if cfg["trainer"].get("early_stopping_patience") is not None
-            else None
-        ),
-        early_stopping_threshold=float(cfg["trainer"].get("early_stopping_threshold", 0.0)),
-        eval_accumulation_steps=(
-            int(cfg["trainer"]["eval_accumulation_steps"])
-            if cfg["trainer"].get("eval_accumulation_steps") is not None
-            else None
-        ),
-        max_eval_samples=(
-            int(cfg["trainer"]["max_eval_samples"])
-            if cfg["trainer"].get("max_eval_samples") is not None
-            else None
-        ),
-        eval_on_start=bool(cfg["trainer"].get("eval_on_start", True)),
-        num_plot_examples=int(cfg["trainer"].get("num_plot_examples", 4)),
-        provenance=nested_config(cfg["trainer"].get("provenance"), ProvenanceConfig),
+    try:
+        trainer_cfg = OmegaConf.to_object(
+            OmegaConf.merge(OmegaConf.structured(TrainerConfig), cfg["trainer"])
+        )
+    except OmegaConfBaseException as exc:
+        raise ValueError(f"Invalid trainer configuration: {exc}") from exc
+    if not isinstance(trainer_cfg, TrainerConfig):
+        raise TypeError("Trainer configuration did not resolve to TrainerConfig")
+    trainer_cfg = dataclasses.replace(
+        trainer_cfg,
+        resume_from_checkpoint=_normalise_checkpoint_mode(trainer_cfg.resume_from_checkpoint),
+        init_weights_from_checkpoint=(trainer_cfg.init_weights_from_checkpoint or None),
     )
     if trainer_cfg.resume_from_checkpoint and trainer_cfg.init_weights_from_checkpoint:
         raise ValueError(
@@ -1252,8 +1186,11 @@ def run_training(
 
     summary = {
         "output_dir": str(output_dir),
+        "seed": seed,
+        "metadata_path": str(metadata_path) if metadata_path else None,
         "n_tracks": len(records),
         "backbone": cfg["backbone"]["name"],
+        "pretrained_model": cfg["backbone"].get("pretrained_name"),
         "head": cfg["head"]["type"],
         "resume_from_checkpoint": trainer_cfg.resume_from_checkpoint,
         "init_weights_from_checkpoint": trainer_cfg.init_weights_from_checkpoint,

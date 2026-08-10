@@ -28,11 +28,11 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
+use crate::arrow_schema::{hf_arrow_schema, make_2d_f32_array, make_2d_i8_array};
 use crate::bigwig_io::{open_bigwig_handles, BwHandle};
 use crate::binning::{bin_region_into, BinningScratch, BinningUsage};
 use crate::fasta::{load_fasta_index, read_one_hot_sequence};
 use crate::io_utils::{ipc_write_options, maybe_log_progress};
-use crate::arrow_schema::{hf_arrow_schema, make_2d_f32_array, make_2d_i8_array};
 
 /// Timing profile for a single Arrow shard write.
 ///
@@ -447,7 +447,11 @@ pub(crate) fn write_arrow_splits_chrom_pass(
 
     let n_tracks = bw_paths.len();
     let batch_size = batch_size.max(1);
-    let shard_size = if shard_size == 0 { batch_size } else { shard_size.max(1) };
+    let shard_size = if shard_size == 0 {
+        batch_size
+    } else {
+        shard_size.max(1)
+    };
     validate_batch_size(batch_size, n_tracks, n_bins, context_len)
         .map_err(PyRuntimeError::new_err)?;
 
@@ -549,36 +553,33 @@ pub(crate) fn write_arrow_splits_chrom_pass(
                 .par_chunks_mut(n_chrom_bins)
                 .zip(handles.par_iter_mut())
                 .enumerate()
-                .map_init(BinningScratch::default, |scratch, (track_idx, (out_row, reader))| {
-                    let usage = bin_region_into(
-                        reader,
-                        chrom_str,
-                        0,
-                        region_end,
-                        out_row,
-                        scratch,
-                    );
+                .map_init(
+                    BinningScratch::default,
+                    |scratch, (track_idx, (out_row, reader))| {
+                        let usage =
+                            bin_region_into(reader, chrom_str, 0, region_end, out_row, scratch);
 
-                    let is_minus = minus_flags.get(track_idx).copied().unwrap_or(false);
-                    if is_minus {
-                        let mut nz = 0usize;
-                        let mut neg = 0usize;
-                        for &v in out_row.iter() {
-                            if v != 0.0 {
-                                nz += 1;
-                                if v < 0.0 {
-                                    neg += 1;
+                        let is_minus = minus_flags.get(track_idx).copied().unwrap_or(false);
+                        if is_minus {
+                            let mut nz = 0usize;
+                            let mut neg = 0usize;
+                            for &v in out_row.iter() {
+                                if v != 0.0 {
+                                    nz += 1;
+                                    if v < 0.0 {
+                                        neg += 1;
+                                    }
+                                }
+                            }
+                            if nz > 0 && (neg as f32) / (nz as f32) >= 0.8 {
+                                for v in out_row.iter_mut() {
+                                    *v = -*v;
                                 }
                             }
                         }
-                        if nz > 0 && (neg as f32) / (nz as f32) >= 0.8 {
-                            for v in out_row.iter_mut() {
-                                *v = -*v;
-                            }
-                        }
-                    }
-                    usage
-                })
+                        usage
+                    },
+                )
                 .collect()
         });
         if profile {

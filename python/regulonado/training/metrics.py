@@ -74,25 +74,28 @@ def _make_compute_metrics(
         sp: np.ndarray, st: np.ndarray, spt: np.ndarray,
         sp2: np.ndarray, st2: np.ndarray, n: np.ndarray,
     ) -> np.ndarray:
-        num   = n * spt - sp * st
+        num = n * spt - sp * st
         denom = np.sqrt(
-            np.maximum(n * sp2 - sp ** 2, 0.0) * np.maximum(n * st2 - st ** 2, 0.0)
+            np.maximum(n * sp2 - sp**2, 0.0) * np.maximum(n * st2 - st**2, 0.0)
         )
-        return np.where(denom > 0, num / denom, np.nan)
+        result = np.full_like(num, np.nan, dtype=np.float64)
+        return np.divide(num, denom, out=result, where=denom > 0)
 
     def compute_metrics(eval_pred: EvalPrediction) -> dict[str, float]:
         # predictions: [N, T, 18] — sufficient stats accumulated over the full eval set
         stats = np.asarray(eval_pred.predictions, dtype=np.float64)
         s = stats.sum(axis=0)  # [T, 18] global sums
 
-        r_all   = _pearson_from_stats(s[:,0], s[:,1], s[:,2], s[:,3], s[:,4],  s[:,5])
-        r_topk  = _pearson_from_stats(s[:,6], s[:,7], s[:,8], s[:,9], s[:,10], s[:,11])
-        r_total = _pearson_from_stats(s[:,12], s[:,13], s[:,14], s[:,15], s[:,16], s[:,17])
+        r_all = _pearson_from_stats(s[:, 0], s[:, 1], s[:, 2], s[:, 3], s[:, 4], s[:, 5])
+        r_topk = _pearson_from_stats(s[:, 6], s[:, 7], s[:, 8], s[:, 9], s[:, 10], s[:, 11])
+        r_total = _pearson_from_stats(
+            s[:, 12], s[:, 13], s[:, 14], s[:, 15], s[:, 16], s[:, 17]
+        )
 
-        fin_all   = r_all[np.isfinite(r_all)]
-        fin_topk  = r_topk[np.isfinite(r_topk)]
+        fin_all = r_all[np.isfinite(r_all)]
+        fin_topk = r_topk[np.isfinite(r_topk)]
         fin_total = r_total[np.isfinite(r_total)]
-        topk_n    = int(round(float(stats[0, 0, 11]))) if stats.shape[0] > 0 else 0
+        topk_n = int(round(float(stats[0, 0, 11]))) if stats.shape[0] > 0 else 0
 
         return {
             "pearson_bin_median": float(np.median(fin_all)) if fin_all.size else float("nan"),
@@ -101,4 +104,5 @@ def _make_compute_metrics(
             ),
             "pearson_total_median": float(np.median(fin_total)) if fin_total.size else float("nan"),
         }
+
     return compute_metrics

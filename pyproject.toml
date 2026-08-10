@@ -117,7 +117,6 @@ Issues = "https://github.com/alsmith151/ReguloNado/issues"
 
 [project.scripts]
 regulonado = "regulonado.cli.app:main"
-regulonado-train = "regulonado.train:main"
 
 [tool.maturin]
 # Modern maturin mixed layout:
@@ -128,7 +127,7 @@ python-source = "python"
 module-name = "regulonado._rs"
 features = ["pyo3/extension-module"]
 include = ["python/configs/**/*.yaml", "python/regulonado/workflow/**/*"]
-exclude = ["tests/bench_*", "notes.md", "CLAUDE.md", "scripts/**/*", ".github/**/*"]
+exclude = ["tests/bench_*", "notes.md", "scripts/**/*", ".github/**/*"]
 
 [tool.uv]
 extra-build-dependencies = { flash-attn = ["torch", "psutil", "ninja"] }
@@ -139,7 +138,9 @@ url = "https://download.pytorch.org/whl/cu124"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu124" }
+torch = [
+    { index = "pytorch-cu124", marker = "sys_platform == 'linux'" },
+]
 
 [tool.ruff]
 line-length = 100

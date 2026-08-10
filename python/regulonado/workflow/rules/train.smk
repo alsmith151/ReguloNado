@@ -1,64 +1,86 @@
-"""Staged fine-tuning rules.
+"""Independent, staged fine-tuning runs."""
 
-Training runs as a sequence of phases. Each progressively unfreezes more of the
-backbone and warm-starts from the previous phase's best checkpoint, so the phases
-form a strict chain.
+import json
+import re
+import shlex
 
-The chain is expressed through file dependencies: phase N declares phase N-1's
-``trainer_state.json`` as an input. Snakemake derives the ordering from that, so
-there is no manual job-dependency bookkeeping and a partially-completed pipeline
-resumes correctly just by re-running.
-"""
+
+def _flatten_settings(settings, prefix=""):
+    flattened = {}
+    for key, value in settings.items():
+        name = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            flattened.update(_flatten_settings(value, name))
+        else:
+            flattened[name] = value
+    return flattened
+
+
+def _override_flags(wildcards):
+    """Render merged settings as repeatable, shell-safe CLI overrides."""
+    phase = PHASE_BY_NAME[wildcards.phase]
+    run = RUN_BY_NAME[wildcards.run]
+    merged = {}
+    for settings in (
+        config["train"].get("common", {}),
+        phase.get("settings", {}),
+        run.get("settings", {}),
+    ):
+        merged.update(_flatten_settings(settings))
+
+    # Run identity always wins over generic settings.
+    merged["seed"] = run["seed"]
+    merged["backbone.pretrained_name"] = run["pretrained_model"]
+
+    flags = []
+    for key, value in sorted(merged.items()):
+        rendered = json.dumps(value, separators=(",", ":"))
+        flags.extend(("--set", shlex.quote(f"{key}={rendered}")))
+    return " ".join(flags)
 
 
 rule train_phase:
-    """Run one fine-tuning phase.
-
-    One unit of work: train a single Hydra experiment config to completion,
-    writing checkpoints and ``trainer_state.json`` into the phase's run directory.
-
-    The first phase trains from the pretrained backbone. Every later phase
-    warm-starts from the best checkpoint of its predecessor, resolved at runtime
-    by workflow/scripts/resolve_checkpoint.py — the path cannot be known when the
-    DAG is planned, because it depends on which checkpoint scored best.
-    """
     input:
         dataset=str(training_dataset_dir() / "dataset_dict.json"),
         metadata=str(ENRICHED_METADATA),
         previous=previous_phase_state,
     params:
-        experiment=lambda w: PHASES[phase_index(w.phase)]["experiment"],
+        preset=lambda w: PHASE_BY_NAME[w.phase]["preset"],
         data_dir=str(training_dataset_dir()),
-        run_dir=lambda w: str(phase_run_dir(w.phase)),
+        run_dir=lambda w: str(phase_run_dir(w.run, w.phase)),
         nproc=config["train"]["nproc_per_node"],
-        # Empty for the first phase; otherwise resolve the predecessor's best
-        # checkpoint. Kept as a shell-level assignment rather than a params
-        # lambda so it is evaluated when the rule runs, not when the DAG is built.
+        overrides=_override_flags,
         prev_run_dir=lambda w: (
-            "" if phase_index(w.phase) == 0
-            else str(phase_run_dir(PHASE_NAMES[phase_index(w.phase) - 1]))
+            ""
+            if phase_index(w.phase) == 0
+            else str(phase_run_dir(w.run, PHASE_NAMES[phase_index(w.phase) - 1]))
         ),
         resolver=str(Path(workflow.basedir) / "scripts" / "resolve_checkpoint.py"),
     output:
-        state=str(TRAIN_DIR / "{phase}" / "trainer_state.json"),
+        state=str(TRAIN_DIR / "{run}" / "{phase}" / "trainer_state.json"),
+    wildcard_constraints:
+        run="|".join(re.escape(name) for name in RUN_NAMES),
+        phase="|".join(re.escape(name) for name in PHASE_NAMES),
     log:
-        str(RESULTS / "logs" / "train_{phase}.log"),
+        str(RESULTS / "logs" / "train_{run}_{phase}.log"),
     shell:
         r"""
         set -euo pipefail
 
-        INIT_ARG=""
+        INIT_ARGS=()
         if [ -n "{params.prev_run_dir}" ]; then
-            CKPT=$(python {params.resolver} "{params.prev_run_dir}")
-            echo "Warm-starting {wildcards.phase} from: $CKPT"
-            INIT_ARG="trainer.init_weights_from_checkpoint=$CKPT"
+            CKPT=$(python {params.resolver:q} "{params.prev_run_dir}")
+            echo "Warm-starting {wildcards.run}/{wildcards.phase} from: $CKPT"
+            INIT_ARGS=(--init-weights-from-checkpoint "$CKPT")
         fi
 
         regulonado train \
-            {params.data_dir} \
-            --experiment {params.experiment} \
-            --output-dir {params.run_dir} \
+            {params.data_dir:q} \
+            --preset {params.preset:q} \
+            --metadata {input.metadata:q} \
+            --output-dir {params.run_dir:q} \
             --nproc-per-node {params.nproc} \
-            $INIT_ARG \
-            > {log} 2>&1
+            {params.overrides} \
+            "${{INIT_ARGS[@]}}" \
+            > {log:q} 2>&1
         """

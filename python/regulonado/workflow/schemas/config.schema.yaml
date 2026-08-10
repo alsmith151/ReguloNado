@@ -1,0 +1,96 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+type: object
+additionalProperties: false
+required: [results_dir, inputs, build, recompress, scaling, train]
+properties:
+  results_dir:
+    type: string
+    minLength: 1
+  inputs:
+    type: object
+    additionalProperties: false
+    required: [intervals, fasta, bigwig_dir]
+    properties:
+      intervals: {type: string, minLength: 1}
+      fasta: {type: string, minLength: 1}
+      bigwig_dir: {type: string, minLength: 1}
+  build:
+    type: object
+    additionalProperties: false
+    required:
+      - context_length
+      - bin_size
+      - n_pred_bins
+      - shift_max_bp
+      - extract_threads
+      - arrow_write_threads
+      - arrow_batch_size
+      - compression
+      - stage_to_scratch
+      - drop_missing
+      - dedupe_tracks
+    properties:
+      context_length: {type: integer, minimum: 1}
+      bin_size: {type: integer, minimum: 1}
+      n_pred_bins: {type: integer, minimum: 1}
+      shift_max_bp: {type: integer, minimum: 0}
+      extract_threads: {type: integer, minimum: 1}
+      arrow_write_threads: {type: integer, minimum: 1}
+      arrow_batch_size: {type: integer, minimum: 1}
+      compression: {type: string, minLength: 1}
+      stage_to_scratch: {type: boolean}
+      drop_missing: {type: boolean}
+      dedupe_tracks: {type: string, minLength: 1}
+  recompress:
+    type: object
+    additionalProperties: false
+    required: [enabled, zstd_level, max_batch_size, workers]
+    properties:
+      enabled: {type: boolean}
+      zstd_level: {type: integer}
+      max_batch_size: {type: integer, minimum: 1}
+      workers: {type: integer, minimum: 1}
+  scaling:
+    type: object
+    additionalProperties: false
+    required: [method]
+    properties:
+      method: {enum: [tmm, original]}
+  train:
+    type: object
+    additionalProperties: false
+    required: [nproc_per_node, phases, runs]
+    properties:
+      nproc_per_node: {type: integer, minimum: 1}
+      common: {$ref: "#/$defs/settings"}
+      phases:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          additionalProperties: false
+          required: [name, preset]
+          properties:
+            name: {$ref: "#/$defs/name"}
+            preset:
+              enum: [head_only, unfreeze_output, deep_finetune, peak_finetune]
+            settings: {$ref: "#/$defs/settings"}
+      runs:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          additionalProperties: false
+          required: [name, seed, pretrained_model]
+          properties:
+            name: {$ref: "#/$defs/name"}
+            seed: {type: integer, minimum: 0}
+            pretrained_model: {type: string, minLength: 1}
+            settings: {$ref: "#/$defs/settings"}
+$defs:
+  name:
+    type: string
+    pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+  settings:
+    type: object
+    additionalProperties: true

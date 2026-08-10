@@ -53,7 +53,6 @@ impl BinningScratch {
     }
 }
 
-
 /// Bin a BigWig region into `n_bins` equal-width bins (mean coverage per bin).
 ///
 /// Writes into the caller-supplied `out` slice (length == n_bins).
@@ -194,4 +193,3 @@ pub(crate) fn bin_region_into<R: BBIFileRead>(
 
     BinningUsage::direct(interval_count)
 }
-

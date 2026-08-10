@@ -1,6 +1,6 @@
 # SLURM executor profile.
 #
-#   snakemake --configfile config/config.yaml --profile workflow/profiles/slurm
+#   regulonado pipeline my_runs.yaml --profile examples/slurm
 #
 # Every site-specific value lives here rather than in the workflow, so the rules
 # stay portable. EDIT THE PARTITION AND ACCOUNT NAMES — the defaults below are
@@ -45,11 +45,3 @@ set-resources:
     runtime: 1440
     mem_mb: 256000
     cpus_per_task: 16
-
-  predict:
-    slurm_partition: "CHANGEME_GPU_PARTITION"
-    slurm_account: "CHANGEME_GPU_ACCOUNT"
-    slurm_extra: "'--gres=gpu:1'"
-    runtime: 720
-    mem_mb: 64000
-    cpus_per_task: 8

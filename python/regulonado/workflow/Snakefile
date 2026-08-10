@@ -1,95 +1,78 @@
-"""ReguloNado end-to-end workflow.
+"""ReguloNado dataset and multi-run training workflow.
 
-Orchestrates the full pipeline:
-
-    build -> recompress -> scale factors -> enrich metadata
-          -> train phase 1 .. N (each warm-started from the previous best checkpoint)
-          -> predict
-
-Snakemake only orchestrates. Every rule shells out to the `regulonado` CLI, so the
-compute stays in the Rust extension and the Python package.
-
-Usage
------
-    snakemake --configfile config/config.yaml -n            # dry run: print the DAG
-    snakemake --configfile config/config.yaml --cores 8     # run locally
-    snakemake --configfile config/config.yaml \
-        --profile workflow/profiles/slurm                   # run on SLURM
-
-Cluster specifics (partition, account, GPU type) live in the executor profile,
-not here, so the workflow itself is portable between sites.
+Each configured run gets its own ordered phase chain. Runs are independent, so
+Snakemake can schedule them concurrently while still enforcing warm starts
+between phases of the same run.
 """
 
 from pathlib import Path
 
+from snakemake.utils import validate
 
-# The caller supplies the configuration through Snakemake's API/CLI.
+
+validate(config, str(Path(workflow.basedir) / "schemas" / "config.schema.yaml"))
+
+
+def _require_unique_names(items, section):
+    names = [item["name"] for item in items]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(
+            f"{section} names must be unique; repeated: {', '.join(duplicates)}"
+        )
 
 
 RESULTS = Path(config["results_dir"])
-
 DATASET_DIR = RESULTS / "dataset"
 RECHUNK_DIR = RESULTS / "dataset_rechunked"
 SCALING_DIR = RESULTS / "scaling"
 TRAIN_DIR = RESULTS / "train"
-PREDICT_DIR = RESULTS / "predict"
 
 PHASES = config["train"]["phases"]
-PHASE_NAMES = [p["name"] for p in PHASES]
+RUNS = config["train"]["runs"]
+_require_unique_names(PHASES, "train.phases")
+_require_unique_names(RUNS, "train.runs")
+
+PHASE_NAMES = [phase["name"] for phase in PHASES]
+RUN_NAMES = [run["name"] for run in RUNS]
+PHASE_BY_NAME = {phase["name"]: phase for phase in PHASES}
+RUN_BY_NAME = {run["name"]: run for run in RUNS}
 
 
 def phase_index(name):
-    """Return the 0-based position of a training phase by name."""
     return PHASE_NAMES.index(name)
 
 
-def phase_run_dir(name):
-    """Return the output directory for a training phase."""
-    return TRAIN_DIR / name
+def phase_run_dir(run, phase):
+    return TRAIN_DIR / run / phase
 
 
 def previous_phase_state(wildcards):
-    """Return the previous phase's trainer_state.json, or [] for the first phase.
-
-    This is what chains the training phases together: declaring the previous
-    phase's state file as an input makes Snakemake order the phases and refuse to
-    start one whose predecessor has not finished.
-    """
-    idx = phase_index(wildcards.phase)
-    if idx == 0:
+    """Chain a phase only to the preceding phase of the same run."""
+    index = phase_index(wildcards.phase)
+    if index == 0:
         return []
-    return str(phase_run_dir(PHASE_NAMES[idx - 1]) / "trainer_state.json")
+    return str(
+        phase_run_dir(wildcards.run, PHASE_NAMES[index - 1])
+        / "trainer_state.json"
+    )
 
 
 def training_dataset_dir():
-    """Return the dataset directory the training phases should read.
-
-    Points at the rechunked copy when recompression is enabled, otherwise the raw
-    build output.
-    """
     return RECHUNK_DIR if config["recompress"]["enabled"] else DATASET_DIR
 
 
-# The metadata that training consumes is the scale-factor-enriched copy.
 ENRICHED_METADATA = SCALING_DIR / "regulonado_metadata.enriched.json"
 
 
 rule all:
-    """Default target: the full pipeline through the final training phase.
-
-    Prediction is included only when `predict.enabled` is set, since it is
-    expensive and not always wanted.
-    """
     input:
-        str(phase_run_dir(PHASE_NAMES[-1]) / "trainer_state.json"),
-        *(
-            [str(PREDICT_DIR / "predictions.done")]
-            if config["predict"]["enabled"]
-            else []
+        expand(
+            str(TRAIN_DIR / "{run}" / PHASE_NAMES[-1] / "trainer_state.json"),
+            run=RUN_NAMES,
         ),
 
 
 include: "rules/dataset.smk"
 include: "rules/scaling.smk"
 include: "rules/train.smk"
-include: "rules/predict.smk"

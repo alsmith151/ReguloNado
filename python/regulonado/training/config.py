@@ -11,6 +11,71 @@ class ProvenanceConfig:
 
 
 @dataclass(slots=True)
+class DataConfig:
+    """Dataset settings accepted by the training entrypoint."""
+
+    path: str = ""
+    metadata_path: str | None = None
+    apply_scale: bool = True
+    apply_squash: bool = True
+    apply_clip: bool = True
+    streaming: bool = False
+    shuffle_buffer_ram_gb: float = 8.0
+    enable_rc_aug: bool = False
+    context_length: int = 524288
+    n_pred_bins: int = 6144
+
+
+@dataclass(slots=True)
+class ModelConfig:
+    """Settings for the Regulonado wrapper around a backbone and head."""
+
+    use_track_metadata: bool = False
+    share_condition_base_channels: bool = False
+    metadata_hidden: int = 32
+    activation_type: str = "softplus"
+
+
+@dataclass(slots=True)
+class BackboneConfig:
+    """Settings shared by the supported backbone adapters."""
+
+    name: str = "borzoi"
+    pretrained_name: str | None = None
+    target_length: int | None = None
+    config_overrides: dict[str, Any] = field(default_factory=dict)
+    allow_random_init: bool = False
+
+
+@dataclass(slots=True)
+class HeadConfig:
+    """Union of settings used by the supported prediction heads."""
+
+    type: str = "transfer_mlp"
+    hidden: int = 512
+    dropout: float = 0.0
+    refinement_kernel: int | None = None
+    mlp_hidden: int | None = None
+
+
+@dataclass(slots=True)
+class LossConfig:
+    """Union of settings used by the supported training losses."""
+
+    name: str = "poisson_multinomial"
+    delta: float | None = None
+    poisson_weight: float | None = None
+    topk_fraction: float | None = None
+    topk_weight: float | None = None
+    profile_weight: float | None = None
+    total_weight: float | None = None
+    bin_weight: float | None = None
+    topk_bin_weight: float | None = None
+    topk_bin_count: int | None = None
+    topk_huber_delta: float | None = None
+
+
+@dataclass(slots=True)
 class TrainerConfig:
     """Runtime training knobs shared by the Hydra entrypoint and Trainer wiring.
 
@@ -70,6 +135,8 @@ class TrainerConfig:
     # Best-model selection metric passed to TrainingArguments.
     metric_for_best_model: str = "eval_loss"
     greater_is_better: bool = False
+    # Number of strongest target bins used by the top-k Pearson metric.
+    topk_bins: int = 256
     # Stop training when eval metric has not improved for this many eval calls.
     # None disables early stopping.
     early_stopping_patience: int | None = None
@@ -97,7 +164,3 @@ class TrainerConfig:
 
     def resolved_eval_batch_size(self) -> int:
         return self.eval_batch_size or self.batch_size
-
-
-def nested_config(mapping: dict[str, Any] | None, cls: type[Any]) -> Any:
-    return cls(**(mapping or {}))

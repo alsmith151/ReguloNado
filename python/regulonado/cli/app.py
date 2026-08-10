@@ -4,6 +4,7 @@ import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from shlex import join as shell_join
 from typing import Annotated, Optional
 
 import typer
@@ -46,11 +47,8 @@ def _main_callback(
     """Build datasets, train models, run inference, and manage workflows."""
 
 
-@app.command(
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-)
+@app.command()
 def train(
-    ctx: typer.Context,
     dataset: Annotated[
         Path,
         typer.Argument(help="Saved Regulonado/Hugging Face dataset directory"),
@@ -59,10 +57,14 @@ def train(
         Optional[Path],
         typer.Option("--output-dir", "-o", help="Run directory for checkpoints and diagnostics"),
     ] = None,
-    experiment: Annotated[
+    preset: Annotated[
         str,
-        typer.Option("--experiment", "-e", help="Hydra experiment config to launch"),
-    ] = "condition_agnostic_borzoi",
+        typer.Option("--preset", "-p", help="Named training preset"),
+    ] = "head_only",
+    metadata: Annotated[
+        Optional[Path],
+        typer.Option("--metadata", help="Metadata JSON to use instead of the dataset copy"),
+    ] = None,
     nproc_per_node: Annotated[
         int,
         typer.Option(
@@ -112,16 +114,27 @@ def train(
         bool,
         typer.Option("--no-wandb", help="Disable W&B reporting for this run"),
     ] = False,
+    settings: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--set",
+            help="Override one setting as KEY=VALUE (repeatable)",
+        ),
+    ] = None,
+    print_config: Annotated[
+        bool,
+        typer.Option("--print-config", help="Print the resolved training config and exit"),
+    ] = False,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Print the resolved command without running it"),
     ] = False,
 ) -> None:
-    """Train a model with friendly options plus optional raw Hydra overrides.
+    """Train one model from a named preset.
 
-    Extra arguments after the options are passed directly to Hydra, for example:
-
-    regulonado train dataset/ --max-steps 1000 trainer.max_eval_samples=200
+    Use ``--set`` for less common settings, for example
+    ``--set trainer.max_eval_samples=200``. Use ``regulonado pipeline`` when
+    several independent runs or warm-start phases should be orchestrated together.
     """
     if resume_from_checkpoint and init_weights_from_checkpoint:
         typer.echo(
@@ -131,9 +144,11 @@ def train(
         raise typer.Exit(1)
 
     overrides = [
-        f"+experiment={experiment}",
+        f"+experiment={preset}",
         f"data.path={dataset}",
     ]
+    if metadata is not None:
+        overrides.append(f"data.metadata_path={metadata}")
     if output_dir is not None:
         overrides.append(f"output_dir={output_dir}")
     if resume_from_checkpoint is not None:
@@ -154,8 +169,30 @@ def train(
         overrides.append(f"trainer.num_workers={num_workers}")
     if no_wandb:
         overrides.append("trainer.report_to=[]")
-        overrides.append("trainer.fit_examples.log_to_wandb=false")
-    overrides.extend(ctx.args)
+    for setting in settings or []:
+        if "=" not in setting or not setting.split("=", 1)[0].strip():
+            raise typer.BadParameter(
+                f"Setting must be KEY=VALUE, got {setting!r}", param_hint="--set"
+            )
+        overrides.append(setting)
+
+    if print_config:
+        try:
+            from regulonado.training.compose import resolved_training_config
+        except ImportError as exc:
+            typer.echo(
+                "Hydra is required to inspect training presets. Install regulonado[train].",
+                err=True,
+            )
+            raise typer.Exit(127) from exc
+        try:
+            rendered = resolved_training_config(preset, overrides[1:])
+        except Exception as exc:
+            raise typer.BadParameter(
+                f"Could not compose preset {preset!r}: {exc}", param_hint="--preset/--set"
+            ) from exc
+        typer.echo(rendered)
+        return
 
     if nproc_per_node > 1:
         command = [
@@ -168,7 +205,7 @@ def train(
     else:
         command = [sys.executable, "-m", "regulonado.training.runner", *overrides]
 
-    typer.echo(" ".join(command))
+    typer.echo(shell_join(command))
     if dry_run:
         return
     raise typer.Exit(subprocess.run(command).returncode)
@@ -275,7 +312,7 @@ def calculate_original_scaling(
 
     df = compute_clip_thresholds(df)
 
-    # Put track_index first, then the fields consumed by train.py.
+    # Put the fields consumed during training first.
     priority = ["track_index", "scale_factor", "clip_soft", "clip_hard"]
     rest = [c for c in df.columns if c not in priority]
     df = df[priority + rest]
@@ -294,7 +331,7 @@ def calculate_tmm_scaling(
             "--scale-factors",
             "-s",
             help=(
-                "Scale-factors parquet from calculate-original-scaling "
+                "Scale-factors parquet from normalization original "
                 "(default: <metadata_dir>/scale_factors.parquet)"
             ),
         ),
@@ -352,16 +389,11 @@ def calculate_tmm_scaling(
     into ``final_track_records`` in the metadata JSON.
 
     \b
-    Typical workflow
-    ----------------
-    # 1. Compute RPKM→raw-counts scale factors:
-    regulonado calculate-original-scaling metadata.json
+    Typical workflow::
 
-    # 2. Add TMM correction on top:
-    regulonado calculate-tmm-scaling metadata.json
-
-    # 3. Write back into final_track_records:
-    regulonado enrich-metadata metadata.json scale_factors.parquet
+    regulonado normalization original metadata.json
+    regulonado normalization tmm metadata.json
+    regulonado enrich-metadata metadata.json scale_factors.parquet --output enriched.json
     """
     import json
 
@@ -385,7 +417,7 @@ def calculate_tmm_scaling(
     if not sf_path.exists():
         typer.echo(
             f"Scale-factors file not found: {sf_path}\n"
-            "Run 'regulonado calculate-original-scaling' first.",
+            "Run 'regulonado normalization original' first.",
             err=True,
         )
         raise typer.Exit(1)
@@ -399,7 +431,7 @@ def calculate_tmm_scaling(
         typer.echo(
             (
                 "Column 'scale_factor' missing from scale-factors file.  "
-                "Run calculate-original-scaling first."
+                "Run 'regulonado normalization original' first."
             ),
             err=True,
         )
@@ -503,11 +535,15 @@ def recompress_dataset(
 @app.command()
 def enrich_metadata(
     metadata: Annotated[
-        Path, typer.Argument(help="Path to regulonado_metadata.json to update in-place")
+        Path, typer.Argument(help="Source regulonado_metadata.json")
     ],
     scale_factors: Annotated[
         Path,
-        typer.Argument(help="Parquet (or CSV) produced by calculate-original-scaling"),
+        typer.Argument(help="Parquet or CSV produced by a normalization command"),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("--output", "-o", help="Output path for the enriched metadata JSON"),
     ],
     fields: Annotated[
         Optional[list[str]],
@@ -521,12 +557,7 @@ def enrich_metadata(
         ),
     ] = None,
 ) -> None:
-    """Write scale_factor / clip_soft / clip_hard into final_track_records in a metadata JSON.
-
-    Matches rows by track_index.  Writes the updated JSON back to the same file.
-    train.py reads these fields from final_track_records, so running this command
-    is the last step before training.
-    """
+    """Create training metadata containing scale and clipping values."""
     import json
 
     import pandas as pd
@@ -539,6 +570,10 @@ def enrich_metadata(
     if not scale_factors.exists():
         typer.echo(f"Scale-factors file not found: {scale_factors}", err=True)
         raise typer.Exit(1)
+    if output.resolve() == metadata.resolve():
+        raise typer.BadParameter(
+            "Output must differ from the source metadata file", param_hint="OUTPUT"
+        )
 
     sf_df = (
         pd.read_parquet(scale_factors)
@@ -550,6 +585,12 @@ def enrich_metadata(
     if missing:
         typer.echo(f"Fields missing from scale-factors file: {missing}", err=True)
         raise typer.Exit(1)
+    if "track_index" not in sf_df.columns:
+        typer.echo("Scale-factors file has no track_index column", err=True)
+        raise typer.Exit(1)
+    if sf_df["track_index"].duplicated().any():
+        typer.echo("Scale-factors file contains duplicate track_index values", err=True)
+        raise typer.Exit(1)
 
     sf_by_idx: dict[int, dict] = {
         int(row["track_index"]): {f: row[f] for f in fields_to_copy} for _, row in sf_df.iterrows()
@@ -559,6 +600,16 @@ def enrich_metadata(
         meta = json.load(fh)
 
     records = meta.get("final_track_records", [])
+    unmatched = [
+        int(record["track_index"])
+        for record in records
+        if int(record["track_index"]) not in sf_by_idx
+    ]
+    if unmatched:
+        typer.echo(
+            f"No scale factors found for track_index values: {unmatched[:10]}", err=True
+        )
+        raise typer.Exit(1)
     updated = 0
     for record in records:
         idx = int(record["track_index"])
@@ -567,10 +618,11 @@ def enrich_metadata(
             updated += 1
 
     meta["final_track_records"] = records
-    with metadata.open("w") as fh:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w") as fh:
         json.dump(meta, fh, indent=2)
 
-    typer.echo(f"Updated {updated}/{len(records)} track records in {metadata}")
+    typer.echo(f"Wrote {output} with {updated}/{len(records)} updated track records")
     typer.echo(f"Fields written: {fields_to_copy}")
 
 

@@ -7,25 +7,14 @@ rule scale_factors:
     One unit of work: read the built dataset's track statistics and emit one
     scale factor per track.
 
-    Two methods, selected by `scaling.method`:
-
-    * ``tmm``      — trimmed mean of M-values, computed from the dataset itself.
-                     No external tools needed. This is the default.
-    * ``original`` — derived from the original BigWig library sizes. Requires the
-                     BamNado binary on PATH; it is not pip-installable, so this
-                     method will fail on a plain `pip install regulonado`.
+    Both methods first infer original library sizes with BamNado. ``tmm`` then
+    adds a dataset-derived trimmed-mean correction.
     """
     input:
         metadata=str(DATASET_DIR / "regulonado_metadata.json"),
     params:
         method=config["scaling"]["method"],
-        bigwig_dir=config["inputs"]["bigwig_dir"],
         initial=str(SCALING_DIR / "initial_scale_factors.parquet"),
-        subcommand=lambda w: (
-            "normalization tmm"
-            if config["scaling"]["method"] == "tmm"
-            else "normalization original"
-        ),
     output:
         parquet=str(SCALING_DIR / "scale_factors.parquet"),
     log:
@@ -33,22 +22,18 @@ rule scale_factors:
     shell:
         r"""
         if [ "{params.method}" = "tmm" ]; then
-            regulonado normalization infer {params.bigwig_dir} --output {params.initial}
-            regulonado normalization tmm {input.metadata} {params.initial} --output {output.parquet}
+            regulonado normalization original {input.metadata:q} --output {params.initial:q}
+            regulonado normalization tmm {input.metadata:q} \
+                --scale-factors {params.initial:q} \
+                --output {output.parquet:q}
         else
-            regulonado normalization original {input.metadata} --output {output.parquet}
+            regulonado normalization original {input.metadata:q} --output {output.parquet:q}
         fi > {log} 2>&1
         """
 
 
 rule enrich_metadata:
-    """Fold the scale factors into the dataset metadata.
-
-    One unit of work: merge scale_factors.parquet into a copy of the dataset
-    metadata, producing the file the training phases read. Writing to a new path
-    rather than mutating the builder's output keeps the build rule's outputs
-    immutable, so re-running enrichment never invalidates the expensive build.
-    """
+    """Write a scale-factor-enriched copy of the dataset metadata."""
     input:
         metadata=str(DATASET_DIR / "regulonado_metadata.json"),
         parquet=str(SCALING_DIR / "scale_factors.parquet"),
@@ -58,6 +43,9 @@ rule enrich_metadata:
         str(RESULTS / "logs" / "enrich_metadata.log"),
     shell:
         r"""
-        cp {input.metadata} {output.enriched}
-        regulonado enrich-metadata {output.enriched} {input.parquet} > {log} 2>&1
+        regulonado enrich-metadata \
+            {input.metadata:q} \
+            {input.parquet:q} \
+            --output {output.enriched:q} \
+            > {log:q} 2>&1
         """

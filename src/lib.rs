@@ -13,12 +13,12 @@
 //!    reads each sample's interval from every BigWig per batch. Retained
 //!    as a fallback / reference path for parity testing.
 
+mod arrow_schema;
 mod bigwig_io;
 mod binning;
 mod chromosome_scan_writer;
 mod fasta;
 mod io_utils;
-mod arrow_schema;
 mod sample_batch_writer;
 
 use pyo3::prelude::*;

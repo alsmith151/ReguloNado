@@ -1,6 +1,4 @@
-use arrow_array::{
-    ArrayRef, Float32Array, Int8Array, ListArray,
-};
+use arrow_array::{ArrayRef, Float32Array, Int8Array, ListArray};
 use arrow_buffer::{OffsetBuffer, ScalarBuffer};
 use arrow_schema::{DataType, Field, Schema};
 use serde_json::json;

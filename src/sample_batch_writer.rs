@@ -1,9 +1,7 @@
+use crate::arrow_schema::{hf_arrow_schema, make_2d_f32_array, make_2d_i8_array};
 use crate::bigwig_io::{extract_bigwig_labels_batch, open_bigwig_handles};
 use crate::fasta::{load_fasta_index, read_one_hot_sequence};
 use crate::io_utils::{ipc_write_options, maybe_log_progress};
-use crate::arrow_schema::{
-    hf_arrow_schema, make_2d_f32_array, make_2d_i8_array,
-};
 use arrow_array::{
     builder::{Int64Builder, StringBuilder},
     ArrayRef, RecordBatch,
