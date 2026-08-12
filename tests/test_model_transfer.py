@@ -19,13 +19,11 @@ from regulonado.model import (
     TransferMLPPerturbHead,
     build_condition_shared_track_index,
 )
-from regulonado.train import _build_optimizer, _normalise_checkpoint_mode, run_training
-from regulonado.training import (
-    TrainerConfig,
-    get_transform,
-    scaled_poisson_multinomial_loss,
-    stack_batch_tensors,
-)
+from regulonado.training.config import TrainerConfig
+from regulonado.training.data import stack_batch_tensors
+from regulonado.training.losses import scaled_poisson_multinomial_loss
+from regulonado.training.runner import _build_optimizer, _normalise_checkpoint_mode, run_training
+from regulonado.training.transforms import get_transform
 
 
 class DummyBackbone(nn.Module):
@@ -270,6 +268,21 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
 }
 """.strip()
     )
+    enriched_metadata = tmp_path / "regulonado_metadata.enriched.json"
+    enriched_metadata.write_text(
+        """
+{
+  "context_length": 12,
+  "n_pred_bins": 12,
+  "bin_size": 1,
+  "shift_max_bp": 0,
+  "final_track_records": [
+    {"track_index": 0, "condition_id": 2, "assay_type_id": 0, "scale_factor": 2.0},
+    {"track_index": 1, "condition_id": 3, "assay_type_id": 0, "scale_factor": 3.0}
+  ]
+}
+""".strip()
+    )
 
     summary = run_training(
         {
@@ -277,6 +290,7 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
             "output_dir": str(tmp_path / "run"),
             "data": {
                 "path": str(data_dir),
+                "metadata_path": str(enriched_metadata),
                 "apply_scale": False,
                 "apply_squash": False,
                 "apply_clip": False,
@@ -318,13 +332,6 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
                 "freeze_backbone": True,
                 "unfreeze_backbone_stages_from_output_end": 1,
                 "unfreeze_module_names": [],
-                "fit_metrics": {"enabled": True, "save_per_track": True},
-                "fit_examples": {
-                    "enabled": True,
-                    "num_examples": 1,
-                    "tracks_per_example": 1,
-                    "log_to_wandb": False,
-                },
                 "provenance": {"enabled": True, "save_git_diff": False},
             },
         },
@@ -332,6 +339,7 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
     )
 
     assert summary["history"]["train/loss"]
+    assert summary["metadata_path"] == str(enriched_metadata)
     assert (tmp_path / "run" / "training_summary.json").exists()
     assert (tmp_path / "run" / "provenance.json").exists()
     assert (tmp_path / "run" / "resolved_config.json").exists()
@@ -340,4 +348,4 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
 
     saved_config = RegulonadoConfig.from_pretrained(tmp_path / "run")
     assert saved_config.track_names == ["track0", "track1"]
-    assert saved_config.track_metadata["track_condition_ids"] == [0, 1]
+    assert saved_config.track_metadata["track_condition_ids"] == [2, 3]

@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from loguru import logger
 from transformers import (
     TrainerCallback,
     TrainerControl,
@@ -57,7 +58,18 @@ def _plot_examples(
     """
     if preds.shape[0] == 0:
         return
-    import matplotlib
+    # Degrade to a warning rather than raising: this runs inside the training loop, and
+    # aborting a long run because an optional plotting dependency is absent is worse than
+    # losing the diagnostic plots. matplotlib is declared in the `train` extra, so this
+    # only trips for a hand-assembled environment.
+    try:
+        import matplotlib
+    except ModuleNotFoundError:
+        logger.warning(
+            "matplotlib is not installed — skipping example plots. "
+            "Install it with `pip install regulonado[train]` or `pip install matplotlib`."
+        )
+        return
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt

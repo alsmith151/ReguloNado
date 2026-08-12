@@ -1,12 +1,23 @@
 name: Release
 
+# Triggered two ways:
+#   * workflow_dispatch — how release-please starts this after tagging. Tags pushed by
+#     the default GITHUB_TOKEN do NOT trigger workflows, but workflow_dispatch is an
+#     explicit exemption, so this is the path that actually fires on a normal release.
+#   * push tags — for tags pushed manually by a human, where the exemption is not needed.
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish (e.g. v0.1.0)"
+        required: true
+        type: string
   push:
     tags:
       - "v*"
 
 permissions:
-  id-token: write
+  contents: read
 
 jobs:
   build:
@@ -30,6 +41,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: PyO3/maturin-action@v1
         with:
@@ -47,6 +60,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
 

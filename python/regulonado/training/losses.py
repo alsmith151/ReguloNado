@@ -3,35 +3,11 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from regulonado.metrics import _paired_group_masks
+
 
 def squash(y: torch.Tensor, eps: float = 1e-2) -> torch.Tensor:
     return torch.sign(y) * (torch.sqrt(torch.abs(y).clamp(min=0) + 1) - 1) + eps * y
-
-
-def _paired_group_masks(
-    condition_ids: torch.Tensor,
-    shared_track_index: torch.Tensor | None = None,
-    *,
-    baseline_condition_id: int = 0,
-    perturbed_condition_id: int = 1,
-) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    condition_ids = condition_ids.to(dtype=torch.long)
-    if shared_track_index is None:
-        baseline_mask = condition_ids == baseline_condition_id
-        perturbed_mask = condition_ids == perturbed_condition_id
-        if baseline_mask.any() and perturbed_mask.any():
-            return [(baseline_mask, perturbed_mask)]
-        return []
-
-    shared_track_index = shared_track_index.to(device=condition_ids.device, dtype=torch.long)
-    pair_masks: list[tuple[torch.Tensor, torch.Tensor]] = []
-    for group_id in torch.unique(shared_track_index, sorted=True):
-        in_group = shared_track_index == group_id
-        baseline_mask = in_group & (condition_ids == baseline_condition_id)
-        perturbed_mask = in_group & (condition_ids == perturbed_condition_id)
-        if baseline_mask.any() and perturbed_mask.any():
-            pair_masks.append((baseline_mask, perturbed_mask))
-    return pair_masks
 
 
 def scaled_poisson_multinomial_loss(
@@ -97,6 +73,42 @@ def poisson_multinomial_loss(
     if rescale:
         combined_loss = combined_loss * 2.0 / (1.0 + poisson_weight)
     return combined_loss.mean()
+
+
+def poisson_multinomial_binwise_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    poisson_weight: float = 1.0,
+    epsilon: float = 1e-6,
+) -> torch.Tensor:
+    """Multinomial profile term + a PER-BIN Poisson NLL term.
+
+    Unlike ``poisson_multinomial_loss``, whose Poisson term is on the summed total count
+    (``s_pred`` vs ``s_true``) and therefore only constrains *how much* signal a window gets,
+    here the Poisson term is computed per bin (``pred`` vs ``target``).  A true-zero bin with
+    prediction ``lambda`` costs ``~lambda`` with a constant gradient of 1, so misplaced /
+    "fake" peaks are penalised directly rather than being free as long as the total matches.
+    The multinomial term is retained purely as a profile-shape regulariser; the per-bin
+    penalisation comes entirely from the Poisson term.
+
+    Args:
+        pred: model predictions [B, T, L].
+        target: ground-truth signal [B, T, L].
+        poisson_weight: weight on the per-bin Poisson term relative to the multinomial term.
+            The per-bin Poisson is the workhorse here, so this defaults to 1.0 (vs 0.2 for the
+            total-count variant).
+    """
+    seq_len = target.shape[-1]
+    y_true = target.float() + epsilon
+    y_pred = pred.float() + epsilon
+    s_pred = y_pred.sum(dim=-1, keepdim=True)
+    p_pred = y_pred / s_pred
+    multinomial_term = -(y_true * torch.log(p_pred)).sum(dim=-1).mean() / seq_len
+    # Per-bin Poisson NLL; reduction="mean" already averages over bins, so no /seq_len here.
+    poisson_term = F.poisson_nll_loss(
+        y_pred, target.float(), log_input=False, eps=0.0, full=False, reduction="mean"
+    )
+    return multinomial_term + poisson_weight * poisson_term
 
 
 def transfer_calibration_loss(
@@ -174,12 +186,16 @@ def topk_additive_loss(
     L = pred.shape[-1]
     k = max(1, int(round(topk_fraction * L)))
 
-    base_loss = poisson_multinomial_loss(pred, target, poisson_weight=poisson_weight, epsilon=epsilon)
+    base_loss = poisson_multinomial_loss(
+        pred, target, poisson_weight=poisson_weight, epsilon=epsilon
+    )
 
     topk_idx = target.topk(k, dim=-1).indices          # [B, T, k]
     pred_k   = pred.gather(-1, topk_idx)
     target_k = target.gather(-1, topk_idx)
-    peak_loss = poisson_multinomial_loss(pred_k, target_k, poisson_weight=poisson_weight, epsilon=epsilon)
+    peak_loss = poisson_multinomial_loss(
+        pred_k, target_k, poisson_weight=poisson_weight, epsilon=epsilon
+    )
 
     return base_loss + topk_weight * peak_loss
 

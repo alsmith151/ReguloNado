@@ -2,29 +2,32 @@
 name = "regulonado_rs"
 version = "0.1.0"
 edition = "2021"
+description = "Fast BigWig/FASTA to Arrow dataset construction for sequence-to-function genomics models"
+license = "BSD-3-Clause"
+repository = "https://github.com/alsmith151/ReguloNado"
+readme = "README.md"
+authors = ["alsmith <asmith151@googlemail.com>"]
+keywords = ["genomics", "bioinformatics", "bigwig", "arrow"]
+categories = ["science"]
+rust-version = "1.85"
 
 [lib]
 name = "regulonado_rs"
 crate-type = ["cdylib"]
 
-[features]
-debug-writers = []
-
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
-numpy = "0.23"
-ndarray = "0.16"
 bigtools = { version = "0.5", default-features = false, features = ["read"] }
 rayon = "1"
-byteorder = "1"
 arrow-array = "56"
 arrow-buffer = "56"
 arrow-ipc = { version = "56", features = ["lz4", "zstd"] }
 arrow-schema = "56"
 serde_json = "1"
-wide = "0.7"
 
 [profile.release]
 lto = true
 codegen-units = 1
 opt-level = 3
+
+[workspace]

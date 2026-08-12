@@ -5,7 +5,14 @@
     ".": {
       "release-type": "python",
       "package-name": "regulonado",
-      "changelog-path": "CHANGELOG.md"
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.package.version"
+        }
+      ]
     }
   }
 }

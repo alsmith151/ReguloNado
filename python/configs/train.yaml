@@ -4,124 +4,72 @@ defaults:
   - loss: poisson_multinomial
   - _self_
 
-# Default profile targets plain transfer learning on new data.
-# Condition-aware perturbation heads remain available via overrides such as
-# `head=residual_film model.use_track_metadata=true model.share_condition_base_channels=true`.
-
-# Global random seed used for Python, NumPy, and Torch.
+# Override these values directly or start from one of the experiment presets.
 seed: 42
-# Final run directory; defaults to Hydra's timestamped output folder.
 output_dir: ${hydra:runtime.output_dir}
 
 data:
-  # Path to a saved Hugging Face dataset directory produced by Regulonado.
+  # Dataset directory created by `regulonado build`.
   path: ???
-  # Multiply the stored BigWig signal (normalised coverage / RPKM) by per-track scale factors
-  # before loss computation.  Scale factors are inferred at dataset-build time from library size
-  # and bin width; multiplying by them converts the signal to raw read counts.  Disabling this
-  # trains on normalised coverage instead of counts, which is NOT recommended as it removes the
-  # absolute-magnitude information the Poisson loss depends on.
+  # Optional enriched metadata file. null uses metadata stored with the dataset.
+  metadata_path: null
   apply_scale: true
-  # Apply the Borzoi-style squash transform (x+1)^0.75 - 1 after optional scaling.
-  # Squash compresses the raw-count dynamic range so that background bins and peak bins both
-  # contribute meaningfully to gradient updates.  Disable to train on raw count scale — in
-  # that case use a loss that is appropriate for count data (e.g. poisson_nll) rather than
-  # poisson_multinomial, and lower learning_rate to compensate for larger gradient magnitudes.
   apply_squash: true
-  # Clamp targets using per-track clip thresholds from metadata or defaults.
   apply_clip: true
-  # Stream Arrow shards from disk one at a time instead of loading into RAM.
-  # Required when Arrow files use LZ4/Zstd compression (mmap is not possible on compressed IPC).
-  # When true, trainer.max_steps must be set — epoch counting is unavailable.
   streaming: false
-  # CPU RAM budget for the streaming shuffle buffer. The number of samples held in memory is
-  # estimated from dataset metadata at runtime (sequence + label tensor sizes).
   shuffle_buffer_ram_gb: 8.0
-  # Enable random reverse-complement augmentation on the training split only.
   enable_rc_aug: false
-  # Expected cropped sequence length fed to the backbone after any shift crop.
   context_length: 524288
-  # Expected number of output bins after any shift crop.
   n_pred_bins: 6144
 
 model:
-  # Default transfer-learning setup: ignore per-track metadata fields in the head.
   use_track_metadata: false
-  # Only matters when metadata is enabled for FiLM-style perturbation heads.
   share_condition_base_channels: false
-  # Hidden width used by the metadata encoder inside condition-aware heads.
   metadata_hidden: 32
-  # Positive-output activation applied by the selected head.
   activation_type: softplus
 
 trainer:
-  # Per-device train batch size.
+  # Data loading
   batch_size: 1
-  # Per-device validation batch size.
   eval_batch_size: 1
-  # DataLoader worker count per process (tune to CPUs-per-rank; 8 suits 32 CPUs / 2 GPUs).
   num_workers: 8
-  # Keep DataLoader workers alive between iterations (no-op when num_workers=0).
   persistent_workers: true
-  # Batches prefetched per worker; null uses PyTorch default of 2.
   prefetch_factor: 2
-  # Learning rate for head parameters.
+
+  # Optimisation
   learning_rate: 1.0e-3
-  # Optional lower learning rate for the backbone.
   backbone_learning_rate: 1.0e-4
-  # AdamW weight decay.
   weight_decay: 1.0e-2
-  # Scheduler name passed to Hugging Face's get_scheduler.
   scheduler: linear
-  # Frequency of training logs in optimizer-step units.
-  log_every_n_steps: 50
-  # Validation eval frequency in optimizer-step units; falls back to checkpoint_every_n_steps,
-  # then log_every_n_steps when null.
-  eval_every_n_steps: null
-  # Warmup steps in optimizer-step units.
   warmup_steps: 0
-  # Used when max_steps is null.
   max_epochs: 1
-  # Override epoch-based training with a fixed optimizer-step budget.
   max_steps: null
-  # Accumulate gradients over this many forward passes.
   gradient_accumulation_steps: 1
-  # no, fp16, or bf16.
   mixed_precision: bf16
-  # Global gradient clipping norm.
   gradient_clip_norm: 1.0
-  # Save checkpoints every N optimizer steps; null disables checkpoint saves.
+
+  # Logging, evaluation, and checkpoints
+  log_every_n_steps: 50
+  eval_every_n_steps: null
   checkpoint_every_n_steps: null
-  # Full HF Trainer resume. Use true to auto-detect latest checkpoint in output_dir.
-  resume_from_checkpoint: null
-  # Warm start from model weights only; creates fresh optimizer/scheduler/RNG state.
-  init_weights_from_checkpoint: null
-  # Best-model selection metric.
-  # Available: eval_loss (greater_is_better: false),
-  #            pearson_bin_median, pearson_total_median (greater_is_better: true),
-  #            pearson_top<K>_median (e.g. pearson_top128_median; greater_is_better: true).
   metric_for_best_model: eval_loss
   greater_is_better: false
-  # Logging backends: [] for none, ["wandb"] to enable Weights & Biases.
-  report_to: []
-  # Freeze the backbone before optional selective unfreezing.
-  freeze_backbone: true
-  # Unfreeze the final N adapter-reported backbone stages nearest the model output.
-  # For Borzoi this means transformer blocks plus final_joined_convs; for Enformer,
-  # transformer blocks plus final_pointwise, in the order returned by iter_named_blocks().
-  unfreeze_backbone_stages_from_output_end: 0
-  # Explicit adapter-reported module names to unfreeze.
-  unfreeze_module_names: []
-  # Flush eval predictions/labels to CPU every N steps. null = accumulate entirely on GPU
-  # (safe because prediction_step reduces labels to [batch, n_tracks] before accumulation).
+  topk_bins: 256
+  early_stopping_patience: null
+  early_stopping_threshold: 0.0
   eval_accumulation_steps: null
-  # Subsample validation to at most N examples per eval. null = full validation set.
-  # 500–1000 is enough for stable pearson_bin_median across many tracks and is much faster.
   max_eval_samples: null
-  # Run a full eval pass before the first training step to establish a baseline.
   eval_on_start: true
-  # Number of eval examples to save prediction plots for. 0 disables plotting.
   num_plot_examples: 4
+  report_to: []
+
+  # Backbone and restart behavior
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 0
+  unfreeze_module_names: []
+  resume_from_checkpoint: null
+  init_weights_from_checkpoint: null
+
   provenance:
     enabled: true
     save_git_diff: true

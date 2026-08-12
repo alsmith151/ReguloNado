@@ -1,0 +1,111 @@
+"""ReguloNado dataset and multi-run training workflow.
+
+Each configured run gets its own ordered phase chain. Runs are independent, so
+Snakemake can schedule them concurrently while still enforcing warm starts
+between phases of the same run.
+"""
+
+from pathlib import Path
+
+from snakemake.utils import validate
+
+
+validate(config, str(Path(workflow.basedir) / "schemas" / "config.schema.yaml"))
+
+if config["scaling"]["method"] == "bamnado" and not config["inputs"].get("bam_dir"):
+    raise ValueError("inputs.bam_dir is required when scaling.method is 'bamnado'")
+
+SEQNADO_PROJECTS = config["inputs"].get("seqnado_projects") or []
+
+if config["scaling"]["method"] == "seqnado":
+    # SeqNado's normalisation factors are only comparable within one project, so
+    # reusing them across an aggregated dataset would put tracks on different
+    # scales without saying so. TMM is derived from the merged dataset instead.
+    # Naming a single project does not rescue an aggregated dataset: tracks from
+    # the other projects have no entry in that project's table, so scaling would
+    # fail once it ran. Reject it here instead.
+    if len(SEQNADO_PROJECTS) > 1:
+        raise ValueError(
+            "scaling.method 'seqnado' reuses one project's normalisation factors, "
+            f"but {len(SEQNADO_PROJECTS)} projects are configured. Use scaling.method "
+            "'tmm' — it is derived from the merged dataset and so is comparable "
+            "across all of them."
+        )
+    if not SEQNADO_PROJECTS and not config["scaling"].get("seqnado_project"):
+        raise ValueError(
+            "scaling.method 'seqnado' requires scaling.seqnado_project or "
+            "inputs.seqnado_projects"
+        )
+
+
+def seqnado_scaling_project():
+    """The project whose normalisation factors scaling.method 'seqnado' reuses."""
+    explicit = config["scaling"].get("seqnado_project")
+    if explicit:
+        return explicit
+    return SEQNADO_PROJECTS[0]["path"]
+
+
+def _require_unique_names(items, section):
+    names = [item["name"] for item in items]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(
+            f"{section} names must be unique; repeated: {', '.join(duplicates)}"
+        )
+
+
+RESULTS = Path(config["results_dir"])
+DATASET_DIR = RESULTS / "dataset"
+RECHUNK_DIR = RESULTS / "dataset_rechunked"
+SCALING_DIR = RESULTS / "scaling"
+TRAIN_DIR = RESULTS / "train"
+
+PHASES = config["train"]["phases"]
+RUNS = config["train"]["runs"]
+_require_unique_names(PHASES, "train.phases")
+_require_unique_names(RUNS, "train.runs")
+
+PHASE_NAMES = [phase["name"] for phase in PHASES]
+RUN_NAMES = [run["name"] for run in RUNS]
+PHASE_BY_NAME = {phase["name"]: phase for phase in PHASES}
+RUN_BY_NAME = {run["name"]: run for run in RUNS}
+
+
+def phase_index(name):
+    return PHASE_NAMES.index(name)
+
+
+def phase_run_dir(run, phase):
+    return TRAIN_DIR / run / phase
+
+
+def previous_phase_state(wildcards):
+    """Chain a phase only to the preceding phase of the same run."""
+    index = phase_index(wildcards.phase)
+    if index == 0:
+        return []
+    return str(
+        phase_run_dir(wildcards.run, PHASE_NAMES[index - 1])
+        / "trainer_state.json"
+    )
+
+
+def training_dataset_dir():
+    return RECHUNK_DIR if config["recompress"]["enabled"] else DATASET_DIR
+
+
+ENRICHED_METADATA = SCALING_DIR / "regulonado_metadata.enriched.json"
+
+
+rule all:
+    input:
+        expand(
+            str(TRAIN_DIR / "{run}" / PHASE_NAMES[-1] / "trainer_state.json"),
+            run=RUN_NAMES,
+        ),
+
+
+include: "rules/dataset.smk"
+include: "rules/scaling.smk"
+include: "rules/train.smk"

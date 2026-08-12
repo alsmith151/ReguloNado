@@ -1,12 +1,27 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "regulonado"
 version = "0.1.0"
-description = "Generic sequence-to-function model finetuning"
+description = "Build Arrow datasets from BigWig/FASTA and finetune sequence-to-function genomics models"
 requires-python = ">=3.12,<3.14"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [{ name = "alsmith", email = "asmith151@googlemail.com" }]
+keywords = ["genomics", "bioinformatics", "deep-learning", "bigwig", "arrow", "enformer", "borzoi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
 
 # Core: minimum to import the package and run the CLI without any ML deps.
 dependencies = [
@@ -38,10 +53,12 @@ train = [
     "borzoi-pytorch",
     "enformer-pytorch",
     "hydra-core>=1.3",
-    "hydra-submitit-launcher>=1.2",
     "lightning>=2.2",
+    # Used by the example-plot training callback, not just the viz extra.
+    "matplotlib",
     "peft",
     "torch>=2.5",
+    "torchmetrics>=1.0",
     "transformers>=5.12.1",
     "wandb>=0.16",
 ]
@@ -85,15 +102,32 @@ test = [
     "pytest>=9.1.1",
 ]
 
+# Snakemake workflow execution through the Python API.
+workflow = [
+    "snakemake>=9.12,<10",
+]
+
+# SeqNado interoperability: read tracks, sample metadata and normalisation
+# factors straight out of a SeqNado project. Kept optional because SeqNado pins
+# pydantic exactly and pulls in a full NGS stack that model training never needs.
+# The project API (seqnado.open_project) is not in any published release yet;
+# until 1.1 ships, install it from the development branch:
+#   pip install "seqnado @ git+https://github.com/Milne-Group/SeqNado@develop"
+seqnado = [
+    "seqnado>=1.1",
+]
+
 # ── convenience meta-extra ────────────────────────────────────────────────────
 all = ["regulonado[data,train,viz]"]
 
+
 [project.urls]
 Repository = "https://github.com/alsmith151/ReguloNado"
+Homepage = "https://github.com/alsmith151/ReguloNado"
+Issues = "https://github.com/alsmith151/ReguloNado/issues"
 
 [project.scripts]
-regulonado = "regulonado.__main__:main"
-regulonado-train = "regulonado.train:main"
+regulonado = "regulonado.cli.app:main"
 
 [tool.maturin]
 # Modern maturin mixed layout:
@@ -103,7 +137,8 @@ regulonado-train = "regulonado.train:main"
 python-source = "python"
 module-name = "regulonado._rs"
 features = ["pyo3/extension-module"]
-include = ["python/configs/**/*.yaml"]
+include = ["python/configs/**/*.yaml", "python/regulonado/workflow/**/*"]
+exclude = ["tests/bench_*", "notes.md", "scripts/**/*", ".github/**/*"]
 
 [tool.uv]
 extra-build-dependencies = { flash-attn = ["torch", "psutil", "ninja"] }
@@ -114,7 +149,9 @@ url = "https://download.pytorch.org/whl/cu124"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu124" }
+torch = [
+    { index = "pytorch-cu124", marker = "sys_platform == 'linux'" },
+]
 
 [tool.ruff]
 line-length = 100

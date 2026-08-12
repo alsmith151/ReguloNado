@@ -1,0 +1,68 @@
+# Build one dataset, normalize it with BamNado csaw-background, then train
+# independent model folds. Replace the four /path/to/... values before running.
+results_dir: results/bamnado_csaw_folds
+
+inputs:
+  intervals: /path/to/intervals.bed
+  fasta: /path/to/genome.fa
+  bigwig_dir: /path/to/bigwigs
+  # BAM stems must match the BigWig stems: sample_1.bigWig -> sample_1.bam.
+  bam_dir: /path/to/bams
+
+build:
+  context_length: 524288
+  bin_size: 32
+  n_pred_bins: 6144
+  shift_max_bp: 64
+  extract_threads: 32
+  arrow_write_threads: 4
+  arrow_batch_size: 512
+  compression: lz4
+  stage_to_scratch: true
+  drop_missing: true
+  dedupe_tracks: content
+
+recompress:
+  enabled: true
+  zstd_level: 3
+  max_batch_size: 4
+  workers: 8
+
+scaling:
+  method: bamnado
+  bamnado_method: csaw-background
+
+train:
+  nproc_per_node: 2
+
+  # Applied to every fold and every phase.
+  common:
+    trainer:
+      num_workers: 8
+      report_to: [wandb]
+
+  phases:
+    - name: head_only
+      preset: head_only
+    - name: unfreeze_output
+      preset: unfreeze_output
+    - name: deep_finetune
+      preset: deep_finetune
+    - name: peak_finetune
+      preset: peak_finetune
+
+  # Each entry is an independent model fold. Phases within a fold warm-start
+  # from the preceding phase; separate folds can run concurrently.
+  runs:
+    - name: fold_0
+      seed: 0
+      pretrained_model: /path/to/pretrained/model
+    - name: fold_1
+      seed: 1
+      pretrained_model: /path/to/pretrained/model
+    - name: fold_2
+      seed: 2
+      pretrained_model: /path/to/pretrained/model
+    - name: fold_3
+      seed: 3
+      pretrained_model: /path/to/pretrained/model

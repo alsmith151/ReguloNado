@@ -25,6 +25,25 @@ class BackboneAdapter(Iterable):
 
 @dataclass(slots=True)
 class FreezePolicy:
+    """Policy for freezing and unfreezing model components during training.
+
+    Controls which parts of the backbone are trainable. By default, the entire
+    backbone is frozen (backbone-as-feature-extractor). Stages can be
+    selectively unfrozen from the output end or by module name.
+
+    Parameters
+    ----------
+    freeze_backbone : bool, optional
+        If True (default), freeze all backbone parameters. Then selectively
+        unfreeze using other fields.
+    unfreeze_backbone_stages_from_output_end : int, optional
+        Number of backbone stages (blocks) to unfreeze starting from the end.
+        By default 0 (all frozen).
+    unfreeze_module_names : tuple[str, ...], optional
+        Names of specific modules to unfreeze (e.g., ("transformer.10",)).
+        Empty by default.
+    """
+
     freeze_backbone: bool = True
     unfreeze_backbone_stages_from_output_end: int = 0
     unfreeze_module_names: tuple[str, ...] = field(default_factory=tuple)
@@ -67,7 +86,12 @@ class RegulonadoModel(PreTrainedModel):
 
     def forward(self, input_ids: torch.Tensor, **head_kwargs: torch.Tensor | None) -> torch.Tensor:
         features = self.backbone.forward_features(input_ids)
-        return self.head(features.float(), **head_kwargs)
+        # Match the head's parameter dtype rather than hardcoding float32: under
+        # autocast training the head's master weights are float32 (so this is a
+        # no-op vs. .float()), but a model loaded at bf16/fp16 for inference
+        # keeps features and head weights on the same dtype.
+        head_dtype = next(self.head.parameters(), features).dtype
+        return self.head(features.to(head_dtype), **head_kwargs)
 
     def head_parameters(self) -> list[nn.Parameter]:
         return list(self.head.parameters())

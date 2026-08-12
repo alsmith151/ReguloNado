@@ -1,6 +1,12 @@
 use arrow_ipc::{writer::IpcWriteOptions, CompressionType, MetadataVersion};
 use std::time::{Duration, Instant};
 
+/// Log progress at most once per 30 seconds, or when finished.
+///
+/// Computes progress percentage, elapsed time, rate (items/s), and estimated time
+/// to completion, printing to stderr in the format `[regulonado_rs] {label}: {done}/{total} ...`.
+/// Updates the `last_log` timestamp if a log is printed. Intended for long-running tasks
+/// to avoid spamming stderr while still giving visibility into progress.
 pub(crate) fn maybe_log_progress(
     last_log: &mut Instant,
     started: Instant,
@@ -32,6 +38,37 @@ pub(crate) fn maybe_log_progress(
     }
 }
 
+/// Configure the global Rayon pool, warning if it was already initialised.
+///
+/// Rayon's global pool can only be built once per process. A second call — which happens
+/// whenever a writer entry point is invoked more than once from the same interpreter —
+/// fails, and the requested `n_threads` is quietly ignored. Previously that failure was
+/// discarded with `.ok()`, so the thread count a caller passed had no effect and no
+/// diagnostic. The pool still cannot be rebuilt, but at least the mismatch is now visible.
+pub(crate) fn configure_global_rayon(n_threads: Option<usize>) {
+    let Some(nt) = n_threads else {
+        return;
+    };
+    if rayon::ThreadPoolBuilder::new()
+        .num_threads(nt)
+        .build_global()
+        .is_err()
+    {
+        eprintln!(
+            "[regulonado_rs] warning: requested n_threads={nt} but the global Rayon pool is \
+             already initialised (it can only be configured once per process); continuing \
+             with the existing pool of {} threads.",
+            rayon::current_num_threads(),
+        );
+    }
+}
+
+/// Build Arrow IPC write options with the specified compression codec.
+///
+/// Maps a compression name string ("zstd", "lz4"/"lz4_frame", "none"/"uncompressed"/"")
+/// to the corresponding Arrow compression type, then constructs IpcWriteOptions with
+/// metadata version V5 and buffer alignment of 8. Returns an error if the compression
+/// name is unrecognized.
 pub(crate) fn ipc_write_options(compression: &str) -> Result<IpcWriteOptions, String> {
     let codec = match compression.to_ascii_lowercase().as_str() {
         "" | "none" | "uncompressed" => None,
