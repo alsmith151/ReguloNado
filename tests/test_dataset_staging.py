@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import shutil
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -191,44 +191,6 @@ def test_build_cli_skips_final_reload_for_fast_path(tmp_path, monkeypatch):
             str(output_dir),
             "--bigwig-dir",
             str(bigwig_dir),
-        ],
-    )
-
-    assert result.exit_code == 0, result.stdout
-    assert captured["return_dataset"] is False
-
-
-def test_build_cli_skips_final_reload_for_legacy_path(tmp_path, monkeypatch):
-    from regulonado.__main__ import app
-
-    runner = CliRunner()
-    captured: dict[str, object] = {}
-
-    bed = tmp_path / "intervals.bed"
-    fasta = tmp_path / "genome.fa"
-    bigwig_dir = tmp_path / "bw"
-    output_dir = tmp_path / "out"
-    bigwig_dir.mkdir()
-    bed.write_text("")
-    fasta.write_text("")
-    (bigwig_dir / "track.bw").write_text("")
-
-    def fake_build_dataset(*args, **kwargs):
-        captured.update(kwargs)
-        return None
-
-    monkeypatch.setattr("regulonado.dataset.build_dataset", fake_build_dataset)
-
-    result = runner.invoke(
-        app,
-        [
-            "build",
-            str(bed),
-            str(fasta),
-            str(output_dir),
-            "--bigwig-dir",
-            str(bigwig_dir),
-            "--no-fast-path",
         ],
     )
 

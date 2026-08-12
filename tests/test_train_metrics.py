@@ -10,16 +10,15 @@ import unittest.mock
 import numpy as np
 import pytest
 import torch
-from scipy import stats as scipy_stats
-from transformers import Trainer
 
 # Import the private helpers directly so the test is self-contained.
-from regulonado.train import (
+from regulonado.training.runner import (
     RegulonadoTrainer,
     _make_compute_metrics,
     _make_preprocess_logits_for_metrics,
 )
-
+from scipy import stats as scipy_stats
+from transformers import Trainer
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -203,7 +202,7 @@ class TestRegulonadoTrainerPredictionStep:
         """Construct a minimal RegulonadoTrainer without a real model or dataset."""
         from transformers import TrainingArguments
 
-        args = TrainingArguments(output_dir="/tmp/regulonado_test", no_cuda=True)
+        args = TrainingArguments(output_dir="/tmp/regulonado_test", use_cpu=True)
         # Pass a dummy model; we won't call train(), only inspect prediction_step behaviour.
         dummy_model = torch.nn.Linear(1, 1)
         trainer = RegulonadoTrainer(

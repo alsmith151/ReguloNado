@@ -1,504 +1,189 @@
 # ReguloNado
 
-ReguloNado turns genomic tracks into trained **sequence-to-function** models. You
-point it at a reference genome and a set of BigWig coverage tracks, and it
-produces a Hugging Face Arrow dataset and a fine-tuned model (Borzoi or Enformer
-backbone) that predicts those tracks' signal directly from DNA sequence.
+ReguloNado builds sequence-to-function datasets from a reference genome and
+BigWig tracks, then fine-tunes Borzoi- or Enformer-based models on them. The
+command line is intended to cover the common path without making you learn the
+internal Python API or Hydra syntax.
 
-It is built for genomics-scale data: the data path is a Rust/PyO3 writer that
-streams BigWig + FASTA straight into compressed Arrow shards without ever
-materialising a dense signal intermediate, and the training path is a thin,
-friendly CLI on top of the Hugging Face `Trainer`.
+## Install
 
-```
-   ┌──────────┐   ┌──────────┐   ┌───────────┐
-   │ BED      │   │ FASTA    │   │ BigWig × T │
-   │ intervals│   │ genome   │   │ tracks     │
-   └────┬─────┘   └────┬─────┘   └─────┬─────┘
-        └──────────────┼───────────────┘
-                       ▼
-            regulonado build           ← Rust chrom-pass writer
-                       ▼
-        Arrow DatasetDict (train/val/test)
-          input_ids: one-hot (4, L)
-          labels:    binned signal (T, B)
-                       ▼
-            regulonado scale / *-scaling    ← per-track RPKM → raw-count factors
-                       ▼
-            regulonado train               ← Borzoi/Enformer + prediction head
-                       ▼
-        config.json + model.safetensors    ← self-contained HF checkpoint
-                       ▼
-            regulonado predict             ← BigWig tracks from any region or whole genome
-```
-
-A built dataset stores each example as one-hot DNA (`input_ids`, int8 `(4, L)`)
-and per-track binned coverage (`labels`, float32 `(T, B)`), split into
-`train` / `validation` / `test` by the fold label in column 4 of the BED file.
-
-## Contents
-
-- [Installation](#installation)
-- [End-to-end quickstart](#end-to-end-quickstart)
-- [Building a dataset](#building-a-dataset)
-- [Scale factors](#scale-factors)
-- [Training](#training)
-- [Experiment & loss configs](#experiment--loss-configs)
-- [Checkpoint reuse](#checkpoint-reuse)
-- [Prediction](#prediction)
-- [Run outputs](#run-outputs)
-- [External dependencies](#external-dependencies)
-- [Development & tests](#development--tests)
-- [Repository layout](#repository-layout)
-
-## Installation
-
-ReguloNado ships as layered extras so you only install what a given task needs.
-The Rust extension is compiled at install time, so a working Rust toolchain is
-required.
-
-| Goal | Install |
-|------|---------|
-| CLI only (no ML deps) | `pip install regulonado` |
-| Build datasets | `pip install "regulonado[data]"` |
-| Full training stack | `pip install "regulonado[train]"` |
-| GPU training + FlashAttention | `pip install "regulonado[gpu]"` |
-| Plotting / visualisation | `pip install "regulonado[viz]"` |
-| Development (ruff, pytest, maturin) | `pip install "regulonado[dev]"` |
-
-The `gpu` extra requires `nvcc` and a matching CUDA toolkit; `ninja` is pulled in
-automatically to compile the `flash_attn` extension.
-
-### With uv (recommended for local development)
-
-`uv` is the source of truth for the local environment:
+Python 3.12 or 3.13 is required.
 
 ```bash
-uv sync                  # core deps
-uv sync --extra data     # dataset building
-uv sync --extra train    # torch + full training stack
-uv sync --extra dev      # ruff, pytest, maturin
+pip install "regulonado[data]"       # build datasets
+pip install "regulonado[train]"      # build and train
+pip install "regulonado[train,workflow]" # run the training pipeline
+```
+
+For local development, use `uv`:
+
+```bash
+uv sync --extra dev --extra train --extra workflow
 source .venv/bin/activate
 ```
 
-For GPU installs with FlashAttention, use the Slurm wrapper — it loads the CUDA
-module, sets `CUDA_HOME`, pins the host compiler for `nvcc`, then runs the
-GPU-extra sync:
+The optional `gpu` extra builds FlashAttention and therefore needs a compatible
+CUDA toolkit and `nvcc`.
+
+## Working alongside SeqNado
+
+[SeqNado](https://github.com/Milne-Group/SeqNado) produces the BigWigs
+ReguloNado trains on. The two tools share one set of Snakemake execution presets
+in `~/.config/snakemake/`, one genome registry in
+`~/.config/seqnado/genome_config.json`, and one sample-sheet vocabulary. With
+the optional extra installed, ReguloNado reads track paths, BAMs, per-sample
+annotation and spike-in normalisation factors straight out of a SeqNado output
+directory.
 
 ```bash
-sbatch scripts/install_gpu_env_slurm.sh
-# with tests too:
-INSTALL_EXTRAS="--extra dev --extra gpu" sbatch scripts/install_gpu_env_slurm.sh
+pip install "regulonado[seqnado]"
+regulonado init                                  # install the shared presets
+regulonado config --from-seqnado expA=/data/expA/seqnado_output --genome hg38
+regulonado pipeline config.yaml --preset sg
 ```
 
-After any change to the Rust sources in `src/`, rebuild the extension:
+`regulonado config` writes `config.yaml` plus a `track_sheet.csv` derived from
+the project; add `source` and `timepoint_minutes` to that sheet, since SeqNado
+has no equivalent columns. Draw on several projects by repeating the flag:
 
 ```bash
-.venv/bin/maturin develop --release
+regulonado config --from-seqnado expA=/data/expA/seqnado_output \
+                  --from-seqnado expB=/data/expB/seqnado_output
 ```
 
-## End-to-end quickstart
+See [Work alongside SeqNado](docs/seqnado-interop.md) for the sheet columns,
+what aggregation guarantees, and what is shared rather than duplicated.
 
-The full pipeline is four steps: **build → scale → enrich → train**.
+## A small end-to-end run
+
+Build an Arrow dataset from a BED file, an indexed FASTA, and a directory of
+BigWigs:
 
 ```bash
-# 1. Build the Arrow dataset from BED + FASTA + a directory of BigWigs.
-regulonado build intervals.bed genome.fa dataset/ --bigwig-dir bw/ --stage
-
-# 2. Infer RPKM → raw-count scale factors for each track.
-regulonado calculate-original-scaling dataset/regulonado_metadata.json
-
-# 3. Write those factors into the dataset metadata train.py reads.
-regulonado enrich-metadata dataset/regulonado_metadata.json dataset/scale_factors.parquet
-
-# 4. Train (smoke test shown; drop the limits for a real run).
-regulonado train dataset/ --experiment head_only_borzoi --max-steps 10 --no-wandb
+regulonado build intervals.bed genome.fa dataset/ \
+  --bigwig-dir bigwigs/ \
+  --split train:fold0,fold1,fold2 \
+  --split validation:fold4 \
+  --split test:fold3 \
+  --stage
 ```
 
-Steps 2–3 are only needed when your BigWigs are in RPKM / normalised units and
-you want the model to train on raw read counts. If they are already raw counts,
-set `apply_scale: false` in the experiment config and skip them.
-
-On a cluster, each step has a Slurm wrapper under `scripts/` (see below); the
-local CLI commands above accept the same options.
-
-## Building a dataset
-
-### Locally
+Inspect the exact training configuration, then run it:
 
 ```bash
-regulonado build intervals.bed genome.fa out/ \
-    --bigwig-dir bw/ \
-    --split train:fold0,fold1,fold2 --split validation:fold4 --split test:fold3 \
-    --shift-max-bp 128 --num-proc 16 --stage
+regulonado train dataset/ --preset head_only --print-config
+regulonado train dataset/ --preset head_only --output-dir results/quick-run
 ```
 
-- Provide tracks as either `--bigwig-dir DIR` (sorted by name) or repeated
-  `--bigwig file.bw` (order preserved). Track order is the column order of
-  `labels`.
-- `--split NAME:FOLD1,FOLD2` maps BED column-4 fold labels to splits. Omit it to
-  use the default `train` / `validation` / `test` split.
-- `--stage` copies FASTA + BigWigs to local scratch first (recommended on Ceph).
-- `--strategy chrom_pass` (default) writes one shard per chromosome with ~10×
-  fewer BigWig seeks; `--strategy fast` is the sample-batched fallback.
-
-Run `regulonado build --help` for the full set of context-length, bin-size,
-threading, compression, and dedupe options.
-
-### On Slurm
+Change a setting without copying a configuration file by repeating `--set`:
 
 ```bash
-BED_FILE=/path/to/intervals.bed \
-FASTA_FILE=/path/to/genome.fa \
-OUTPUT_DIR=/path/to/output \
-BIGWIG_LIST=/path/to/bigwig_paths.txt \
-sbatch scripts/build_dataset_slurm.sh
+regulonado train dataset/ --preset head_only \
+  --set trainer.batch_size=8 \
+  --set trainer.max_steps=1000 \
+  --set seed=17
 ```
 
-`BIGWIG_LIST` is a newline-delimited file of BigWig paths. Optional env vars
-(defaults in the script header) control context length, bin size, staging,
-compression, rechunking, and worker counts. To rechunk to small ZSTD batches for
-streaming during the build:
+`--set` accepts known configuration keys only. Use `--print-config` after adding
+overrides when you want to check what will be submitted.
+
+## Run the Snakemake pipeline
+
+Use `regulonado pipeline` when you want one reproducible DAG that builds the
+dataset, computes normalization, and runs every configured training phase. It
+is not the SeqNado FASTQ pipeline: ReguloNado starts with a reference FASTA,
+interval BED, and BigWig tracks (or a track sheet/SeqNado project).
+
+Create or edit a workflow config, then inspect the DAG before submitting it:
 
 ```bash
-RECHUNK=true MAX_BATCH_SIZE=4 ZSTD_LEVEL=3 \
-BED_FILE=... FASTA_FILE=... OUTPUT_DIR=... BIGWIG_LIST=... \
-sbatch scripts/build_dataset_slurm.sh
+regulonado config -o config.yaml
+regulonado pipeline config.yaml --dry-run --cores 4
 ```
 
-To rechunk an existing dataset separately:
+For a cluster, choose a Snakemake execution preset; `--preset` selects where
+jobs run, while the `train.phases` and `train.runs` entries select what is
+trained:
 
 ```bash
-regulonado recompress-dataset /path/to/src /path/to/dst --max-batch-size 4
-# or: SRC=... DST=... sbatch scripts/rechunk_dataset_slurm.sh
+regulonado pipeline config.yaml --preset sg --cores 4
 ```
 
-## Scale factors
+The workflow contains these stages:
 
-Scale factors convert per-track BigWig signal (typically RPKM) to raw read counts
-before loss computation. Compute and apply them after building:
+```text
+build_dataset
+    └─ recompress_dataset (when recompress.enabled: true)
+        └─ scale_factors → enrich_metadata
+            └─ train_phase for each run and phase
+```
+
+`build_dataset` reads the FASTA, BED, and track source, bins signal, and writes
+the Arrow dataset and metadata. `recompress_dataset` is optional. The scaling
+stage writes per-track factors and enriched metadata; its method is selected by
+`scaling.method` (`original`, `tmm`, `bamnado`, or `seqnado`). Each
+`train_phase` runs one training preset. Phases are sequential within a run
+(later phases warm-start from the previous checkpoint), while separate runs
+can execute concurrently.
+
+The pipeline does not run prediction, create BigWigs, align reads, call peaks,
+or perform QC. Those are separate commands or upstream SeqNado work. It also
+does not replace the standalone commands: use `regulonado build`,
+`regulonado normalization ...`, or `regulonado train` when you need to run one
+stage manually. Snakemake records outputs under `results_dir` and skips stages
+whose declared outputs already exist, so rerunning the same command resumes
+completed work.
+
+## Four independent FlashZoi runs
+
+The pipeline is the easiest way to train the four published FlashZoi
+replicates with different seeds. From a source checkout, copy the example:
 
 ```bash
-regulonado calculate-original-scaling dataset/regulonado_metadata.json
-regulonado calculate-tmm-scaling dataset/regulonado_metadata.json        # optional TMM correction
-regulonado enrich-metadata dataset/regulonado_metadata.json dataset/scale_factors.parquet
+cp examples/flashzoi_four_replicates.yaml my_flashzoi_runs.yaml
+regulonado pipeline my_flashzoi_runs.yaml --dry-run
+regulonado pipeline my_flashzoi_runs.yaml --cores 4
 ```
 
-- `calculate-original-scaling` reads BigWig header metadata (via BamNado) to infer
-  library sizes and the RPKM→raw-count factor per track.
-- `calculate-tmm-scaling` layers an edgeR-style TMM normalisation on top, estimated
-  from the Arrow shards.
-- `enrich-metadata` writes the resulting `scale_factor` / `clip_soft` / `clip_hard`
-  into `final_track_records`, which `train.py` reads at training time.
+Each entry under `train.runs` names its model and seed. Each run follows the
+same ordered phase list:
 
-## Training
+```text
+flashzoi_0: head_only -> unfreeze_output -> deep_finetune -> peak_finetune
+flashzoi_1: head_only -> unfreeze_output -> deep_finetune -> peak_finetune
+flashzoi_2: head_only -> unfreeze_output -> deep_finetune -> peak_finetune
+flashzoi_3: head_only -> unfreeze_output -> deep_finetune -> peak_finetune
+```
 
-### Quick start (Slurm)
+Runs are independent and can execute at the same time. Within a run, each
+phase starts from that run's previous phase. Outputs are kept separate under
+`results/train/<run>/<phase>/`, so checkpoints cannot cross between replicates.
+
+Edit `train.common` to change all 16 jobs, a phase entry to change one phase in
+every run, or a run entry to change one replicate. See
+[Training and configuration](docs/training.md) for precedence and examples.
+
+## Use the output
+
+Prediction is a separate, explicit command. It is not run automatically after
+training:
 
 ```bash
-EXPERIMENT=head_only_borzoi \
-DATA_DIR=/path/to/dataset \
-sbatch scripts/train_slurm.sh
+regulonado predict results/train/flashzoi_0/peak_finetune/checkpoint-N \
+  genome.fa predictions/ --bed regions.bed
 ```
 
-`EXPERIMENT` names a Hydra config; the launcher searches `python/configs/experiment/`
-(built-in) and `scripts/experiment/` (production).
-
-### Local runs
-
-```bash
-regulonado train /path/to/dataset \
-  --output-dir outputs/train/quick-check \
-  --max-steps 1000 --batch-size 8
-
-regulonado train /path/to/dataset --nproc-per-node 2     # multi-GPU via torchrun
-regulonado train /path/to/dataset --max-steps 10 --no-wandb   # smoke test
-```
-
-Raw Hydra overrides can be appended to either the CLI or the Slurm script:
-
-```bash
-regulonado train /path/to/dataset trainer.max_steps=2000
-```
-
-### Recommended progressive workflow
-
-Training works best in phases, each warm-starting from the previous one (model
-weights only, fresh optimizer):
-
-```bash
-# Phase 1 — head only, backbone frozen, fast convergence (~5k steps)
-EXPERIMENT=head_only_borzoi DATA_DIR=... sbatch scripts/train_slurm.sh
-
-# Phase 2 — unfreeze 2 output-end backbone stages
-EXPERIMENT=stage2_unfreeze2_borzoi \
-INIT_WEIGHTS_FROM_CHECKPOINT=outputs/train/head_only_borzoi-JOBID/checkpoint-NNNN \
-DATA_DIR=... sbatch scripts/train_slurm.sh
-
-# Phase 3 — unfreeze 4 stages + reverse-complement augmentation
-EXPERIMENT=stage3_deep_finetune_borzoi \
-INIT_WEIGHTS_FROM_CHECKPOINT=outputs/train/stage2_unfreeze2_borzoi-JOBID/checkpoint-NNNN \
-DATA_DIR=... sbatch scripts/train_slurm.sh
-
-# Phase 4 (optional) — peak sharpening with top-K loss
-EXPERIMENT=stage4_peak_finetune_borzoi \
-INIT_WEIGHTS_FROM_CHECKPOINT=outputs/train/stage3_deep_finetune_borzoi-JOBID/checkpoint-NNNN \
-DATA_DIR=... sbatch scripts/train_slurm.sh
-```
-
-Submit all four phases as a dependency chain automatically:
-
-```bash
-DATA_DIR=/path/to/dataset bash scripts/train_pipeline_slurm.sh
-
-# variants:
-DATA_DIR=... STOP_AFTER_PHASE=3 bash scripts/train_pipeline_slurm.sh   # skip phase 4
-DATA_DIR=... START_FROM_PHASE=3 bash scripts/train_pipeline_slurm.sh   # resume from phase 3
-DATA_DIR=... PEAK_LOSS=topk_reweight bash scripts/train_pipeline_slurm.sh
-```
-
-## Experiment & loss configs
-
-All hyperparameters live in Hydra YAML. To start a new experiment, copy the
-nearest config in `python/configs/experiment/` and adjust what matters.
-
-| Experiment config | Phase / purpose |
-|--------|-------------|
-| `head_only_borzoi.yaml` | Phase 1: frozen backbone, head only, lr=1e-3 |
-| `stage2_unfreeze2_borzoi.yaml` | Phase 2: 2 output-end stages unfrozen, lr=2e-4/2e-6 |
-| `stage3_deep_finetune_borzoi.yaml` | Phase 3: 4 stages + RC augmentation, lr=5e-5/5e-7 |
-| `stage4_peak_finetune_borzoi.yaml` | Phase 4: topk_additive loss for peak sharpening |
-| `magnitude_fix_*.yaml` | Ablation templates for loss-function / squash sweeps |
-
-Loss configs live in `python/configs/loss/`. Select one in an experiment YAML with
-`defaults: - override /loss: <name>`.
-
-| Loss | Description |
-|------|-------------|
-| `poisson_multinomial` | Default: Poisson total-count + multinomial profile (Borzoi-style) |
-| `scaled_poisson_multinomial` | As above, with a per-track softmax scale step |
-| `poisson_nll` | Per-bin Poisson NLL; stronger magnitude gradient at peaks |
-| `log1p_huber` | Per-bin Huber loss in log1p space; robust to outliers |
-| `topk_additive` | poisson_multinomial + additive second pass on top-K bins |
-| `topk_reweight` | poisson_multinomial with per-bin rank weighting on the multinomial term |
-| `transfer_calibration` | Composite: low multinomial weight + per-bin log1p MSE + top-K Huber |
-
-To run all magnitude-fix ablations in parallel from a shared checkpoint:
-
-```bash
-INIT_WEIGHTS_FROM_CHECKPOINT=/path/to/checkpoint \
-DATA_DIR=/path/to/dataset \
-bash scripts/run_magnitude_experiments_slurm.sh
-```
-
-## Checkpoint reuse
-
-Checkpoints saved by `RegulonadoTrainer` are self-contained Hugging Face
-`PreTrainedModel` directories (`config.json` + `model.safetensors`). Any saved
-checkpoint can be loaded directly for inference:
-
-```python
-from regulonado.model import RegulonadoModel
-model = RegulonadoModel.from_pretrained("outputs/train/my_run/checkpoint-5000")
-```
-
-**Full resume** restores model weights, optimizer, scheduler, and RNG state — use
-to continue an interrupted run:
-
-```bash
-EXPERIMENT=head_only_borzoi DATA_DIR=... \
-sbatch scripts/train_slurm.sh \
-  trainer.resume_from_checkpoint=outputs/train/head_only_borzoi-JOBID/checkpoint-NNNN
-```
-
-**Warm start** loads model weights only with a fresh optimizer/scheduler — use when
-changing learning rate, scheduler, unfreezing policy, or training objective. Stage
-2–4 configs read the checkpoint from `INIT_WEIGHTS_FROM_CHECKPOINT` via
-`${oc.env:...}` interpolation, or set `init_weights_from_checkpoint` directly in the
-YAML.
-
-## Prediction
-
-Once a model is trained, `regulonado predict` writes one BigWig per track directly
-from the checkpoint, without needing the original Arrow dataset.
-
-### Targeted mode (BED regions)
-
-Predict the central output window centred on each row in a BED file:
-
-```bash
-regulonado predict outputs/train/my_run genome.fa predictions/ \
-    --bed regions.bed
-```
-
-Each window in the BED is centred on `(start + end) / 2` and the model's full
-context is extracted around that centre. Only the central prediction region
-(`n_pred_bins × bin_size` bp) is written to the BigWig; windows must be spaced far
-enough apart that their predicted regions do not overlap.
-
-### Whole-genome mode
-
-Tile every chromosome into adjacent, non-overlapping prediction windows:
-
-```bash
-regulonado predict outputs/train/my_run genome.fa predictions/ \
-    --whole-genome \
-    --chromsizes hg38.chrom.sizes
-```
-
-`--chromsizes` selects which chromosomes to tile and sets the BigWig header lengths.
-When omitted the FASTA `.fai` index is used (every contig). For whole-genome runs
-with many tracks, use `--tracks` to write only the tracks you need.
-
-### Common options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--tracks` | all | Comma-separated track names or integer indices |
-| `--batch-size` | 4 | Windows per forward pass |
-| `--device` | auto | Torch device (`cuda`, `cpu`, `cuda:1`, …) |
-| `--rtol` | 0.01 | Relative tolerance for collapsing adjacent equal bins |
-| `--inverse-squash` | off | Undo the `(x+1)^0.75` training squash to approximate raw counts |
-
-Legacy run roots that pre-date the HF checkpoint format (no `config.json`) are also
-supported; pass `--dataset /path/to/dataset` to supply the metadata:
-
-```bash
-regulonado predict outputs/train/my_run genome.fa predictions/ \
-    --dataset /path/to/original/dataset \
-    --bed regions.bed
-```
-
-### Python API
-
-For notebook or script use, `RegionPredictor` wraps the model and FASTA and
-exposes a simple call interface:
-
-```python
-from regulonado.predict import RegionPredictor, RegionPredictionConfig
-
-predictor = RegionPredictor(
-    RegionPredictionConfig(
-        checkpoint_dir="outputs/train/my_run",
-        fasta_path="genome.fa",
-        tracks=["my_track_1", "my_track_2"],   # optional subset
-        inverse_squash=True,
-    )
-)
-
-# Single region — returns a RegionPrediction with .values (n_tracks, n_bins)
-pred = predictor("chr1", 1_000_000, 1_010_000)
-print(pred.values.shape)      # (2, n_pred_bins)
-print(pred.track_names)       # ['my_track_1', 'my_track_2']
-
-# Multiple regions
-preds = predictor.predict_many([
-    ("chr1", 1_000_000, 1_010_000),
-    ("chr2", 5_000_000, 5_010_000),
-])
-
-# Long-form records (chrom/start/end/track/value) for downstream analysis
-import pandas as pd
-df = pd.DataFrame(pred.as_records())
-```
-
-`RegionPrediction.bin_starts` / `.bin_ends` give the genomic coordinates of each
-bin in the output array.
-
-## Run outputs
-
-Each run writes, into `output_dir` (defaults to the Hydra output dir or the Slurm
-wrapper's `RUN_DIR`):
-
-- `config.json` — `RegulonadoConfig` (architecture, geometry, track names/metadata);
-  enables `RegulonadoModel.from_pretrained` and `regulonado predict` without any
-  external metadata files.
-- `model.safetensors` — merged model weights (no `model.` key prefix).
-- `training_args.json` — HF `TrainingArguments` serialised alongside the weights.
-- `resolved_config.json` — fully resolved Hydra config.
-- `provenance.json` — command, git commit/status, dataset hash and split summary,
-  package versions, CUDA/Torch details, Slurm context, checkpoint reuse mode.
-- `git_diff.patch` — local diff when provenance diff capture is enabled.
-- `trainer_state.json`, checkpoints, and `training_summary.json`.
-
-**Metrics** logged to W&B at each eval step:
-
-- `eval_loss` — mean validation loss.
-- `eval_pearson_bin_median` — median per-track Pearson over all bins.
-- `eval_pearson_topN_median` — median Pearson restricted to the top-N bins by target
-  signal (`trainer.topk_bins`, default 256).
-
-`metric_for_best_model` in each experiment config controls checkpoint selection and
-early stopping (set `greater_is_better: true` for `pearson_bin_median`).
-
-**Predicted-vs-real plots** are saved for a small fixed set of validation examples at
-each eval:
-
-```
-examples/step_000500/example_00_track_0000.png
-```
-
-Count is set by `trainer.num_plot_examples` (default 4); set to 0 to disable.
-
-## External dependencies
-
-### BamNado
-
-`regulonado calculate-original-scaling` requires the
-[BamNado](https://github.com/alsmith151/BamNado) binary (`bamnado`) on `PATH`. It
-reads BigWig header metadata to infer library size and compute RPKM→raw-count
-factors.
-
-```bash
-# Linux x86-64 — check the releases page for the latest tag
-wget https://github.com/alsmith151/BamNado/releases/latest/download/bamnado-x86_64-unknown-linux-musl.tar.gz
-tar -xzf bamnado-x86_64-unknown-linux-musl.tar.gz
-mv bamnado ~/.local/bin/      # or any directory on PATH
-```
-
-If not on `PATH`, point to it with the `BAMNADO` environment variable:
-
-```bash
-BAMNADO=/path/to/bamnado regulonado calculate-original-scaling metadata.json
-```
-
-## Development & tests
-
-`pytest` is included in the `dev` extra:
-
-```bash
-uv sync --extra dev
-.venv/bin/python -m pytest tests/
-```
-
-Focused checks:
-
-```bash
-.venv/bin/python -m pytest tests/test_chrom_pass.py       # Rust writer parity
-.venv/bin/python -m pytest tests/test_dataset_staging.py  # staging and deduplication
-.venv/bin/python -m pytest tests/test_train_metrics.py    # training metrics
-```
-
-Lint before committing (line length 100; rules `E`, `F`, `I`):
-
-```bash
-ruff check python/
-```
-
-See [CLAUDE.md](CLAUDE.md) for deeper developer notes on the Rust build and writer
-internals.
-
-## Repository layout
-
-- `src/` — Rust/PyO3 BigWig + FASTA readers and Arrow writers (`chrom_pass.rs` is the
-  production writer).
-- `python/regulonado/dataset.py` — dataset construction, transforms, scaling, augmentation.
-- `python/regulonado/train.py` — training entrypoint (Hydra + HF `Trainer`).
-- `python/regulonado/predict.py` — `RegionPredictor` and `predict_to_bigwig`; BigWig
-  generation from a trained checkpoint.
-- `python/regulonado/model/` — backbone adapters, prediction heads, `RegulonadoModel`
-  (`PreTrainedModel`), and `RegulonadoConfig`.
-- `python/configs/` — Hydra configs for backbones, heads, losses, and experiments.
-- `scripts/` — Slurm launchers (see `scripts/README.md`); `scripts/experiment/` holds
-  production run configs.
-- `tests/` — model, dataset, and smoke coverage.
+## Guides
+
+- [Build a dataset](docs/building-datasets.md)
+- [Work alongside SeqNado](docs/seqnado-interop.md)
+- [Calculate and apply normalization](docs/normalization.md)
+- [Train and change configuration](docs/training.md)
+- [Run on Slurm](docs/slurm.md)
+- [Resume or reuse checkpoints](docs/checkpoints.md)
+- [Generate predictions](docs/prediction.md)
+- [Architecture](ARCHITECTURE.md)
+- [Contributing](CONTRIBUTING.md)
+
+Run `regulonado --help` or `regulonado COMMAND --help` for the complete option
+reference. ReguloNado is released under the [BSD 3-Clause License](LICENSE).

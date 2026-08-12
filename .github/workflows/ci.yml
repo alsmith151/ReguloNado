@@ -7,8 +7,45 @@ on:
     branches: [main]
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: ruff check
+        run: ruff check python/ tests/
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-clippy-${{ hashFiles('Cargo.lock') }}
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
   test:
-    name: "Python ${{ matrix.python-version }}"
+    name: "Data tests — Python ${{ matrix.python-version }}"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -40,3 +77,49 @@ jobs:
 
       - name: Run data and chrom-pass tests
         run: pytest tests/test_chrom_pass.py tests/test_dataset_staging.py -v
+
+  test-model:
+    # The model/loss/metric tests import torch, which the [test] extra deliberately
+    # omits to keep the data-path job small. Installing the CPU-only torch build here
+    # lets these four files run in CI without a GPU — they need no network access and
+    # no pretrained weights (from_pretrained is pointed at tmp_path).
+    name: "Model tests — CPU torch"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-model-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install CPU-only torch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      # regulonado.model imports borzoi_pytorch at module scope, and train.py imports
+      # hydra, so these are needed just to collect the tests. The models themselves
+      # need CUDA to run, but these tests use dummy adapters and stay on CPU.
+      - name: Install package and model test dependencies
+        run: |
+          pip install ".[test]" \
+            transformers torchmetrics accelerate peft \
+            hydra-core borzoi-pytorch enformer-pytorch matplotlib
+
+      - name: Run model, loss, prediction and metric tests
+        run: |
+          pytest \
+            tests/test_losses.py \
+            tests/test_model_transfer.py \
+            tests/test_predict_bigwig.py \
+            tests/test_train_metrics.py -v

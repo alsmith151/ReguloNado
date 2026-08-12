@@ -1,0 +1,22 @@
+# Local execution profile (shortcode: le).
+#
+#   regulonado pipeline my_runs.yaml --preset le
+#
+# This mirrors SeqNado's `profile_local_environment` so that the `le` shortcode
+# means the same thing in both tools and the two can share ~/.config/snakemake/.
+# Keep the keys below in sync with SeqNado's copy.
+#
+# The default resources are deliberately small. They are fine for dry runs,
+# metadata rules, and smoke tests on a laptop. They are NOT sufficient for
+# dataset building or training — use the `sg` or `ssg` presets for those.
+
+executor: local
+jobs: 100
+use-conda: false
+use-apptainer: false
+show-failed-logs: true
+printshellcmds: true
+
+default-resources:
+    runtime: "1h"
+    mem: "3G"

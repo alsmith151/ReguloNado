@@ -1,0 +1,8 @@
+# Multinomial profile term + PER-BIN Poisson NLL.
+# Unlike poisson_multinomial (Poisson on the summed total count), the Poisson term here is
+# computed per bin, so misplaced / "fake" peaks are penalised directly instead of being free
+# as long as the total matches. Use with apply_squash: false (Poisson is a count model).
+name: poisson_multinomial_binwise
+# Weight on the per-bin Poisson term relative to the multinomial profile term. The per-bin
+# Poisson is the main driver here, so default to 1.0 (vs 0.2 for the total-count variant).
+poisson_weight: 1.0

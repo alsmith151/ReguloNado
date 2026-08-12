@@ -10,12 +10,12 @@ Use through the CLI:
 """
 
 import shutil
-import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.ipc as ipc
+from loguru import logger
 
 
 def recompress_shard(
@@ -65,18 +65,17 @@ def recompress_split(
                 s, d = fut.result()
                 total_src += s
                 total_dst += d
-                print(
+                logger.info(
                     f"  [{i:3d}/{len(shards)}] {shard.name}  "
                     f"{s/1e6:.0f} MB → {d/1e6:.0f} MB  "
-                    f"({d/s:.2f}x)",
-                    flush=True,
+                    f"({d/s:.2f}x)"
                 )
             except Exception as e:
-                print(f"  ERROR {shard.name}: {e}", file=sys.stderr)
+                logger.error(f"  ERROR {shard.name}: {e}")
                 raise
 
     ratio = total_dst / total_src if total_src else 1.0
-    print(
+    logger.info(
         f"  split total: {total_src/1e9:.2f} GB → {total_dst/1e9:.2f} GB  "
         f"({ratio:.2f}x, saved {(total_src-total_dst)/1e9:.2f} GB)"
     )
@@ -94,9 +93,9 @@ def recompress_dataset(
     src = src.resolve()
     dst = dst.resolve()
     if not src.exists():
-        sys.exit(f"Source not found: {src}")
+        raise FileNotFoundError(f"Source not found: {src}")
     if dst.exists():
-        sys.exit(f"Destination already exists — remove it first: {dst}")
+        raise ValueError(f"Destination already exists — remove it first: {dst}")
 
     dst.mkdir(parents=True)
 
@@ -104,17 +103,17 @@ def recompress_dataset(
     for f in src.iterdir():
         if f.is_file():
             shutil.copy2(f, dst / f.name)
-            print(f"copied  {f.name}")
+            logger.info(f"copied  {f.name}")
 
     # Recompress each split
     splits = [d for d in src.iterdir() if d.is_dir()]
     for split in sorted(splits):
-        print(f"\n=== {split.name} ===")
+        logger.info(f"\n=== {split.name} ===")
         recompress_split(split, dst / split.name, level, workers, max_batch_size)
 
-    print(f"\nDone. Output: {dst}")
+    logger.info(f"\nDone. Output: {dst}")
 
     if remove_src:
-        print(f"\nRemoving source: {src}")
+        logger.info(f"\nRemoving source: {src}")
         shutil.rmtree(src)
-        print("Source removed.")
+        logger.info("Source removed.")

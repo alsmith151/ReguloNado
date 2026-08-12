@@ -6,8 +6,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn as nn
-from regulonado.model import RegulonadoConfig, RegulonadoModel, TransferMLPPerturbHead
-from regulonado.predict import (
+from regulonado.inference import (
     RegionPredictionConfig,
     RegionPredictor,
     Window,
@@ -19,6 +18,7 @@ from regulonado.predict import (
     one_hot_context,
     read_chrom_sizes,
 )
+from regulonado.model import RegulonadoConfig, RegulonadoModel, TransferMLPPerturbHead
 
 # Small geometry for fast tests: 4 bins of 10 bp => 40 bp prediction window,
 # context 100 bp.
@@ -225,8 +225,8 @@ def test_resolve_tracks_by_name_and_index():
 
 
 def test_load_model_for_inference_prefers_hf_model_dir(tmp_path, monkeypatch):
+    from regulonado.inference import load_model_for_inference
     from regulonado.model import adapters
-    from regulonado.predict import load_model_for_inference
 
     config = RegulonadoConfig(
         backbone_type="tiny",
@@ -260,7 +260,7 @@ def test_load_model_for_inference_legacy_run_root_returns_regulonado_model(
     tmp_path, monkeypatch
 ):
     import regulonado.model as model_module
-    from regulonado.predict import load_model_for_inference
+    from regulonado.inference import load_model_for_inference
 
     data_dir = tmp_path / "dataset"
     data_dir.mkdir()
@@ -343,7 +343,7 @@ def test_model_track_metadata_from_config_uses_prediction_tensors():
 
 def test_quick_predictor_predicts_from_configured_paths(tmp_path, monkeypatch):
     pytest.importorskip("pyfaidx")
-    import regulonado.predict as predict_module
+    import regulonado.inference as predict_module
 
     fa_path = tmp_path / "g.fa"
     fa_path.write_text(">chr1\n" + "ACGT" * 100 + "\n")
@@ -383,7 +383,7 @@ def test_quick_predictor_allows_per_call_tracks_and_validates_coordinates(
     tmp_path, monkeypatch
 ):
     pytest.importorskip("pyfaidx")
-    import regulonado.predict as predict_module
+    import regulonado.inference as predict_module
 
     fa_path = tmp_path / "g.fa"
     fa_path.write_text(">chr1\n" + "ACGT" * 100 + "\n")
@@ -407,7 +407,7 @@ def test_quick_predictor_allows_per_call_tracks_and_validates_coordinates(
 
 def test_find_config_and_weights_hf_layout(tmp_path):
     """Run root has resolved_config.json; weights live in checkpoint-NNNN/ subdirs."""
-    from regulonado.predict import _find_config, _find_weights
+    from regulonado.inference import _find_config, _find_weights
 
     run_root = tmp_path / "run"
     ckpt = run_root / "checkpoint-1000"
@@ -429,7 +429,7 @@ def test_find_config_and_weights_hf_layout(tmp_path):
 def test_find_weights_picks_best_checkpoint_from_trainer_state(tmp_path):
     import json as _json
 
-    from regulonado.predict import _find_weights
+    from regulonado.inference import _find_weights
 
     run_root = tmp_path / "run"
     for step in (500, 1000, 2000):
@@ -447,7 +447,7 @@ def test_find_weights_picks_best_checkpoint_from_trainer_state(tmp_path):
 
 
 def test_find_weights_falls_back_to_latest_when_no_trainer_state(tmp_path):
-    from regulonado.predict import _find_weights
+    from regulonado.inference import _find_weights
 
     run_root = tmp_path / "run"
     for step in (500, 1000, 2000):
@@ -463,7 +463,7 @@ def test_find_weights_falls_back_to_latest_when_no_trainer_state(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_write_and_read_bigwig_roundtrip(tmp_path):
     pybigtools = pytest.importorskip("pybigtools")
-    from regulonado.predict import _write_bigwigs
+    from regulonado.inference import _write_bigwigs
 
     chrom_sizes = {"chr1": 1000}
     values = np.concatenate([np.zeros(50), np.full(50, 3.0)])  # flat then raised

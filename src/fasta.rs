@@ -1,10 +1,18 @@
 use std::collections::HashMap;
 
+/// A single samtools .fai index record.
+///
+/// Represents one contig from a FASTA index file, enabling random access to
+/// sequences by computing byte offsets directly.
 #[derive(Clone, Debug)]
 pub(crate) struct FastaIndexRecord {
+    /// Length of the sequence in bases.
     pub(crate) len: u64,
+    /// Byte offset of the sequence data in the FASTA file.
     pub(crate) offset: u64,
+    /// Number of bases per line in the FASTA file (before newline).
     pub(crate) line_bases: u64,
+    /// Number of bytes per line in the FASTA file (including newline).
     pub(crate) line_width: u64,
 }
 
@@ -67,8 +75,16 @@ pub(crate) fn read_one_hot_sequence(
     use std::os::unix::fs::FileExt;
 
     let mut out = vec![0i8; 4 * context_len];
+    // A contig present in the BED but absent from the FASTA index used to yield an
+    // all-zero one-hot, so a misspelled or mismatched contig name silently produced blank
+    // training rows instead of failing. Treat it as an error: a caller that genuinely
+    // wants to skip such regions should filter the BED before building.
     let Some(rec) = fai.get(chrom) else {
-        return Ok(out);
+        return Err(format!(
+            "Contig '{chrom}' is not present in the FASTA index. Check that the BED and \
+             FASTA use the same contig naming (e.g. 'chr1' vs '1'), or filter the BED to \
+             contigs present in the FASTA."
+        ));
     };
 
     let center = (bed_start as i64 + bed_end as i64) / 2;

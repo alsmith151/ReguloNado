@@ -1,0 +1,63 @@
+# Four independent FlashZoi runs. Replace the three input paths before use.
+results_dir: results
+
+inputs:
+  intervals: /path/to/intervals.bed
+  fasta: /path/to/genome.fa
+  bigwig_dir: /path/to/bigwigs
+
+build:
+  context_length: 524288
+  bin_size: 32
+  n_pred_bins: 6144
+  shift_max_bp: 64
+  extract_threads: 32
+  arrow_write_threads: 4
+  arrow_batch_size: 512
+  compression: lz4
+  stage_to_scratch: true
+  drop_missing: true
+  dedupe_tracks: content
+
+recompress:
+  enabled: true
+  zstd_level: 3
+  max_batch_size: 4
+  workers: 8
+
+scaling:
+  method: tmm
+
+train:
+  nproc_per_node: 2
+
+  # These settings apply to every phase of every run. Phase and run settings
+  # can override them locally.
+  common:
+    trainer:
+      num_workers: 8
+      report_to: [wandb]
+
+  phases:
+    - name: head_only
+      preset: head_only
+    - name: unfreeze_output
+      preset: unfreeze_output
+    - name: deep_finetune
+      preset: deep_finetune
+    - name: peak_finetune
+      preset: peak_finetune
+
+  runs:
+    - name: flashzoi_0
+      seed: 0
+      pretrained_model: johahi/flashzoi-replicate-0
+    - name: flashzoi_1
+      seed: 1
+      pretrained_model: johahi/flashzoi-replicate-1
+    - name: flashzoi_2
+      seed: 2
+      pretrained_model: johahi/flashzoi-replicate-2
+    - name: flashzoi_3
+      seed: 3
+      pretrained_model: johahi/flashzoi-replicate-3

@@ -15,6 +15,46 @@ import pybigtools
 import pytest
 
 
+def write_arrow_split_chrom_pass(
+    bw_paths,
+    minus_flags,
+    signal_intervals,
+    out_dir,
+    sample_indices,
+    bed_rows,
+    fasta_path,
+    n_bins,
+    context_len,
+    bin_size,
+    **kwargs,
+):
+    """Write a single split via the multi-split chrom_pass writer.
+
+    The extension used to export a separate single-split entry point that
+    duplicated the multi-split one almost line for line. It had no production
+    caller — only these tests — so it was removed. Driving the real writer with
+    a one-element split list keeps these tests exercising the production path.
+    The split name never appears in the output layout, so the on-disk result is
+    identical to what the old single-split function produced.
+    """
+    from regulonado._rs import write_arrow_splits_chrom_pass  # type: ignore[import-not-found]
+
+    return write_arrow_splits_chrom_pass(
+        bw_paths,
+        minus_flags,
+        signal_intervals,
+        ["split"],
+        [out_dir],
+        [sample_indices],
+        bed_rows,
+        fasta_path,
+        n_bins,
+        context_len,
+        bin_size,
+        **kwargs,
+    )
+
+
 # Tiny but valid: bin_size 8, two chromosomes 4 kb each, 8 intervals of 512 bp.
 N_TRACKS = 3
 CHROM_LEN = 4096
@@ -136,7 +176,6 @@ def _load_arrow_files(split_dir: Path) -> dict[str, list[np.ndarray]]:
 
 def _assert_chrom_pass_matches_direct_bigwig(dataset):
     from regulonado._rs import (  # type: ignore[import-not-found]
-        write_arrow_split_chrom_pass,
         write_arrow_split_from_bigwigs,
     )
 
@@ -233,8 +272,6 @@ def test_chrom_pass_matches_direct_bigwig_segmented_intervals(segmented_synth_da
 def test_chrom_pass_loads_via_datasets(synth_dataset, tmp_path):
     """The chrom_pass output dir should load via datasets.load_from_disk."""
     from datasets import Array2D, Features, Value, load_from_disk
-
-    from regulonado._rs import write_arrow_split_chrom_pass  # type: ignore[import-not-found]
     from regulonado.dataset import _write_hf_split_metadata
 
     bw_paths = synth_dataset["bw_paths"]
@@ -285,8 +322,6 @@ def test_chrom_pass_loads_via_datasets(synth_dataset, tmp_path):
 def test_chrom_pass_arrow_write_threads_are_equivalent(synth_dataset, tmp_path):
     """Parallel Arrow writers should not change rows or loadability."""
     from datasets import Array2D, Features, Value, load_from_disk
-
-    from regulonado._rs import write_arrow_split_chrom_pass  # type: ignore[import-not-found]
     from regulonado.dataset import _write_hf_split_metadata
 
     bw_paths = synth_dataset["bw_paths"]
@@ -345,7 +380,6 @@ def test_chrom_pass_shard_size_decouples_file_count_from_batch_size(synth_datase
     shard_size=2 -> 2 shards/chrom (4 files); shard_size=4 -> 1 shard/chrom of
     two record batches (2 files). Row data must be unchanged either way.
     """
-    from regulonado._rs import write_arrow_split_chrom_pass  # type: ignore[import-not-found]
 
     bw_paths = synth_dataset["bw_paths"]
     bed_rows_tuples = [
@@ -396,7 +430,6 @@ def test_chrom_pass_shard_size_decouples_file_count_from_batch_size(synth_datase
 def test_chrom_pass_shared_scan_writes_multiple_splits(synth_dataset, tmp_path):
     """The shared chrom pass should write loadable split directories in one call."""
     from datasets import Array2D, Features, Value, load_from_disk
-
     from regulonado._rs import write_arrow_splits_chrom_pass  # type: ignore[import-not-found]
     from regulonado.dataset import _write_hf_split_metadata
 
