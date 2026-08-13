@@ -195,6 +195,9 @@ def pipeline(
     configfile: Annotated[
         Path, typer.Argument(help="Workflow YAML config")
     ],
+    stage: Annotated[
+        Optional[str], typer.Argument(help="Stage to run: train, recompress, or design.")
+    ] = None,
     cores: Annotated[int, typer.Option("--cores", "-c", min=1, help="Local execution cores.")] = 1,
     jobs: Annotated[
         Optional[int], typer.Option("--jobs", "-j", min=1, help="Maximum remote jobs.")
@@ -247,12 +250,16 @@ def pipeline(
         bool, typer.Option("--keep-going", help="Continue independent jobs after an error.")
     ] = False,
 ) -> None:
-    """Run the packaged Snakemake workflow through Snakemake's Python API."""
+    """Run the packaged Snakemake workflow, optionally selecting one stage."""
     if not configfile.exists():
         raise typer.BadParameter(
             f"Workflow config not found: {configfile}", param_hint="--configfile"
         )
     _validate_training_matrix(configfile)
+    if stage is not None and stage not in ("train", "recompress", "design"):
+        raise typer.BadParameter("Expected one of: train, recompress, design", param_hint="stage")
+    if stage is not None and target is not None:
+        raise typer.BadParameter("Use either a stage argument or --target, not both")
 
     try:
         from snakemake.api import (
@@ -325,8 +332,34 @@ def pipeline(
         printshellcmds=True,
         show_failed_logs=True,
     )
+    selected_targets = {target} if target else set()
+    if stage is not None:
+        import yaml
+
+        raw = yaml.safe_load(configfile.read_text()) or {}
+        results = Path(raw["results_dir"])
+        if stage == "recompress":
+            selected_targets.add(str(results / "dataset_rechunked" / "dataset_dict.json"))
+        elif stage == "train":
+            train = raw.get("train") or {}
+            phases, runs = train.get("phases") or [], train.get("runs") or []
+            if not phases or not runs:
+                raise typer.BadParameter("Config has no train phases/runs", param_hint="stage")
+            final_phase = phases[-1]["name"]
+            selected_targets.update(
+                str(results / "train" / run["name"] / final_phase / "trainer_state.json")
+                for run in runs
+            )
+        else:
+            design = raw.get("design") or {}
+            targets = design.get("targets") or []
+            if not targets:
+                raise typer.BadParameter("Config has no design targets", param_hint="stage")
+            selected_targets.update(
+                str(results / "design" / item["name"] / "designs.tsv") for item in targets
+            )
     dag_settings = DAGSettings(
-        targets=frozenset({target}) if target else frozenset(),
+        targets=frozenset(selected_targets),
         force_incomplete=bool(profile_values.get("rerun-incomplete", False)),
     )
     # Merged so a --cluster-config can add deployment keys on top of the profile.
