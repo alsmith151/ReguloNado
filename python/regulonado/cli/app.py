@@ -1651,6 +1651,29 @@ def predict(
         typer.echo(f"  {path}")
 
 
+def _trajectory_table(wandb_module, history: list[dict]):
+    """Build a wandb.Table of the per-round trajectory, one row per round.
+
+    Column set is the union across rounds (round 0 and non-improving rounds lack "positions";
+    AdaLead rounds lack "n_edits"), so every row gets every column, blank where not recorded.
+    """
+    fixed = ["round", "sequence", "energy", "target", "n_edits"]
+    dynamic = sorted(
+        {key for entry in history for key in entry if key not in (*fixed, "positions")}
+    )
+    columns = [*fixed, "positions", *dynamic]
+    rows = []
+    for entry in history:
+        row = []
+        for column in columns:
+            value = entry.get(column, "")
+            if column == "positions" and value:
+                value = ",".join(str(p) for p in value)
+            row.append(value)
+        rows.append(row)
+    return wandb_module.Table(columns=columns, data=rows)
+
+
 @app.command()
 def design(
     candidates: Annotated[
@@ -1909,11 +1932,14 @@ def design(
             summary = ", ".join(
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
                 for key, value in entry.items()
-                if key not in ("round", "positions")
+                if key not in ("round", "positions", "sequence")
             )
             logger.info(f"  [{seed_name}] round {entry['round']}: {summary}")
             if run is not None:
-                run.log({k: v for k, v in entry.items() if k != "positions"}, step=entry["round"])
+                # Sequences go in the end-of-run wandb.Table below, not the per-step scalar
+                # log — a full-length insert string doesn't chart usefully as a history metric.
+                scalars = {k: v for k, v in entry.items() if k not in ("positions", "sequence")}
+                run.log(scalars, step=entry["round"])
 
         if method == "ism":
             positions = None
@@ -1969,6 +1995,7 @@ def design(
             if holdout_result is not None:
                 wandb_run.summary["holdout_energy"] = float(holdout_result.energy[0])
                 wandb_run.summary["holdout_target"] = float(holdout_result.target[0])
+            wandb_run.log({"trajectory": _trajectory_table(_wandb, state.history)})
             wandb_run.finish()
 
         records.append(

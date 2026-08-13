@@ -67,6 +67,14 @@ class SequencePredictor:
                 outputs.append(self.model(chunk, **self.track_metadata))
         return torch.cat(outputs, dim=0)
 
+    def to(self, device: str) -> "SequencePredictor":
+        """Move the already-loaded model to ``device`` in place (no disk I/O)."""
+        self.model.to(device)
+        self.device = device
+        self.track_metadata = {key: value.to(device) for key, value in self.track_metadata.items()}
+        self.dtype = next(self.model.parameters()).dtype
+        return self
+
 
 class FoldEnsemble:
     """Runs the same one-hot batch through several independently trained folds."""
@@ -84,33 +92,35 @@ class FoldEnsemble:
         if mode not in ("resident", "sequential"):
             raise ValueError(f"Unknown mode {mode!r}; expected 'resident' or 'sequential'")
 
+        if device is None:
+            import torch
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
         self.mode = mode
         self.device = device
         self.batch_size = batch_size
 
-        if mode == "resident":
-            self._resident: list[SequencePredictor] | None = [
-                self._load(spec) for spec in self._specs
-            ]
-            geometry_source = self._resident
-        else:
-            self._resident = None
-            geometry_source = [self._load(spec) for spec in self._specs]
-
-        self._assert_consistent(geometry_source)
-        first = geometry_source[0]
+        # Loaded once here regardless of mode — "sequential" controls how many folds are
+        # *resident on the accelerator* during predict(), not whether weights get re-read
+        # from disk. Every fold is loaded onto CPU once at construction; sequential predict()
+        # then only shuttles one fold's tensors between CPU and the target device per call.
+        self._predictors: list[SequencePredictor] = [
+            self._load(spec, device="cpu") for spec in self._specs
+        ]
+        self._assert_consistent(self._predictors)
+        first = self._predictors[0]
         self.context_length = first.context_length
         self.n_pred_bins = first.n_pred_bins
         self.bin_size = first.bin_size
         self._track_names = first.track_names
 
-        if mode == "sequential":
-            del geometry_source  # transient load; freed so folds don't co-reside
+        if mode == "resident":
+            for predictor in self._predictors:
+                predictor.to(self.device)
 
-    def _load(self, spec: FoldSpec) -> SequencePredictor:
-        return SequencePredictor(
-            spec.checkpoint_dir, spec.dataset_dir, self.device, self.batch_size
-        )
+    def _load(self, spec: FoldSpec, *, device: str | None) -> SequencePredictor:
+        return SequencePredictor(spec.checkpoint_dir, spec.dataset_dir, device, self.batch_size)
 
     def _assert_consistent(self, predictors: list[SequencePredictor]) -> None:
         first_spec, first = self._specs[0], predictors[0]
@@ -139,13 +149,15 @@ class FoldEnsemble:
 
         outputs = []
         if self.mode == "resident":
-            for predictor in self._resident:
+            for predictor in self._predictors:
                 outputs.append(predictor(one_hot_batch))
         else:
-            for spec in self._specs:
-                predictor = self._load(spec)
+            # Weights are already in CPU RAM (loaded once at construction) — only the
+            # active fold's tensors move to the accelerator, and only for this call.
+            for predictor in self._predictors:
+                predictor.to(self.device)
                 outputs.append(predictor(one_hot_batch))
-                del predictor
+                predictor.to("cpu")
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
         return torch.stack(outputs, dim=0)

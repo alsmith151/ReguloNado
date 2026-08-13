@@ -12,7 +12,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 
-from regulonado.design.sequence import Seed, splice
+from regulonado.design.sequence import Seed, decode, splice
 
 RoundCallback = Callable[[dict], None]
 
@@ -110,7 +110,11 @@ def ism_greedy(
     current = context.copy()
     baseline_result = energy_fn(current[None])
     baseline_energy = float(_extract_energy(baseline_result)[0])
-    history: list[dict] = [_round_metrics(baseline_result, round_index=0, n_edits=0)]
+    history: list[dict] = [
+        _round_metrics(
+            baseline_result, round_index=0, n_edits=0, sequence=decode(current[:, editable])
+        )
+    ]
     if on_round is not None:
         on_round(history[0])
     state = DesignState(
@@ -169,6 +173,7 @@ def ism_greedy(
             round_index=round_index,
             n_edits=n_edits,
             positions=[position for position, _ in accepted],
+            sequence=decode(current[:, editable]),
         )
         history.append(entry)
         if on_round is not None:
@@ -337,7 +342,11 @@ class AdaLead:
         queries_per_batch = cfg.model_queries_per_batch or cfg.population_size * 10
 
         baseline_result = self.energy_fn(self.context[None])
-        history: list[dict] = [_round_metrics(baseline_result, round_index=0, n_edits=None)]
+        history: list[dict] = [
+            _round_metrics(
+                baseline_result, round_index=0, n_edits=None, sequence=decode(endogenous_insert)
+            )
+        ]
         if self.on_round is not None:
             self.on_round(history[0])
 
@@ -367,7 +376,12 @@ class AdaLead:
             # only needed the scalar energy to rank the population.
             round_context = splice(self.context, inserts[round_best], self.editable.start)
             round_result = self.energy_fn(round_context[None])
-            entry = _round_metrics(round_result, round_index=round_index, n_edits=None)
+            entry = _round_metrics(
+                round_result,
+                round_index=round_index,
+                n_edits=None,
+                sequence=decode(inserts[round_best]),
+            )
             history.append(entry)
             if self.on_round is not None:
                 self.on_round(entry)

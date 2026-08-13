@@ -240,7 +240,9 @@ def resolve_seeds(
     missing: list[tuple[str, str, int, int]] = []
 
     for chrom, start, end, name in rows:
-        name = name or f"{chrom}:{start}-{end}"
+        # "." is BED's own placeholder for "no value" (as in GTF/GFF); a literal dot is
+        # not a usable name any more than an empty column 4 is.
+        name = name if name and name != "." else f"{chrom}:{start}-{end}"
         candidates = index.containing(chrom, start, end)
         if not candidates:
             missing.append((name, chrom, start, end))

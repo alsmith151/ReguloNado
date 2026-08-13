@@ -123,7 +123,9 @@ def _write_trajectory(path: Path, records: list[DesignRecord]) -> None:
                     "method": record.method,
                     "round": entry["round"],
                     "energy": entry["energy"],
+                    "target": entry.get("target", ""),
                     "n_edits": entry.get("n_edits", ""),
+                    "sequence": entry.get("sequence", ""),
                 }
             )
     _write_tsv(path, rows)
