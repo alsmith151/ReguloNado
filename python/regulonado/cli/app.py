@@ -1944,6 +1944,7 @@ def design(
                 group=target,
                 job_type=method,
                 name=f"{seed.name}_{method}",
+                reinit=True,
                 config={
                     "candidate": seed.name,
                     "chrom": seed.chrom,
@@ -1957,6 +1958,8 @@ def design(
                 },
             )
 
+        wandb_history: list[dict] = []
+
         def _on_round(entry: dict, seed_name: str = seed.name, run=wandb_run) -> None:
             summary = ", ".join(
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
@@ -1965,15 +1968,18 @@ def design(
             )
             logger.info(f"  [{seed_name}] round {entry['round']}: {summary}")
             if run is not None:
-                # Sequences go in the end-of-run wandb.Table below, not the per-step scalar
-                # log — a full-length insert string doesn't chart usefully as a history metric.
+                # Log a new immutable table snapshot every round.  This keeps
+                # candidate sequences and their score breakdowns durable even
+                # if a later candidate fails or the job is interrupted.
+                wandb_history.append(dict(entry))
+                table = _trajectory_table(_wandb, wandb_history)
                 scalars = {k: v for k, v in entry.items() if k not in ("positions", "sequence")}
                 scalars.update({
                     f"track/{name}": entry[f"track_{index}"]
                     for index, name in enumerate(ensemble.track_names)
                     if f"track_{index}" in entry
                 })
-                run.log(scalars, step=entry["round"])
+                run.log({**scalars, "candidate_results": table}, step=entry["round"])
 
         if method == "ism":
             positions = None
@@ -2032,7 +2038,10 @@ def design(
             if holdout_result is not None:
                 wandb_run.summary["holdout_energy"] = float(holdout_result.energy[0])
                 wandb_run.summary["holdout_target"] = float(holdout_result.target[0])
-            wandb_run.log({"trajectory": _trajectory_table(_wandb, state.history)})
+            # Keep the final complete snapshot under a stable key as well.
+            wandb_run.log({"trajectory": _trajectory_table(_wandb, state.history),
+                           "candidate_results": _trajectory_table(_wandb, state.history)},
+                          step=len(state.history) - 1)
             wandb_run.finish()
 
         records.append(
