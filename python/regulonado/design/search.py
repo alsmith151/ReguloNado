@@ -35,7 +35,9 @@ def _score(energy_fn, batch: np.ndarray) -> np.ndarray:
     result = energy_fn(batch)
     energy = getattr(result, "energy", result)
     if hasattr(energy, "detach"):
-        energy = energy.detach().cpu().numpy()
+        # flashzoi runs in bf16 (BorzoiBackboneAdapter); numpy has no bfloat16, so cast
+        # to float32 before crossing the torch/numpy boundary.
+        energy = energy.detach().float().cpu().numpy()
     return np.asarray(energy, dtype=np.float64)
 
 
