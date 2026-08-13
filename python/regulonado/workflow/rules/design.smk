@@ -7,9 +7,12 @@ independent, so the candidate BED is sharded across jobs/GPUs and merged back to
 
 import re
 import shlex
+from datetime import datetime, timezone
+from uuid import uuid4
 from pathlib import Path
 
 DESIGN = config.get("design")
+DESIGN_WANDB_RUN_ID = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
 DESIGN_DIR = RESULTS / "design"
 
 
@@ -92,6 +95,12 @@ if DESIGN:
         merged = {}
         for settings in (DESIGN.get("common", {}), target.get("settings", {})):
             merged.update(_flatten_settings(settings))
+        # Keep each configured design target in its own W&B project by default.
+        # An explicit wandb_project in common/target settings remains authoritative.
+        merged.setdefault(
+            "wandb_project",
+            f"regulonado-design-{wildcards.target}-{DESIGN_WANDB_RUN_ID}",
+        )
         flags = []
         for key, value in sorted(merged.items()):
             flag = "--" + key.replace("_", "-")
