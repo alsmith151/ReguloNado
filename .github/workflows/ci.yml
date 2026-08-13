@@ -122,4 +122,5 @@ jobs:
             tests/test_losses.py \
             tests/test_model_transfer.py \
             tests/test_predict_bigwig.py \
-            tests/test_train_metrics.py -v
+            tests/test_train_metrics.py \
+            tests/test_design.py -v

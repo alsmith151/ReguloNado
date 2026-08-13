@@ -1,0 +1,89 @@
+# Same dataset/scaling/training as bamnado_csaw_folds.yaml, plus a design stage that mutates
+# a BED of candidate enhancers for cell-type specificity: optimises against fold_0..fold_2,
+# scores the result on the held-out fold_3. Replace the /path/to/... values before running.
+results_dir: results/bamnado_csaw_folds
+
+inputs:
+  intervals: /path/to/intervals.bed
+  fasta: /path/to/genome.fa
+  bigwig_dir: /path/to/bigwigs
+  # BAM stems must match the BigWig stems: sample_1.bigWig -> sample_1.bam.
+  bam_dir: /path/to/bams
+
+build:
+  context_length: 524288
+  bin_size: 32
+  n_pred_bins: 6144
+  shift_max_bp: 64
+  extract_threads: 32
+  arrow_write_threads: 4
+  arrow_batch_size: 512
+  compression: lz4
+  stage_to_scratch: true
+  drop_missing: true
+  dedupe_tracks: content
+
+recompress:
+  enabled: true
+  zstd_level: 3
+  max_batch_size: 4
+  workers: 8
+
+scaling:
+  method: bamnado
+  bamnado_method: csaw-background
+
+train:
+  nproc_per_node: 2
+
+  # Applied to every fold and every phase.
+  common:
+    trainer:
+      num_workers: 8
+      report_to: [wandb]
+
+  phases:
+    - name: head_only
+      preset: head_only
+    - name: unfreeze_output
+      preset: unfreeze_output
+    - name: deep_finetune
+      preset: deep_finetune
+    - name: peak_finetune
+      preset: peak_finetune
+
+  # Each entry is an independent model fold. Phases within a fold warm-start
+  # from the preceding phase; separate folds can run concurrently.
+  runs:
+    - name: fold_0
+      seed: 0
+      pretrained_model: /path/to/pretrained/model
+    - name: fold_1
+      seed: 1
+      pretrained_model: /path/to/pretrained/model
+    - name: fold_2
+      seed: 2
+      pretrained_model: /path/to/pretrained/model
+    - name: fold_3
+      seed: 3
+      pretrained_model: /path/to/pretrained/model
+
+design:
+  candidates: /path/to/my_enhancers.bed
+  shards: 8
+  holdout_run: fold_3
+  design_runs: [fold_0, fold_1, fold_2]
+  common:
+    fold_mode: sequential
+    batch_size: 8
+  targets:
+    - name: target_ism
+      target: <cell type>
+      group_by: source
+      method: ism
+      settings: {rounds: 30, top_k: 1, ism_stride: 1}
+    - name: target_adalead
+      target: <cell type>
+      group_by: source
+      method: adalead
+      settings: {rounds: 30, population_size: 32, mu: 1.0, recomb_rate: 0.1}

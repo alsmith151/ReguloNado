@@ -1639,6 +1639,301 @@ def predict(
         typer.echo(f"  {path}")
 
 
+@app.command()
+def design(
+    candidates: Annotated[
+        Path, typer.Option("--candidates", help="BED of enhancer candidates to optimise.")
+    ],
+    checkpoint: Annotated[
+        list[Path],
+        typer.Option(
+            "--checkpoint", help="Design-fold checkpoint dir; repeat once per fold optimised."
+        ),
+    ],
+    fasta_file: Annotated[
+        Path, typer.Option("--fasta", help="Genome FASTA (needs a .fai index).")
+    ],
+    target: Annotated[
+        str, typer.Option("--target", help="Target group value in the --group-by column.")
+    ],
+    out_dir: Annotated[Path, typer.Option("--out", help="Directory to write design outputs.")],
+    intervals: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--intervals",
+            help="Build-time interval BED the folds were trained on; default: the 'bed_file' "
+            "recorded in --dataset-dir's regulonado_metadata.json.",
+        ),
+    ] = None,
+    holdout_checkpoint: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--holdout-checkpoint", help="Held-out fold checkpoint: scored but never optimised."
+        ),
+    ] = None,
+    dataset_dir: Annotated[
+        Optional[Path],
+        typer.Option("--dataset-dir", help="Dataset dir with regulonado_metadata.json."),
+    ] = None,
+    group_by: Annotated[
+        str, typer.Option("--group-by", help="Track annotation column defining cell-type groups.")
+    ] = "source",
+    track_sheet: Annotated[
+        Optional[Path],
+        typer.Option("--track-sheet", help="CSV mapping tracks to their --group-by annotation."),
+    ] = None,
+    method: Annotated[str, typer.Option("--method", help="'ism' or 'adalead'.")] = "ism",
+    rounds: Annotated[int, typer.Option("--rounds", help="Search rounds.")] = 20,
+    top_k: Annotated[
+        int, typer.Option("--top-k", help="ISM: substitutions accepted per round.")
+    ] = 1,
+    pad: Annotated[
+        int,
+        typer.Option("--pad", help="Widen each candidate's editable span by N bp on both sides."),
+    ] = 0,
+    ism_stride: Annotated[
+        int, typer.Option("--ism-stride", help="ISM: only test every Nth editable position.")
+    ] = 1,
+    ism_positions: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--ism-positions", help="ISM: BED restricting the search to these positions."
+        ),
+    ] = None,
+    population_size: Annotated[
+        int, typer.Option("--population-size", help="AdaLead: population size.")
+    ] = 20,
+    mu: Annotated[float, typer.Option("--mu", help="AdaLead: per-base mutation rate scale.")] = 1.0,
+    recomb_rate: Annotated[
+        float, typer.Option("--recomb-rate", help="AdaLead: per-base recombination rate.")
+    ] = 0.1,
+    on_missing: Annotated[
+        str,
+        typer.Option("--on-missing", help="'error', 'center' or 'skip' for unmatched candidates."),
+    ] = "error",
+    offtarget_reduction: Annotated[
+        str, typer.Option("--offtarget-reduction", help="'logsumexp', 'max' or 'mean'.")
+    ] = "logsumexp",
+    target_alpha: Annotated[
+        float, typer.Option("--target-alpha", help="Scale applied to the on-target score.")
+    ] = 1.0,
+    bending_factor: Annotated[
+        float, typer.Option("--bending-factor", help="Bending transform strength.")
+    ] = 0.0,
+    fold_mode: Annotated[
+        str, typer.Option("--fold-mode", help="'resident' or 'sequential' fold residency.")
+    ] = "resident",
+    batch_size: Annotated[
+        int, typer.Option("--batch-size", help="Forward-pass batch size.")
+    ] = 8,
+    device: Annotated[
+        Optional[str], typer.Option("--device", help="Torch device (default: cuda if available).")
+    ] = None,
+) -> None:
+    """Mutate endogenous enhancer candidates to sharpen cell-type specificity.
+
+    Optimises exactly the spans in --candidates; context for each comes from the dataset window
+    (from --intervals) that contains it. Provide 3 --checkpoint folds to optimise against and,
+    ideally, a 4th --holdout-checkpoint to confirm the design isn't fold-specific overfitting.
+    """
+    import json
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"
+    )
+
+    if method not in ("ism", "adalead"):
+        raise typer.BadParameter("Expected 'ism' or 'adalead'", param_hint="--method")
+    if on_missing not in ("error", "center", "skip"):
+        raise typer.BadParameter("Expected 'error', 'center' or 'skip'", param_hint="--on-missing")
+    if fold_mode not in ("resident", "sequential"):
+        raise typer.BadParameter("Expected 'resident' or 'sequential'", param_hint="--fold-mode")
+    if not checkpoint:
+        raise typer.BadParameter("Provide at least one --checkpoint", param_hint="--checkpoint")
+
+    import pyfaidx
+    from regulonado.design.objective import SpecificityEnergy, resolve_track_groups
+    from regulonado.design.predictor import FoldEnsemble, FoldSpec
+    from regulonado.design.report import DesignRecord, write_designs
+    from regulonado.design.search import AdaLeadConfig, adalead, ism_greedy
+    from regulonado.design.sequence import DatasetWindowIndex, resolve_seeds
+    from regulonado.inference import _parse_bed, one_hot_context
+
+    if intervals is None:
+        if dataset_dir is None:
+            raise typer.BadParameter(
+                "Provide --intervals, or --dataset-dir with a regulonado_metadata.json "
+                "recording 'bed_file'",
+                param_hint="--intervals",
+            )
+        metadata = json.loads((dataset_dir / "regulonado_metadata.json").read_text())
+        bed_file = metadata.get("bed_file")
+        if not bed_file:
+            raise typer.BadParameter(
+                f"No 'bed_file' recorded in {dataset_dir / 'regulonado_metadata.json'}",
+                param_hint="--intervals",
+            )
+        intervals = Path(bed_file)
+
+    typer.echo(f"Loading {len(checkpoint)} design fold(s)...")
+    design_folds = [FoldSpec(checkpoint_dir=c, dataset_dir=dataset_dir) for c in checkpoint]
+    ensemble = FoldEnsemble(design_folds, device=device, batch_size=batch_size, mode=fold_mode)
+
+    holdout_ensemble = None
+    if holdout_checkpoint is not None:
+        holdout_ensemble = FoldEnsemble(
+            [FoldSpec(checkpoint_dir=holdout_checkpoint, dataset_dir=dataset_dir)],
+            device=device,
+            batch_size=batch_size,
+            mode=fold_mode,
+        )
+        holdout_geometry = (
+            holdout_ensemble.context_length,
+            holdout_ensemble.n_pred_bins,
+            holdout_ensemble.bin_size,
+        )
+        design_geometry = (ensemble.context_length, ensemble.n_pred_bins, ensemble.bin_size)
+        if holdout_geometry != design_geometry:
+            raise typer.BadParameter(
+                f"Held-out fold geometry {holdout_geometry} does not match design fold "
+                f"geometry {design_geometry}",
+                param_hint="--holdout-checkpoint",
+            )
+
+    index = DatasetWindowIndex.from_bed(
+        intervals,
+        context_length=ensemble.context_length,
+        n_pred_bins=ensemble.n_pred_bins,
+        bin_size=ensemble.bin_size,
+    )
+    seeds = resolve_seeds(candidates, index, on_missing=on_missing, pad=pad)
+    typer.echo(f"Resolved {len(seeds)} candidate(s) against dataset windows")
+
+    groups = resolve_track_groups(
+        ensemble.track_names,
+        group_by=group_by,
+        target=target,
+        track_sheet=track_sheet,
+        dataset_dir=dataset_dir,
+    )
+    typer.echo(f"Target group {target!r}; {len(groups.other_group_masks)} off-target group(s)")
+
+    fasta = pyfaidx.Fasta(str(fasta_file), as_raw=True, sequence_always_upper=False)
+    chrom_sizes = {name: len(fasta[name]) for name in fasta.keys()}
+
+    ism_hits: list[tuple[str, int, int]] | None = None
+    if ism_positions is not None:
+        ism_hits = _parse_bed(ism_positions)
+
+    if method == "ism":
+        total_positions = sum(
+            len(range(seed.editable.start, seed.editable.stop, ism_stride)) for seed in seeds
+        )
+        typer.echo(
+            f"Projected ISM forward passes: ~{total_positions * 3 * rounds * len(checkpoint):,} "
+            f"({total_positions} position(s) x 3 alt bases x {rounds} round(s) x "
+            f"{len(checkpoint)} fold(s))"
+        )
+
+    records: list[DesignRecord] = []
+    seed_report: list[dict] = []
+    for seed in seeds:
+        chrom_length = chrom_sizes.get(seed.chrom)
+        if chrom_length is None:
+            raise typer.BadParameter(f"Chromosome {seed.chrom!r} not present in {fasta_file}")
+        context = one_hot_context(fasta, seed.window, ensemble.context_length, chrom_length)
+
+        energy_fn = SpecificityEnergy(
+            ensemble,
+            groups,
+            seed.bins,
+            target_alpha=target_alpha,
+            bending_factor=bending_factor,
+            offtarget_reduction=offtarget_reduction,
+        )
+
+        if method == "ism":
+            positions = None
+            if ism_hits is not None:
+                positions = [
+                    hit_start + offset - seed.window.ctx_start
+                    for hit_chrom, hit_start, hit_end in ism_hits
+                    if hit_chrom == seed.chrom
+                    for offset in range(hit_end - hit_start)
+                ]
+            state = ism_greedy(
+                energy_fn,
+                seed,
+                context,
+                rounds=rounds,
+                top_k=top_k,
+                positions=positions,
+                stride=ism_stride,
+                batch_size=batch_size,
+            )
+        else:
+            adalead_config = AdaLeadConfig(
+                rounds=rounds, population_size=population_size, mu=mu, recomb_rate=recomb_rate
+            )
+            state = adalead(energy_fn, seed, context, adalead_config)
+
+        final_result = energy_fn(state.context[None])
+
+        holdout_result = None
+        if holdout_ensemble is not None:
+            holdout_energy_fn = SpecificityEnergy(
+                holdout_ensemble,
+                groups,
+                seed.bins,
+                target_alpha=target_alpha,
+                bending_factor=bending_factor,
+                offtarget_reduction=offtarget_reduction,
+            )
+            holdout_result = holdout_energy_fn(state.context[None])
+
+        records.append(
+            DesignRecord(
+                seed=seed,
+                method=method,
+                original_context=context,
+                state=state,
+                result=final_result,
+                holdout_result=holdout_result,
+            )
+        )
+        seed_report.append(
+            {
+                "name": seed.name,
+                "chrom": seed.chrom,
+                "start": seed.cand_start,
+                "end": seed.cand_end,
+                "window_start": seed.window.ctx_start,
+                "window_end": seed.window.ctx_end,
+                "fold_label": seed.fold_label,
+            }
+        )
+
+    run_info = {
+        "candidates": str(candidates),
+        "intervals": str(intervals),
+        "fasta": str(fasta_file),
+        "checkpoints": [str(c) for c in checkpoint],
+        "holdout_checkpoint": str(holdout_checkpoint) if holdout_checkpoint else None,
+        "target": target,
+        "group_by": group_by,
+        "method": method,
+        "rounds": rounds,
+        "pad": pad,
+        "on_missing": on_missing,
+        "fold_mode": fold_mode,
+        "track_groups": {"target": groups.target, "labels": groups.labels},
+        "seed_resolution": seed_report,
+    }
+    write_designs(out_dir, records, run_info=run_info)
+    typer.echo(f"Wrote {len(records)} design(s) to {out_dir}")
+
+
 def main() -> None:
     app()
 

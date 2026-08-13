@@ -182,6 +182,7 @@ regulonado predict results/train/flashzoi_0/peak_finetune/checkpoint-N \
 - [Run on Slurm](docs/slurm.md)
 - [Resume or reuse checkpoints](docs/checkpoints.md)
 - [Generate predictions](docs/prediction.md)
+- [Design synthetic enhancers](docs/design.md)
 - [Architecture](ARCHITECTURE.md)
 - [Contributing](CONTRIBUTING.md)
 

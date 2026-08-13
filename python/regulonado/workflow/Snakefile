@@ -98,14 +98,26 @@ def training_dataset_dir():
 ENRICHED_METADATA = SCALING_DIR / "regulonado_metadata.enriched.json"
 
 
+DESIGN = config.get("design")
+
+
 rule all:
     input:
         expand(
             str(TRAIN_DIR / "{run}" / PHASE_NAMES[-1] / "trainer_state.json"),
             run=RUN_NAMES,
         ),
+        *(
+            expand(
+                str(RESULTS / "design" / "{target}" / "designs.tsv"),
+                target=[target["name"] for target in DESIGN["targets"]],
+            )
+            if DESIGN
+            else []
+        ),
 
 
 include: "rules/dataset.smk"
 include: "rules/scaling.smk"
 include: "rules/train.smk"
+include: "rules/design.smk"

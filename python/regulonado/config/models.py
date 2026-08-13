@@ -164,6 +164,41 @@ class TrainConfig(BaseModel):
         return self
 
 
+class DesignTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    target: str
+    group_by: str = "source"
+    method: Literal["ism", "adalead"] = "ism"
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+    _check_name = field_validator("name")(staticmethod(_validate_name))
+
+
+class DesignConfig(BaseModel):
+    """Optional synthetic-enhancer-design stage: mutate candidates for cell-type specificity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidates: str = Field(min_length=1)
+    shards: int = Field(default=1, ge=1)
+    holdout_run: str | None = None
+    design_runs: list[str] | None = None
+    common: dict[str, Any] = Field(default_factory=dict)
+    targets: list[DesignTarget] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _target_names_are_unique(self) -> "DesignConfig":
+        names = [target.name for target in self.targets]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(
+                f"design.targets names must be unique; repeated: {', '.join(duplicates)}"
+            )
+        return self
+
+
 class RegulonadoConfig(BaseModel):
     """Top-level workflow config."""
 
@@ -175,6 +210,24 @@ class RegulonadoConfig(BaseModel):
     recompress: RecompressConfig = Field(default_factory=RecompressConfig)
     scaling: ScalingConfig = Field(default_factory=ScalingConfig)
     train: TrainConfig
+    design: DesignConfig | None = None
+
+    @model_validator(mode="after")
+    def _design_runs_are_known(self) -> "RegulonadoConfig":
+        if self.design is None:
+            return self
+        run_names = {run.name for run in self.train.runs}
+        for label, names in (
+            ("holdout_run", [self.design.holdout_run] if self.design.holdout_run else []),
+            ("design_runs", self.design.design_runs or []),
+        ):
+            unknown = sorted(name for name in names if name not in run_names)
+            if unknown:
+                raise ValueError(
+                    f"design.{label} names train.runs entries that don't exist: "
+                    f"{', '.join(unknown)}"
+                )
+        return self
 
     @model_validator(mode="after")
     def _scaling_inputs_are_present(self) -> "RegulonadoConfig":

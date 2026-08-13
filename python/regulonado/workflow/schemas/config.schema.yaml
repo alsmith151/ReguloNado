@@ -146,6 +146,35 @@ properties:
             seed: {type: integer, minimum: 0}
             pretrained_model: {type: string, minLength: 1}
             settings: {$ref: "#/$defs/settings"}
+  design:
+    type: object
+    additionalProperties: false
+    required: [candidates, targets]
+    description: >-
+      Optional synthetic-enhancer-design stage. Absent means the workflow behaves exactly as it
+      does today.
+    properties:
+      candidates: {type: string, minLength: 1}
+      shards: {type: integer, minimum: 1}
+      holdout_run: {type: string, minLength: 1}
+      design_runs:
+        type: array
+        minItems: 1
+        items: {type: string, minLength: 1}
+      common: {$ref: "#/$defs/settings"}
+      targets:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          additionalProperties: false
+          required: [name, target]
+          properties:
+            name: {$ref: "#/$defs/name"}
+            target: {type: string, minLength: 1}
+            group_by: {type: string, minLength: 1}
+            method: {enum: [ism, adalead]}
+            settings: {$ref: "#/$defs/settings"}
 $defs:
   name:
     type: string

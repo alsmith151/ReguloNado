@@ -113,3 +113,7 @@ Evaluation metrics and any configured reporting backend are controlled by the
 resolved `trainer` settings. Check the resolved configuration saved with a run
 before comparing experiments so that differences in seeds, model identifiers,
 batch sizes, and learning rates are explicit.
+
+Training several independent folds this way is also what
+[synthetic enhancer design](design.md) needs: it optimises against some folds
+and scores the result on a held-out one.
