@@ -89,13 +89,17 @@ def recompress_dataset(
     workers: int = 4,
     max_batch_size: int | None = None,
     remove_src: bool = False,
+    overwrite: bool = False,
 ) -> None:
     src = src.resolve()
     dst = dst.resolve()
     if not src.exists():
         raise FileNotFoundError(f"Source not found: {src}")
     if dst.exists():
-        raise ValueError(f"Destination already exists — remove it first: {dst}")
+        if not overwrite:
+            raise ValueError(f"Destination already exists — remove it first: {dst}")
+        logger.info(f"Removing existing destination: {dst}")
+        shutil.rmtree(dst)
 
     dst.mkdir(parents=True)
 

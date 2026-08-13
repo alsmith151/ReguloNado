@@ -422,9 +422,16 @@ def train(
         return
 
     if nproc_per_node > 1:
+        import os
+        import random
+
+        # Avoid port collisions when multiple jobs land on the same node.
+        job_id = int(os.environ.get("SLURM_JOB_ID", 0))
+        master_port = 29500 + (job_id % 1000) if job_id else random.randint(29500, 30499)
         command = [
             "torchrun",
             f"--nproc_per_node={nproc_per_node}",
+            f"--master_port={master_port}",
             "-m",
             "regulonado.training.runner",
             *overrides,
@@ -1083,7 +1090,7 @@ def calculate_bamnado_scaling(
 @app.command()
 def recompress_dataset(
     src: Annotated[Path, typer.Argument(help="Source saved dataset directory")],
-    dst: Annotated[Path, typer.Argument(help="Destination directory; must not exist")],
+    dst: Annotated[Path, typer.Argument(help="Destination directory")],
     level: Annotated[int, typer.Option("--level", help="ZSTD compression level")] = 3,
     workers: Annotated[int, typer.Option("--workers", "-w", help="Parallel shard workers")] = 4,
     max_batch_size: Annotated[
@@ -1093,6 +1100,10 @@ def recompress_dataset(
             help="Split Arrow record batches into sub-batches of at most this many rows",
         ),
     ] = None,
+    overwrite: Annotated[
+        bool,
+        typer.Option("--overwrite", help="Remove destination directory first if it exists"),
+    ] = False,
     remove_src: Annotated[
         bool,
         typer.Option("--remove-src", help="Delete source dataset after successful recompression"),
@@ -1108,6 +1119,7 @@ def recompress_dataset(
             level=level,
             workers=workers,
             max_batch_size=max_batch_size,
+            overwrite=overwrite,
             remove_src=remove_src,
         )
     except (FileNotFoundError, ValueError) as e:

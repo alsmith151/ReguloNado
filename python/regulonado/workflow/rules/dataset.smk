@@ -113,5 +113,6 @@ rule recompress_dataset:
             --level {params.zstd_level} \
             --max-batch-size {params.max_batch_size} \
             --workers {params.workers} \
+            --overwrite \
             > {log} 2>&1
         """
