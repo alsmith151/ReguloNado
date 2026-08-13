@@ -1741,6 +1741,13 @@ def design(
     device: Annotated[
         Optional[str], typer.Option("--device", help="Torch device (default: cuda if available).")
     ] = None,
+    wandb: Annotated[
+        bool,
+        typer.Option("--wandb/--no-wandb", help="Log per-round specificity to Weights & Biases."),
+    ] = False,
+    wandb_project: Annotated[
+        str, typer.Option("--wandb-project", help="W&B project (one run per candidate).")
+    ] = "regulonado-design",
 ) -> None:
     """Mutate endogenous enhancer candidates to sharpen cell-type specificity.
 
@@ -1848,9 +1855,23 @@ def design(
             f"{len(checkpoint)} fold(s))"
         )
 
+    wandb_run = None
+    if wandb:
+        try:
+            import wandb as _wandb
+        except ImportError as exc:
+            raise typer.BadParameter(
+                "--wandb requires the 'wandb' package (part of regulonado[train]).",
+                param_hint="--wandb",
+            ) from exc
+
     records: list[DesignRecord] = []
     seed_report: list[dict] = []
-    for seed in seeds:
+    for candidate_index, seed in enumerate(seeds, start=1):
+        logger.info(
+            f"[{candidate_index}/{len(seeds)}] {seed.name} "
+            f"({seed.chrom}:{seed.cand_start}-{seed.cand_end}), method={method}"
+        )
         chrom_length = chrom_sizes.get(seed.chrom)
         if chrom_length is None:
             raise typer.BadParameter(f"Chromosome {seed.chrom!r} not present in {fasta_file}")
@@ -1864,6 +1885,35 @@ def design(
             bending_factor=bending_factor,
             offtarget_reduction=offtarget_reduction,
         )
+
+        if wandb:
+            wandb_run = _wandb.init(
+                project=wandb_project,
+                group=target,
+                job_type=method,
+                name=f"{seed.name}_{method}",
+                config={
+                    "candidate": seed.name,
+                    "chrom": seed.chrom,
+                    "start": seed.cand_start,
+                    "end": seed.cand_end,
+                    "fold_label": seed.fold_label,
+                    "method": method,
+                    "rounds": rounds,
+                    "target": target,
+                    "group_by": group_by,
+                },
+            )
+
+        def _on_round(entry: dict, seed_name: str = seed.name, run=wandb_run) -> None:
+            summary = ", ".join(
+                f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
+                for key, value in entry.items()
+                if key not in ("round", "positions")
+            )
+            logger.info(f"  [{seed_name}] round {entry['round']}: {summary}")
+            if run is not None:
+                run.log({k: v for k, v in entry.items() if k != "positions"}, step=entry["round"])
 
         if method == "ism":
             positions = None
@@ -1883,12 +1933,13 @@ def design(
                 positions=positions,
                 stride=ism_stride,
                 batch_size=batch_size,
+                on_round=_on_round,
             )
         else:
             adalead_config = AdaLeadConfig(
                 rounds=rounds, population_size=population_size, mu=mu, recomb_rate=recomb_rate
             )
-            state = adalead(energy_fn, seed, context, adalead_config)
+            state = adalead(energy_fn, seed, context, adalead_config, on_round=_on_round)
 
         final_result = energy_fn(state.context[None])
 
@@ -1903,6 +1954,22 @@ def design(
                 offtarget_reduction=offtarget_reduction,
             )
             holdout_result = holdout_energy_fn(state.context[None])
+
+        baseline_energy = state.history[0]["energy"]
+        holdout_suffix = (
+            f", holdout={float(holdout_result.energy[0]):.4f}" if holdout_result is not None else ""
+        )
+        logger.success(
+            f"[{candidate_index}/{len(seeds)}] {seed.name} done: energy {baseline_energy:.4f} -> "
+            f"{state.energy:.4f}{holdout_suffix}"
+        )
+        if wandb_run is not None:
+            wandb_run.summary["final_energy"] = state.energy
+            wandb_run.summary["baseline_energy"] = baseline_energy
+            if holdout_result is not None:
+                wandb_run.summary["holdout_energy"] = float(holdout_result.energy[0])
+                wandb_run.summary["holdout_target"] = float(holdout_result.target[0])
+            wandb_run.finish()
 
         records.append(
             DesignRecord(

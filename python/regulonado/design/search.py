@@ -8,11 +8,13 @@ sampling truly de-novo sequence puts the search off the training manifold.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 
 from regulonado.design.sequence import Seed, splice
+
+RoundCallback = Callable[[dict], None]
 
 __all__ = ["AdaLead", "AdaLeadConfig", "DesignState", "adalead", "ism_greedy"]
 
@@ -26,19 +28,50 @@ class DesignState:
     history: list[dict] = field(default_factory=list)
 
 
+def _to_numpy(value) -> np.ndarray:
+    if hasattr(value, "detach"):
+        # flashzoi runs in bf16 (BorzoiBackboneAdapter); numpy has no bfloat16, so cast
+        # to float32 before crossing the torch/numpy boundary.
+        value = value.detach().float().cpu().numpy()
+    return np.asarray(value, dtype=np.float64)
+
+
+def _extract_energy(result) -> np.ndarray:
+    """Pull the per-sample energy array out of an ``EnergyResult`` or a bare tensor/array."""
+    return _to_numpy(getattr(result, "energy", result))
+
+
 def _score(energy_fn, batch: np.ndarray) -> np.ndarray:
     """Run ``energy_fn`` and return a plain float64 array of per-sample energies.
 
     Accepts either an ``EnergyResult``-like object (``.energy``) or a bare tensor/array, so a
     toy objective can stand in for ``SpecificityEnergy`` in tests.
     """
-    result = energy_fn(batch)
-    energy = getattr(result, "energy", result)
-    if hasattr(energy, "detach"):
-        # flashzoi runs in bf16 (BorzoiBackboneAdapter); numpy has no bfloat16, so cast
-        # to float32 before crossing the torch/numpy boundary.
-        energy = energy.detach().float().cpu().numpy()
-    return np.asarray(energy, dtype=np.float64)
+    return _extract_energy(energy_fn(batch))
+
+
+def _round_metrics(result, *, round_index: int, n_edits: int | None, **extra) -> dict:
+    """Build a progress-logging dict for one round from a single-sample ``EnergyResult``.
+
+    Falls back to just ``round``/``energy``/``n_edits`` for a bare tensor/array result (the toy
+    objectives used in tests), since ``target``/``per_group`` are ``SpecificityEnergy``-specific.
+    """
+    entry: dict = {
+        "round": round_index,
+        "energy": float(_extract_energy(result)[0]),
+        "n_edits": n_edits,
+        **extra,
+    }
+    target = getattr(result, "target", None)
+    if target is not None:
+        entry["target"] = float(_to_numpy(target)[0])
+    per_group = getattr(result, "per_group", None)
+    group_names = getattr(result, "group_names", None)
+    if per_group is not None and group_names is not None:
+        values = _to_numpy(per_group)[0]
+        for name, value in zip(group_names, values):
+            entry[f"group_{name}"] = float(value)
+    return entry
 
 
 # --------------------------------------------------------------------------- #
@@ -55,6 +88,7 @@ def ism_greedy(
     stride: int = 1,
     batch_size: int = 8,
     rng: np.random.Generator | None = None,
+    on_round: RoundCallback | None = None,
 ) -> DesignState:
     """Greedy in-silico mutagenesis: each round substitutes the ``top_k`` best non-conflicting
 
@@ -62,6 +96,8 @@ def ism_greedy(
     editable position. Stops early once no substitution lowers the energy. ``positions``, when
     given, is an explicit set of context-coordinate positions to restrict the search to (e.g.
     resolved from a motif BED); otherwise every ``stride``-th editable position is considered.
+    ``on_round``, when given, is called with each round's history entry as it is recorded
+    (including round 0, the unedited baseline) — the hook for progress logging.
     """
     del rng  # ISM is exhaustive at each position; no randomness to seed.
 
@@ -72,8 +108,11 @@ def ism_greedy(
         candidate_positions = list(range(editable.start, editable.stop, stride))
 
     current = context.copy()
-    baseline_energy = float(_score(energy_fn, current[None])[0])
-    history: list[dict] = [{"round": 0, "energy": baseline_energy, "n_edits": 0}]
+    baseline_result = energy_fn(current[None])
+    baseline_energy = float(_extract_energy(baseline_result)[0])
+    history: list[dict] = [_round_metrics(baseline_result, round_index=0, n_edits=0)]
+    if on_round is not None:
+        on_round(history[0])
     state = DesignState(
         seed=seed, context=current, editable=editable, energy=baseline_energy, history=history
     )
@@ -123,15 +162,17 @@ def ism_greedy(
             current[base_index, position] = 1
             n_edits += 1
 
-        new_energy = float(_score(energy_fn, current[None])[0])
-        history.append(
-            {
-                "round": round_index,
-                "energy": new_energy,
-                "n_edits": n_edits,
-                "positions": [position for position, _ in accepted],
-            }
+        round_result = energy_fn(current[None])
+        new_energy = float(_extract_energy(round_result)[0])
+        entry = _round_metrics(
+            round_result,
+            round_index=round_index,
+            n_edits=n_edits,
+            positions=[position for position, _ in accepted],
         )
+        history.append(entry)
+        if on_round is not None:
+            on_round(entry)
         state.energy = new_energy
 
     state.context = current
@@ -164,6 +205,7 @@ class AdaLead:
         context: np.ndarray,
         config: AdaLeadConfig,
         rng: np.random.Generator | None = None,
+        on_round: RoundCallback | None = None,
     ) -> None:
         self.energy_fn = energy_fn
         self.seed = seed
@@ -172,6 +214,7 @@ class AdaLead:
         self.seq_len = self.editable.stop - self.editable.start
         self.config = config
         self.rng = rng or np.random.default_rng()
+        self.on_round = on_round
         self.model_cost = 0
 
     def get_fitness(self, inserts: Sequence[np.ndarray]) -> np.ndarray:
@@ -293,8 +336,10 @@ class AdaLead:
 
         queries_per_batch = cfg.model_queries_per_batch or cfg.population_size * 10
 
-        baseline_energy = float(_score(self.energy_fn, self.context[None])[0])
-        history: list[dict] = [{"round": 0, "energy": baseline_energy, "n_edits": None}]
+        baseline_result = self.energy_fn(self.context[None])
+        history: list[dict] = [_round_metrics(baseline_result, round_index=0, n_edits=None)]
+        if self.on_round is not None:
+            self.on_round(history[0])
 
         inserts = population
         fitness = self.get_fitness(inserts)
@@ -316,7 +361,16 @@ class AdaLead:
             if round_energy < best_energy:
                 best_energy = round_energy
                 best_insert = inserts[round_best]
-            history.append({"round": round_index, "energy": round_energy, "n_edits": None})
+
+            # One extra forward pass on the round's best insert, purely so progress logging
+            # gets the same target/per-group breakdown ism_greedy reports — get_fitness above
+            # only needed the scalar energy to rank the population.
+            round_context = splice(self.context, inserts[round_best], self.editable.start)
+            round_result = self.energy_fn(round_context[None])
+            entry = _round_metrics(round_result, round_index=round_index, n_edits=None)
+            history.append(entry)
+            if self.on_round is not None:
+                self.on_round(entry)
 
         final_context = splice(self.context, best_insert, self.editable.start)
         return DesignState(
@@ -334,5 +388,6 @@ def adalead(
     context: np.ndarray,
     config: AdaLeadConfig,
     rng: np.random.Generator | None = None,
+    on_round: RoundCallback | None = None,
 ) -> DesignState:
-    return AdaLead(energy_fn, seed, context, config, rng=rng).generate()
+    return AdaLead(energy_fn, seed, context, config, rng=rng, on_round=on_round).generate()
