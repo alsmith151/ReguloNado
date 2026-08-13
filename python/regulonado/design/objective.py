@@ -143,19 +143,31 @@ def _labels_from_config_metadata(
 @dataclass(slots=True)
 class EnergyResult:
     energy: torch.Tensor  # (B,)
+    specificity: torch.Tensor  # (B,), absolute legacy specificity diagnostic
     target: torch.Tensor  # (B,)
     per_group: torch.Tensor  # (B, n_groups), group order == group_names
     per_fold_energy: torch.Tensor  # (n_folds, B)
+    per_fold_specificity: torch.Tensor  # (n_folds, B)
     group_names: list[str]  # target first, then other_group_masks in dict order
     per_track: torch.Tensor  # (B, n_tracks), averaged over folds
     track_mean: torch.Tensor  # (B, n_tracks), mean across selected bins
     track_max: torch.Tensor  # (B, n_tracks), maximum selected-bin signal
     track_topk: torch.Tensor  # (B, n_tracks), mean of ordered top-K bins
     track_topk_ratio: torch.Tensor  # (B, n_tracks), top-K mean / mean
+    target_gain: torch.Tensor  # (B,), relative to the seed for selective activation
+    per_group_gain: torch.Tensor  # (B, n_groups), same order as group_names
+    offtarget_boost: torch.Tensor  # (B,), aggregated positive off-target gain
+    objective: str
+    has_reference: bool
 
 
 class SpecificityEnergy(nn.Module):
-    """Lower is better: off-target signal minus (scaled) on-target signal."""
+    """Score sequence designs for absolute specificity or seed-relative activation.
+
+    The default ``specificity`` objective preserves the historical behaviour.  In
+    ``selective-activation`` mode, call :meth:`set_reference` with the unedited seed before
+    scoring designs.  Lower is better for both objectives.
+    """
 
     def __init__(
         self,
@@ -171,6 +183,9 @@ class SpecificityEnergy(nn.Module):
         fold_reduction: Literal["mean", "mean_plus_std"] = "mean",
         bin_reduction: Literal["mean", "topk"] = "mean",
         topk_bins: int = 10,
+        objective: Literal["specificity", "selective-activation"] = "specificity",
+        offtarget_boost_weight: float = 1.0,
+        offtarget_boost_tolerance: float = 0.0,
     ) -> None:
         super().__init__()
         self.ensemble = ensemble
@@ -185,8 +200,20 @@ class SpecificityEnergy(nn.Module):
         self.fold_reduction = fold_reduction
         self.bin_reduction = bin_reduction
         self.topk_bins = int(topk_bins)
+        self.objective = objective
+        self.offtarget_boost_weight = float(offtarget_boost_weight)
+        self.offtarget_boost_tolerance = float(offtarget_boost_tolerance)
+        self._reference_group_scores: dict[str, torch.Tensor] | None = None
         if self.topk_bins < 1:
             raise ValueError("topk_bins must be >= 1")
+        if self.objective not in ("specificity", "selective-activation"):
+            raise ValueError(f"Unknown objective={self.objective!r}")
+        if self.offtarget_temperature <= 0:
+            raise ValueError("offtarget_temperature must be > 0")
+        if self.offtarget_boost_weight < 0:
+            raise ValueError("offtarget_boost_weight must be >= 0")
+        if self.offtarget_boost_tolerance < 0:
+            raise ValueError("offtarget_boost_tolerance must be >= 0")
 
     def bend(self, tensor: torch.Tensor) -> torch.Tensor:
         if not self.bending_factor:
@@ -195,10 +222,7 @@ class SpecificityEnergy(nn.Module):
         adjustment = self.bending_factor * (exp_neg - 1.0)
         return tensor - adjustment
 
-    def forward(self, one_hot_batch) -> EnergyResult:
-        # torch.inference_mode() lives in the predictor, not here, so a future gradient
-        # path through the energy is not blocked by the objective itself.
-        preds = self.ensemble.predict(one_hot_batch)  # (n_folds, B, n_tracks, n_bins)
+    def _summarize_predictions(self, preds: torch.Tensor) -> dict[str, object]:
         preds = preds.clamp(self.a_min, self.a_max)
         preds = self.bend(preds)
         windowed = preds[..., self.bins]  # (n_folds, B, n_tracks, n_bins_in_window)
@@ -226,6 +250,42 @@ class SpecificityEnergy(nn.Module):
                 raise ValueError(f"Track group {group!r} selects no tracks")
             group_scores[group] = per_track[:, :, mask].mean(dim=-1)
 
+        return {
+            "group_scores": group_scores,
+            "per_track": per_track,
+            "track_mean": track_mean,
+            "track_max": track_max,
+            "track_topk": track_topk,
+        }
+
+    def set_reference(self, one_hot_seed) -> None:
+        """Cache per-fold group scores for an unedited, single-sequence seed."""
+        preds = self.ensemble.predict(one_hot_seed)
+        if preds.shape[1] != 1:
+            raise ValueError("selective-activation reference must contain exactly one sequence")
+        summary = self._summarize_predictions(preds)
+        group_scores = summary["group_scores"]
+        assert isinstance(group_scores, dict)
+        self._reference_group_scores = {
+            name: score.detach().clone() for name, score in group_scores.items()
+        }
+
+    def forward(self, one_hot_batch) -> EnergyResult:
+        # torch.inference_mode() lives in the predictor, not here, so a future gradient
+        # path through the energy is not blocked by the objective itself.
+        preds = self.ensemble.predict(one_hot_batch)  # (n_folds, B, n_tracks, n_bins)
+        summary = self._summarize_predictions(preds)
+        group_scores = summary["group_scores"]
+        assert isinstance(group_scores, dict)
+        per_track = summary["per_track"]
+        track_mean = summary["track_mean"]
+        track_max = summary["track_max"]
+        track_topk = summary["track_topk"]
+        assert isinstance(per_track, torch.Tensor)
+        assert isinstance(track_mean, torch.Tensor)
+        assert isinstance(track_max, torch.Tensor)
+        assert isinstance(track_topk, torch.Tensor)
+
         target_score = group_scores[self.groups.target]  # (n_folds, B)
         other_names = list(self.groups.other_group_masks)
         other_scores = torch.stack([group_scores[name] for name in other_names], dim=-1)
@@ -240,27 +300,69 @@ class SpecificityEnergy(nn.Module):
         else:
             raise ValueError(f"Unknown offtarget_reduction={self.offtarget_reduction!r}")
 
-        per_fold_energy = offtarget - self.target_alpha * target_score  # (n_folds, B)
+        per_fold_specificity = offtarget - self.target_alpha * target_score
+        group_names = [self.groups.target, *other_names]
+        if self.objective == "selective-activation":
+            if self._reference_group_scores is None:
+                raise RuntimeError(
+                    "selective-activation requires set_reference(unedited_seed) before scoring"
+                )
+            group_gains = {
+                name: group_scores[name] - self._reference_group_scores[name]
+                for name in group_names
+            }
+            target_gain_by_fold = group_gains[self.groups.target]
+            other_gains = torch.stack([group_gains[name] for name in other_names], dim=-1)
+            positive_boosts = torch.relu(
+                other_gains - self.offtarget_boost_tolerance
+            )
+            scaled_boosts = positive_boosts / self.offtarget_temperature
+            # log-mean-exp is a smooth maximum whose baseline is exactly zero when every
+            # positive boost is zero.
+            smooth_boost = self.offtarget_temperature * (
+                torch.logsumexp(scaled_boosts, dim=-1)
+                - torch.logsumexp(torch.zeros_like(scaled_boosts), dim=-1)
+            )
+            per_fold_energy = (
+                -self.target_alpha * target_gain_by_fold
+                + self.offtarget_boost_weight * smooth_boost
+            )
+        else:
+            group_gains = {name: torch.zeros_like(group_scores[name]) for name in group_names}
+            target_gain_by_fold = torch.zeros_like(target_score)
+            smooth_boost = torch.zeros_like(target_score)
+            per_fold_energy = per_fold_specificity
 
         if self.fold_reduction == "mean":
             energy = per_fold_energy.mean(dim=0)
+            specificity = per_fold_specificity.mean(dim=0)
         elif self.fold_reduction == "mean_plus_std":
             energy = per_fold_energy.mean(dim=0) + per_fold_energy.std(dim=0)
+            specificity = per_fold_specificity.mean(dim=0) + per_fold_specificity.std(dim=0)
         else:
             raise ValueError(f"Unknown fold_reduction={self.fold_reduction!r}")
 
-        group_names = [self.groups.target, *other_names]
         per_group = torch.stack([group_scores[name] for name in group_names], dim=-1).mean(dim=0)
+        per_group_gain = torch.stack([group_gains[name] for name in group_names], dim=-1).mean(
+            dim=0
+        )
 
         return EnergyResult(
             energy=energy,
+            specificity=specificity,
             target=target_score.mean(dim=0),
             per_group=per_group,
             per_fold_energy=per_fold_energy,
+            per_fold_specificity=per_fold_specificity,
             group_names=group_names,
             per_track=per_track.mean(dim=0),
             track_mean=track_mean.mean(dim=0),
             track_max=track_max.mean(dim=0),
             track_topk=track_topk.mean(dim=0),
             track_topk_ratio=(track_topk / track_mean.clamp_min(1e-8)).mean(dim=0),
+            target_gain=target_gain_by_fold.mean(dim=0),
+            per_group_gain=per_group_gain,
+            offtarget_boost=smooth_boost.mean(dim=0),
+            objective=self.objective,
+            has_reference=self._reference_group_scores is not None,
         )

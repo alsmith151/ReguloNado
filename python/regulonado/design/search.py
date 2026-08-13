@@ -62,15 +62,29 @@ def _round_metrics(result, *, round_index: int, n_edits: int | None, **extra) ->
         "n_edits": n_edits,
         **extra,
     }
+    specificity = getattr(result, "specificity", None)
+    if specificity is not None:
+        entry["specificity"] = float(_to_numpy(specificity)[0])
     target = getattr(result, "target", None)
     if target is not None:
         entry["target"] = float(_to_numpy(target)[0])
+    target_gain = getattr(result, "target_gain", None)
+    if target_gain is not None:
+        entry["target_gain"] = float(_to_numpy(target_gain)[0])
+    offtarget_boost = getattr(result, "offtarget_boost", None)
+    if offtarget_boost is not None:
+        entry["offtarget_boost"] = float(_to_numpy(offtarget_boost)[0])
     per_group = getattr(result, "per_group", None)
     group_names = getattr(result, "group_names", None)
     if per_group is not None and group_names is not None:
         values = _to_numpy(per_group)[0]
         for name, value in zip(group_names, values):
             entry[f"group_{name}"] = float(value)
+    per_group_gain = getattr(result, "per_group_gain", None)
+    if per_group_gain is not None and group_names is not None:
+        values = _to_numpy(per_group_gain)[0]
+        for name, value in zip(group_names, values):
+            entry[f"group_gain_{name}"] = float(value)
     per_track = getattr(result, "per_track", None)
     if per_track is not None:
         for index, value in enumerate(_to_numpy(per_track)[0]):

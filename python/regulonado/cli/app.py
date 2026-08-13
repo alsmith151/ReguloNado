@@ -8,9 +8,9 @@ from pathlib import Path
 from shlex import join as shell_join
 from typing import Annotated, Optional
 
-import typer
 import numpy as np
 import torch
+import typer
 from loguru import logger
 from regulonado.cli.pipeline import pipeline as _pipeline
 
@@ -1659,7 +1659,16 @@ def _trajectory_table(wandb_module, history: list[dict]):
     Column set is the union across rounds (round 0 and non-improving rounds lack "positions";
     AdaLead rounds lack "n_edits"), so every row gets every column, blank where not recorded.
     """
-    fixed = ["round", "sequence", "energy", "target", "n_edits"]
+    fixed = [
+        "round",
+        "sequence",
+        "energy",
+        "specificity",
+        "target",
+        "target_gain",
+        "offtarget_boost",
+        "n_edits",
+    ]
     dynamic = sorted(
         {key for entry in history for key in entry if key not in (*fixed, "positions")}
     )
@@ -1748,9 +1757,14 @@ def design(
         int, typer.Option("--population-size", help="AdaLead: population size.")
     ] = 20,
     model_queries_per_batch: Annotated[
-        Optional[int], typer.Option("--model-queries-per-batch", help="AdaLead oracle query budget per round.")
+        Optional[int],
+        typer.Option(
+            "--model-queries-per-batch", help="AdaLead oracle query budget per round."
+        ),
     ] = None,
-    top_n: Annotated[int, typer.Option("--top-n", help="Number of final candidates in the artifact.")] = 10,
+    top_n: Annotated[
+        int, typer.Option("--top-n", help="Number of final candidates in the artifact.")
+    ] = 10,
     mu: Annotated[float, typer.Option("--mu", help="AdaLead: per-base mutation rate scale.")] = 1.0,
     recomb_rate: Annotated[
         float, typer.Option("--recomb-rate", help="AdaLead: per-base recombination rate.")
@@ -1768,14 +1782,44 @@ def design(
     offtarget_reduction: Annotated[
         str, typer.Option("--offtarget-reduction", help="'logsumexp', 'max' or 'mean'.")
     ] = "logsumexp",
+    objective: Annotated[
+        str,
+        typer.Option(
+            "--objective", help="'specificity' or seed-relative 'selective-activation'."
+        ),
+    ] = "specificity",
+    offtarget_boost_weight: Annotated[
+        float,
+        typer.Option(
+            "--offtarget-boost-weight",
+            help="Selective activation: weight applied to positive off-target gain.",
+        ),
+    ] = 1.0,
+    offtarget_boost_tolerance: Annotated[
+        float,
+        typer.Option(
+            "--offtarget-boost-tolerance",
+            help="Selective activation: off-target gain ignored before applying the penalty.",
+        ),
+    ] = 0.0,
+    offtarget_temperature: Annotated[
+        float,
+        typer.Option(
+            "--offtarget-temperature", help="Temperature for soft off-target aggregation."
+        ),
+    ] = 1.0,
     target_alpha: Annotated[
         float, typer.Option("--target-alpha", help="Scale applied to the on-target score.")
     ] = 1.0,
     bending_factor: Annotated[
         float, typer.Option("--bending-factor", help="Bending transform strength.")
     ] = 0.0,
-    bin_reduction: Annotated[str, typer.Option("--bin-reduction", help="Bin statistic: mean or topk.")] = "mean",
-    topk_bins: Annotated[int, typer.Option("--topk-bins", help="Number of bins in top-K statistic.")] = 10,
+    bin_reduction: Annotated[
+        str, typer.Option("--bin-reduction", help="Bin statistic: mean or topk.")
+    ] = "mean",
+    topk_bins: Annotated[
+        int, typer.Option("--topk-bins", help="Number of bins in top-K statistic.")
+    ] = 10,
     seed: Annotated[Optional[int], typer.Option("--seed", help="Random seed for AdaLead.")] = None,
     fold_mode: Annotated[
         str, typer.Option("--fold-mode", help="'resident' or 'sequential' fold residency.")
@@ -1794,7 +1838,8 @@ def design(
         str, typer.Option("--wandb-project", help="W&B project (one run per candidate).")
     ] = "regulonado-design",
     wandb_group: Annotated[
-        Optional[str], typer.Option("--wandb-group", help="W&B group label for this design invocation.")
+        Optional[str],
+        typer.Option("--wandb-group", help="W&B group label for this design invocation."),
     ] = None,
 ) -> None:
     """Mutate endogenous enhancer candidates to sharpen cell-type specificity.
@@ -1818,6 +1863,16 @@ def design(
         raise typer.BadParameter("Expected 'resident' or 'sequential'", param_hint="--fold-mode")
     if bin_reduction not in ("mean", "topk"):
         raise typer.BadParameter("Expected 'mean' or 'topk'", param_hint="--bin-reduction")
+    if objective not in ("specificity", "selective-activation"):
+        raise typer.BadParameter(
+            "Expected 'specificity' or 'selective-activation'", param_hint="--objective"
+        )
+    if offtarget_boost_weight < 0:
+        raise typer.BadParameter("Must be >= 0", param_hint="--offtarget-boost-weight")
+    if offtarget_boost_tolerance < 0:
+        raise typer.BadParameter("Must be >= 0", param_hint="--offtarget-boost-tolerance")
+    if offtarget_temperature <= 0:
+        raise typer.BadParameter("Must be > 0", param_hint="--offtarget-temperature")
     if not checkpoint:
         raise typer.BadParameter("Provide at least one --checkpoint", param_hint="--checkpoint")
     import pyfaidx
@@ -1928,7 +1983,8 @@ def design(
     for candidate_index, candidate_seed in enumerate(seeds, start=1):
         logger.info(
             f"[{candidate_index}/{len(seeds)}] {candidate_seed.name} "
-            f"({candidate_seed.chrom}:{candidate_seed.cand_start}-{candidate_seed.cand_end}), method={method}"
+            f"({candidate_seed.chrom}:{candidate_seed.cand_start}-"
+            f"{candidate_seed.cand_end}), method={method}"
         )
         seed = candidate_seed
         chrom_length = chrom_sizes.get(seed.chrom)
@@ -1943,9 +1999,15 @@ def design(
             target_alpha=target_alpha,
             bending_factor=bending_factor,
             offtarget_reduction=offtarget_reduction,
+            offtarget_temperature=offtarget_temperature,
             bin_reduction=bin_reduction,
             topk_bins=topk_bins,
+            objective=objective,
+            offtarget_boost_weight=offtarget_boost_weight,
+            offtarget_boost_tolerance=offtarget_boost_tolerance,
         )
+        if objective == "selective-activation":
+            energy_fn.set_reference(context[None])
 
         if wandb:
             wandb_run = _wandb.init(
@@ -1961,6 +2023,7 @@ def design(
                     "end": seed.cand_end,
                     "fold_label": seed.fold_label,
                     "method": method,
+                    "objective": objective,
                     "rounds": rounds,
                     "target": target,
                     "group_by": group_by,
@@ -2019,8 +2082,16 @@ def design(
                 threshold=threshold,
                 rho=rho,
             )
-            state = adalead(energy_fn, seed, context, adalead_config,
-                            rng=np.random.default_rng(np.random.SeedSequence([run_seed, candidate_index])), on_round=_on_round)
+            state = adalead(
+                energy_fn,
+                seed,
+                context,
+                adalead_config,
+                rng=np.random.default_rng(
+                    np.random.SeedSequence([run_seed, candidate_index])
+                ),
+                on_round=_on_round,
+            )
 
         final_result = energy_fn(state.context[None])
 
@@ -2033,7 +2104,15 @@ def design(
                 target_alpha=target_alpha,
                 bending_factor=bending_factor,
                 offtarget_reduction=offtarget_reduction,
+                offtarget_temperature=offtarget_temperature,
+                bin_reduction=bin_reduction,
+                topk_bins=topk_bins,
+                objective=objective,
+                offtarget_boost_weight=offtarget_boost_weight,
+                offtarget_boost_tolerance=offtarget_boost_tolerance,
             )
+            if objective == "selective-activation":
+                holdout_energy_fn.set_reference(context[None])
             holdout_result = holdout_energy_fn(state.context[None])
 
         baseline_energy = state.history[0]["energy"]
@@ -2047,9 +2126,20 @@ def design(
         if wandb_run is not None:
             wandb_run.summary["final_energy"] = state.energy
             wandb_run.summary["baseline_energy"] = baseline_energy
+            wandb_run.summary["final_specificity"] = float(final_result.specificity[0])
+            wandb_run.summary["final_target_gain"] = float(final_result.target_gain[0])
+            wandb_run.summary["final_offtarget_boost"] = float(
+                final_result.offtarget_boost[0]
+            )
             if holdout_result is not None:
                 wandb_run.summary["holdout_energy"] = float(holdout_result.energy[0])
                 wandb_run.summary["holdout_target"] = float(holdout_result.target[0])
+                wandb_run.summary["holdout_target_gain"] = float(
+                    holdout_result.target_gain[0]
+                )
+                wandb_run.summary["holdout_offtarget_boost"] = float(
+                    holdout_result.offtarget_boost[0]
+                )
             # Keep the final complete snapshot under a stable key as well.
             wandb_run.log({"trajectory": _trajectory_table(_wandb, state.history),
                            "candidate_results": _trajectory_table(_wandb, state.history)},
@@ -2092,6 +2182,7 @@ def design(
         "checkpoints": [str(c) for c in checkpoint],
         "holdout_checkpoint": str(holdout_checkpoint) if holdout_checkpoint else None,
         "target": target,
+        "objective": objective,
         "group_by": group_by,
         "method": method,
         "rounds": rounds,
@@ -2107,10 +2198,15 @@ def design(
         "target_alpha": target_alpha,
         "bending_factor": bending_factor,
         "offtarget_reduction": offtarget_reduction,
+        "offtarget_temperature": offtarget_temperature,
+        "offtarget_boost_weight": offtarget_boost_weight,
+        "offtarget_boost_tolerance": offtarget_boost_tolerance,
         "batch_size": batch_size,
         "device": str(device or ("cuda" if torch.cuda.is_available() else "cpu")),
         "track_names": ensemble.track_names,
-        "reproducibility": {"torch_deterministic": bool(torch.are_deterministic_algorithms_enabled())},
+        "reproducibility": {
+            "torch_deterministic": bool(torch.are_deterministic_algorithms_enabled())
+        },
         "status": "complete",
     }
     write_designs(out_dir, records, run_info=run_info)

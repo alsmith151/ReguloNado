@@ -84,15 +84,27 @@ def _write_designs_tsv(path: Path, records: list[DesignRecord]) -> None:
             "fold_label": seed.fold_label or "",
             "method": record.method,
             "energy": float(state.energy),
+            "objective": getattr(result, "objective", "specificity") if result is not None else "",
+            "specificity": float(result.specificity[0]) if result is not None else "",
             "target_score": float(result.target[0]) if result is not None else "",
+            "target_gain": float(result.target_gain[0]) if result is not None else "",
+            "offtarget_boost": float(result.offtarget_boost[0]) if result is not None else "",
             "n_edits": n_edits,
             "per_fold_energy": (
                 ",".join(f"{v:.6g}" for v in result.per_fold_energy[:, 0].tolist())
                 if result is not None
                 else ""
             ),
+            "per_fold_specificity": (
+                ",".join(f"{v:.6g}" for v in result.per_fold_specificity[:, 0].tolist())
+                if result is not None
+                else ""
+            ),
         }
         row.update(_group_columns(result))
+        if result is not None:
+            for name, value in zip(result.group_names, result.per_group_gain[0].tolist()):
+                row[f"group_gain_{name}"] = float(value)
         if result is not None and hasattr(result, "track_topk"):
             for i, value in enumerate(result.track_mean[0].tolist()):
                 row[f"track_{i}_mean"] = float(value)
@@ -101,9 +113,21 @@ def _write_designs_tsv(path: Path, records: list[DesignRecord]) -> None:
                 row[f"track_{i}_topk_ratio"] = float(result.track_topk_ratio[0, i])
         holdout = record.holdout_result
         row["holdout_energy"] = float(holdout.energy[0]) if holdout is not None else ""
+        row["holdout_specificity"] = (
+            float(holdout.specificity[0]) if holdout is not None else ""
+        )
         row["holdout_target_score"] = float(holdout.target[0]) if holdout is not None else ""
+        row["holdout_target_gain"] = (
+            float(holdout.target_gain[0]) if holdout is not None else ""
+        )
+        row["holdout_offtarget_boost"] = (
+            float(holdout.offtarget_boost[0]) if holdout is not None else ""
+        )
         for name, value in _group_columns(holdout).items():
             row[f"holdout_{name}"] = value
+        if holdout is not None:
+            for name, value in zip(holdout.group_names, holdout.per_group_gain[0].tolist()):
+                row[f"holdout_group_gain_{name}"] = float(value)
         rows.append(row)
 
     _write_tsv(path, rows)
@@ -127,17 +151,26 @@ def _write_trajectory(path: Path, records: list[DesignRecord]) -> None:
     rows: list[dict[str, Any]] = []
     for record in records:
         for entry in record.state.history:
-            rows.append(
+            row = {
+                "name": record.seed.name,
+                "method": record.method,
+                "round": entry["round"],
+                "energy": entry["energy"],
+                "specificity": entry.get("specificity", ""),
+                "target": entry.get("target", ""),
+                "target_gain": entry.get("target_gain", ""),
+                "offtarget_boost": entry.get("offtarget_boost", ""),
+                "n_edits": entry.get("n_edits", ""),
+                "sequence": entry.get("sequence", ""),
+            }
+            row.update(
                 {
-                    "name": record.seed.name,
-                    "method": record.method,
-                    "round": entry["round"],
-                    "energy": entry["energy"],
-                    "target": entry.get("target", ""),
-                    "n_edits": entry.get("n_edits", ""),
-                    "sequence": entry.get("sequence", ""),
+                    key: value
+                    for key, value in entry.items()
+                    if key.startswith("group_")
                 }
             )
+            rows.append(row)
     _write_tsv(path, rows)
 
 
@@ -178,18 +211,43 @@ def _write_tsv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writeheader()
         writer.writerows(rows)
 
+
 def _write_topk(path: Path, records: list[DesignRecord], k: int = 10) -> None:
     rows = []
     for record in records:
         result = record.result
         if result is None or not hasattr(result, "per_track"):
             continue
-        values = result.track_topk[0].tolist() if hasattr(result, "track_topk") else result.per_track[0].tolist()
-        means = result.track_mean[0].tolist() if hasattr(result, "track_mean") else [None] * len(values)
-        maxima = result.track_max[0].tolist() if hasattr(result, "track_max") else [None] * len(values)
-        ratios = result.track_topk_ratio[0].tolist() if hasattr(result, "track_topk_ratio") else [None] * len(values)
+        values = (
+            result.track_topk[0].tolist()
+            if hasattr(result, "track_topk")
+            else result.per_track[0].tolist()
+        )
+        means = (
+            result.track_mean[0].tolist()
+            if hasattr(result, "track_mean")
+            else [None] * len(values)
+        )
+        maxima = (
+            result.track_max[0].tolist()
+            if hasattr(result, "track_max")
+            else [None] * len(values)
+        )
+        ratios = (
+            result.track_topk_ratio[0].tolist()
+            if hasattr(result, "track_topk_ratio")
+            else [None] * len(values)
+        )
         for index, value in enumerate(values):
-            rows.append({"name": record.seed.name, "track_index": index,
-                         "topk_mean": float(value), "mean": float(means[index]),
-                         "max": float(maxima[index]), "topk_ratio": float(ratios[index]), "k": k})
+            rows.append(
+                {
+                    "name": record.seed.name,
+                    "track_index": index,
+                    "topk_mean": float(value),
+                    "mean": float(means[index]),
+                    "max": float(maxima[index]),
+                    "topk_ratio": float(ratios[index]),
+                    "k": k,
+                }
+            )
     _write_tsv(path, rows)

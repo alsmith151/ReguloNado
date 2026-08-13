@@ -234,6 +234,7 @@ def test_specificity_energy_hand_computed_and_multi_track_group():
 
     # off_mean - target_mean = 6 - signal for both folds (see _DummyEnsemble docstring).
     assert result.energy.tolist() == pytest.approx([1.0, 2.0])
+    assert result.specificity.tolist() == pytest.approx([1.0, 2.0])
     assert result.target.tolist() == pytest.approx([13.5, 12.5])
     assert torch.allclose(result.per_fold_energy, torch.tensor([[1.0, 2.0], [1.0, 2.0]]))
     assert result.group_names == ["target", "off"]
@@ -251,6 +252,120 @@ def test_specificity_energy_batch_independence():
         [energy_fn(a[None]).energy[0], energy_fn(b[None]).energy[0]]
     )
     assert torch.allclose(batched, individually)
+
+
+class _SelectiveEnsemble:
+    """Two folds with target/off-target signals controlled by separate input positions."""
+
+    def predict(self, one_hot_batch):
+        if isinstance(one_hot_batch, np.ndarray):
+            one_hot_batch = torch.from_numpy(one_hot_batch).float()
+        batch = one_hot_batch.shape[0]
+        preds = torch.zeros(2, batch, 3, 1)
+        # Fold-specific target scaling catches implementations that subtract after folding.
+        preds[0, :, 0, 0] = one_hot_batch[:, 0, 0]
+        preds[1, :, 0, 0] = 2 * one_hot_batch[:, 0, 0]
+        preds[:, :, 1, 0] = one_hot_batch[:, 1, 1]
+        preds[:, :, 2, 0] = 2 * one_hot_batch[:, 2, 2]
+        return preds
+
+
+def _selective_groups() -> TrackGroups:
+    return TrackGroups(
+        labels=["target", "off-a", "off-b"],
+        target="target",
+        target_idx=torch.tensor([True, False, False]),
+        other_group_masks={
+            "off-a": torch.tensor([False, True, False]),
+            "off-b": torch.tensor([False, False, True]),
+        },
+    )
+
+
+def _selective_energy(**kwargs) -> SpecificityEnergy:
+    return SpecificityEnergy(
+        _SelectiveEnsemble(),
+        _selective_groups(),
+        slice(0, 1),
+        objective="selective-activation",
+        **kwargs,
+    )
+
+
+def test_selective_activation_requires_and_zeroes_seed_reference():
+    energy_fn = _selective_energy()
+    seed = np.zeros((4, 3), dtype=np.float32)
+    with pytest.raises(RuntimeError, match="set_reference"):
+        energy_fn(seed[None])
+
+    energy_fn.set_reference(seed[None])
+    result = energy_fn(seed[None])
+    assert result.energy.tolist() == pytest.approx([0.0])
+    assert result.target_gain.tolist() == pytest.approx([0.0])
+    assert torch.allclose(result.per_group_gain, torch.tensor([[0.0, 0.0, 0.0]]))
+    assert result.offtarget_boost.tolist() == pytest.approx([0.0])
+    assert result.objective == "selective-activation"
+    assert result.has_reference
+
+
+def test_selective_activation_rewards_fold_relative_target_gain():
+    energy_fn = _selective_energy()
+    seed = np.zeros((4, 3), dtype=np.float32)
+    design = seed.copy()
+    design[0, 0] = 1
+    energy_fn.set_reference(seed[None])
+
+    result = energy_fn(design[None])
+
+    # Per-fold target gains are 1 and 2, so reduction happens after subtraction.
+    assert result.target_gain.tolist() == pytest.approx([1.5])
+    assert result.per_fold_energy[:, 0].tolist() == pytest.approx([-1.0, -2.0])
+    assert result.energy.tolist() == pytest.approx([-1.5])
+    assert result.specificity.tolist() != pytest.approx(result.energy.tolist())
+
+
+def test_selective_activation_penalizes_soft_max_of_positive_offtarget_gains():
+    energy_fn = _selective_energy(offtarget_boost_weight=2.0, offtarget_temperature=1.0)
+    seed = np.zeros((4, 3), dtype=np.float32)
+    design = seed.copy()
+    design[0, 0] = 1  # target gains 1 and 2 across folds
+    design[1, 1] = 1  # off-a gain 1
+    design[2, 2] = 1  # off-b gain 2
+    energy_fn.set_reference(seed[None])
+
+    result = energy_fn(design[None])
+    expected_boost = np.log((np.exp(1.0) + np.exp(2.0)) / 2.0)
+    assert result.offtarget_boost.tolist() == pytest.approx([expected_boost])
+    assert result.energy.tolist() == pytest.approx([-1.5 + 2.0 * expected_boost])
+
+
+def test_selective_activation_does_not_reward_offtarget_decreases():
+    energy_fn = _selective_energy()
+    seed = np.zeros((4, 3), dtype=np.float32)
+    seed[1, 1] = 1
+    seed[2, 2] = 1
+    design = np.zeros_like(seed)
+    energy_fn.set_reference(seed[None])
+
+    result = energy_fn(design[None])
+
+    assert torch.allclose(result.per_group_gain, torch.tensor([[0.0, -1.0, -2.0]]))
+    assert result.offtarget_boost.tolist() == pytest.approx([0.0])
+    assert result.energy.tolist() == pytest.approx([0.0])
+
+
+def test_selective_activation_applies_offtarget_tolerance():
+    energy_fn = _selective_energy(offtarget_boost_tolerance=1.0)
+    seed = np.zeros((4, 3), dtype=np.float32)
+    design = seed.copy()
+    design[1, 1] = 1
+    energy_fn.set_reference(seed[None])
+
+    result = energy_fn(design[None])
+
+    assert result.per_group_gain[0, 1].item() == pytest.approx(1.0)
+    assert result.offtarget_boost.tolist() == pytest.approx([0.0])
+    assert result.energy.tolist() == pytest.approx([0.0])
 
 
 # --------------------------------------------------------------------------- #
@@ -443,6 +558,8 @@ def test_design_config_parses_example_workflow_config():
     assert {t.name for t in config.design.targets} == {"target_ism", "target_adalead"}
     assert config.design.holdout_run == "fold_3"
     assert config.design.design_runs == ["fold_0", "fold_1", "fold_2"]
+    assert config.design.common["objective"] == "selective-activation"
+    assert config.design.common["offtarget_boost_weight"] == 1.0
 
 
 def test_design_config_unknown_holdout_run_raises():
