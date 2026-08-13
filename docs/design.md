@@ -38,6 +38,27 @@ immediately swaps to another. Cell-type groups come from `--group-by`
 `--dataset-dir`'s `regulonado_metadata.json`, then the id vectors already
 baked into a checkpoint's config.
 
+### Seed-relative selective activation
+
+Absolute specificity can look favourable when every cell type is nearly silent, and it can also
+improve when a mutation raises every cell type but raises the target slightly more.  The opt-in
+`--objective selective-activation` mode instead measures every group against the unedited
+endogenous seed:
+
+```
+target_gain = target(design) - target(seed)
+positive_offtarget_gain = max(offtarget(design) - offtarget(seed) - tolerance, 0)
+energy = -target_alpha * target_gain
+         + offtarget_boost_weight * smooth_max(positive_offtarget_gain)
+```
+
+Off-target decreases are clipped to zero, so silencing other cell types alone is not rewarded.
+The normalized smooth maximum is also zero when no other group is boosted.  Consequently the seed
+has energy zero and useful improvements have negative energy.  Use
+`--offtarget-boost-weight`, `--offtarget-boost-tolerance`, and `--offtarget-temperature` to tune
+the penalty.  Absolute group scores and specificity remain in the output as diagnostics.  Energy
+values from `specificity` and `selective-activation` runs are not directly comparable.
+
 ## Fold hold-out
 
 Optimise against 3 folds and score the result on a 4th, held-out one
@@ -73,6 +94,7 @@ regulonado design \
   --holdout-checkpoint runs/fold_3 \
   --fasta genome.fa --dataset-dir data/atlas \
   --target K562 \
+  --objective selective-activation \
   --out designs/
 ```
 
