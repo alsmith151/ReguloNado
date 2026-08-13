@@ -1719,6 +1719,13 @@ def design(
         Optional[Path],
         typer.Option("--track-sheet", help="CSV mapping tracks to their --group-by annotation."),
     ] = None,
+    exclude_track: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--exclude-track",
+            help="Exact model track name to exclude; repeat for multiple tracks.",
+        ),
+    ] = None,
     method: Annotated[str, typer.Option("--method", help="'ism' or 'adalead'.")] = "ism",
     rounds: Annotated[int, typer.Option("--rounds", help="Search rounds.")] = 20,
     top_k: Annotated[
@@ -1874,6 +1881,7 @@ def design(
         ensemble.track_names,
         group_by=group_by,
         target=target,
+        exclude_tracks=set(exclude_track or ()),
         track_sheet=track_sheet,
         dataset_dir=dataset_dir,
     )
@@ -2070,6 +2078,7 @@ def design(
         "on_missing": on_missing,
         "fold_mode": fold_mode,
         "track_groups": {"target": groups.target, "labels": groups.labels},
+        "excluded_tracks": sorted(exclude_track or ()),
         "seed_resolution": seed_report,
         "seed": run_seed,
         "topk_bins": topk_bins,

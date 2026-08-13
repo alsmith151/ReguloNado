@@ -43,6 +43,7 @@ def resolve_track_groups(
     *,
     group_by: str = "source",
     target: str,
+    exclude_tracks: set[str] | None = None,
     track_sheet: str | Path | None = None,
     dataset_dir: str | Path | None = None,
     config: object | None = None,
@@ -61,6 +62,13 @@ def resolve_track_groups(
     else:
         raise ValueError("resolve_track_groups needs one of track_sheet, dataset_dir, or config")
 
+    excluded = set(exclude_tracks or ())
+    unknown = excluded.difference(track_names)
+    if unknown:
+        raise ValueError(
+            "Excluded track(s) not present in the model: " + ", ".join(sorted(unknown))
+        )
+    labels = [None if name in excluded else label for name, label in zip(track_names, labels)]
     distinct = sorted({label for label in labels if label is not None})
     if target not in distinct:
         raise ValueError(

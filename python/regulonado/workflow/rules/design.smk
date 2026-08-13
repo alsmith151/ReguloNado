@@ -89,6 +89,9 @@ if DESIGN:
             flag = "--" + key.replace("_", "-")
             if isinstance(value, bool):
                 flags.append(flag if value else "--no-" + key.replace("_", "-"))
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    flags.extend((flag, shlex.quote(str(item))))
             else:
                 flags.extend((flag, shlex.quote(str(value))))
         return " ".join(flags)
