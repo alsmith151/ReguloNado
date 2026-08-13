@@ -9,6 +9,8 @@ from shlex import join as shell_join
 from typing import Annotated, Optional
 
 import typer
+import numpy as np
+import torch
 from loguru import logger
 from regulonado.cli.pipeline import pipeline as _pipeline
 
@@ -1738,6 +1740,10 @@ def design(
     population_size: Annotated[
         int, typer.Option("--population-size", help="AdaLead: population size.")
     ] = 20,
+    model_queries_per_batch: Annotated[
+        Optional[int], typer.Option("--model-queries-per-batch", help="AdaLead oracle query budget per round.")
+    ] = None,
+    top_n: Annotated[int, typer.Option("--top-n", help="Number of final candidates in the artifact.")] = 10,
     mu: Annotated[float, typer.Option("--mu", help="AdaLead: per-base mutation rate scale.")] = 1.0,
     recomb_rate: Annotated[
         float, typer.Option("--recomb-rate", help="AdaLead: per-base recombination rate.")
@@ -1798,19 +1804,21 @@ def design(
         raise typer.BadParameter("Expected 'mean' or 'topk'", param_hint="--bin-reduction")
     if not checkpoint:
         raise typer.BadParameter("Provide at least one --checkpoint", param_hint="--checkpoint")
-    if seed is not None:
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-
     import pyfaidx
-    import numpy as np
-    import torch
     from regulonado.design.objective import SpecificityEnergy, resolve_track_groups
     from regulonado.design.predictor import FoldEnsemble, FoldSpec
     from regulonado.design.report import DesignRecord, write_designs
     from regulonado.design.search import AdaLeadConfig, adalead, ism_greedy
     from regulonado.design.sequence import DatasetWindowIndex, resolve_seeds
     from regulonado.inference import _parse_bed, one_hot_context
+
+    # Seed all relevant libraries once.  Candidate-specific generators below are
+    # derived from this value and never rely on global NumPy state.
+    run_seed = 0 if seed is None else int(seed)
+    np.random.seed(run_seed)
+    torch.manual_seed(run_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(run_seed)
 
     if intervals is None:
         if dataset_dir is None:
@@ -1900,11 +1908,12 @@ def design(
 
     records: list[DesignRecord] = []
     seed_report: list[dict] = []
-    for candidate_index, seed in enumerate(seeds, start=1):
+    for candidate_index, candidate_seed in enumerate(seeds, start=1):
         logger.info(
-            f"[{candidate_index}/{len(seeds)}] {seed.name} "
-            f"({seed.chrom}:{seed.cand_start}-{seed.cand_end}), method={method}"
+            f"[{candidate_index}/{len(seeds)}] {candidate_seed.name} "
+            f"({candidate_seed.chrom}:{candidate_seed.cand_start}-{candidate_seed.cand_end}), method={method}"
         )
+        seed = candidate_seed
         chrom_length = chrom_sizes.get(seed.chrom)
         if chrom_length is None:
             raise typer.BadParameter(f"Chromosome {seed.chrom!r} not present in {fasta_file}")
@@ -1951,6 +1960,11 @@ def design(
                 # Sequences go in the end-of-run wandb.Table below, not the per-step scalar
                 # log — a full-length insert string doesn't chart usefully as a history metric.
                 scalars = {k: v for k, v in entry.items() if k not in ("positions", "sequence")}
+                scalars.update({
+                    f"track/{name}": entry[f"track_{index}"]
+                    for index, name in enumerate(ensemble.track_names)
+                    if f"track_{index}" in entry
+                })
                 run.log(scalars, step=entry["round"])
 
         if method == "ism":
@@ -1971,15 +1985,16 @@ def design(
                 positions=positions,
                 stride=ism_stride,
                 batch_size=batch_size,
-                rng=np.random.default_rng(seed),
+                rng=np.random.default_rng(np.random.SeedSequence([run_seed, candidate_index])),
                 on_round=_on_round,
             )
         else:
             adalead_config = AdaLeadConfig(
-                rounds=rounds, population_size=population_size, mu=mu, recomb_rate=recomb_rate
+                rounds=rounds, population_size=population_size, mu=mu, recomb_rate=recomb_rate,
+                model_queries_per_batch=model_queries_per_batch,
             )
             state = adalead(energy_fn, seed, context, adalead_config,
-                            rng=np.random.default_rng(seed), on_round=_on_round)
+                            rng=np.random.default_rng(np.random.SeedSequence([run_seed, candidate_index])), on_round=_on_round)
 
         final_result = energy_fn(state.context[None])
 
@@ -2022,6 +2037,13 @@ def design(
                 holdout_result=holdout_result,
             )
         )
+        # Persist completed candidates immediately so an interrupted shard can
+        # be resumed/recovered without losing earlier oracle work.
+        write_designs(
+            out_dir,
+            records,
+            run_info={"status": "in_progress", "completed_candidates": len(records)},
+        )
         seed_report.append(
             {
                 "name": seed.name,
@@ -2049,6 +2071,17 @@ def design(
         "fold_mode": fold_mode,
         "track_groups": {"target": groups.target, "labels": groups.labels},
         "seed_resolution": seed_report,
+        "seed": run_seed,
+        "topk_bins": topk_bins,
+        "bin_reduction": bin_reduction,
+        "target_alpha": target_alpha,
+        "bending_factor": bending_factor,
+        "offtarget_reduction": offtarget_reduction,
+        "batch_size": batch_size,
+        "device": str(device or ("cuda" if torch.cuda.is_available() else "cpu")),
+        "track_names": ensemble.track_names,
+        "reproducibility": {"torch_deterministic": bool(torch.are_deterministic_algorithms_enabled())},
+        "status": "complete",
     }
     write_designs(out_dir, records, run_info=run_info)
     typer.echo(f"Wrote {len(records)} design(s) to {out_dir}")

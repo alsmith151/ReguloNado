@@ -127,17 +127,16 @@ def ism_greedy(
 
     n_edits = 0
     for round_index in range(1, rounds + 1):
-        proposals: list[tuple[int, int, np.ndarray]] = []
+        # Keep proposal descriptors only; constructing a full context for every
+        # substitution can dominate CPU memory traffic for long contexts.
+        proposals: list[tuple[int, int]] = []
         for position in candidate_positions:
             column = current[:, position]
             current_base = int(column.argmax()) if column.any() else -1
             for base_index in range(4):
                 if base_index == current_base:
                     continue
-                mutated = current.copy()
-                mutated[:, position] = 0
-                mutated[base_index, position] = 1
-                proposals.append((position, base_index, mutated))
+                proposals.append((position, base_index))
 
         if not proposals:
             break
@@ -145,16 +144,22 @@ def ism_greedy(
         energies = np.empty(len(proposals), dtype=np.float64)
         for batch_start in range(0, len(proposals), batch_size):
             chunk = proposals[batch_start : batch_start + batch_size]
-            arrays = np.stack([p[2] for p in chunk])
+            arrays = []
+            for position, base_index in chunk:
+                mutated = current.copy()
+                mutated[:, position] = 0
+                mutated[base_index, position] = 1
+                arrays.append(mutated)
+            arrays = np.stack(arrays)
             energies[batch_start : batch_start + len(chunk)] = _score(energy_fn, arrays)
 
-        order = np.argsort(energies)
+        order = np.argsort(energies, kind="stable")
         accepted: list[tuple[int, int]] = []  # (position, base_index)
         used_positions: set[int] = set()
         for i in order:
             if energies[i] >= state.energy:
                 break
-            position, base_index, _ = proposals[i]
+            position, base_index = proposals[i]
             if position in used_positions:
                 continue
             accepted.append((position, base_index))

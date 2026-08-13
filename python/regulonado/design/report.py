@@ -93,6 +93,12 @@ def _write_designs_tsv(path: Path, records: list[DesignRecord]) -> None:
             ),
         }
         row.update(_group_columns(result))
+        if result is not None and hasattr(result, "track_topk"):
+            for i, value in enumerate(result.track_mean[0].tolist()):
+                row[f"track_{i}_mean"] = float(value)
+                row[f"track_{i}_max"] = float(result.track_max[0, i])
+                row[f"track_{i}_topk"] = float(result.track_topk[0, i])
+                row[f"track_{i}_topk_ratio"] = float(result.track_topk_ratio[0, i])
         holdout = record.holdout_result
         row["holdout_energy"] = float(holdout.energy[0]) if holdout is not None else ""
         row["holdout_target_score"] = float(holdout.target[0]) if holdout is not None else ""
@@ -178,6 +184,12 @@ def _write_topk(path: Path, records: list[DesignRecord], k: int = 10) -> None:
         result = record.result
         if result is None or not hasattr(result, "per_track"):
             continue
-        for index, value in enumerate(result.per_track[0].tolist()):
-            rows.append({"name": record.seed.name, "track_index": index, "topk_mean": float(value), "k": k})
+        values = result.track_topk[0].tolist() if hasattr(result, "track_topk") else result.per_track[0].tolist()
+        means = result.track_mean[0].tolist() if hasattr(result, "track_mean") else [None] * len(values)
+        maxima = result.track_max[0].tolist() if hasattr(result, "track_max") else [None] * len(values)
+        ratios = result.track_topk_ratio[0].tolist() if hasattr(result, "track_topk_ratio") else [None] * len(values)
+        for index, value in enumerate(values):
+            rows.append({"name": record.seed.name, "track_index": index,
+                         "topk_mean": float(value), "mean": float(means[index]),
+                         "max": float(maxima[index]), "topk_ratio": float(ratios[index]), "k": k})
     _write_tsv(path, rows)

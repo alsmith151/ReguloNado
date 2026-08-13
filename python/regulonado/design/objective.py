@@ -140,6 +140,10 @@ class EnergyResult:
     per_fold_energy: torch.Tensor  # (n_folds, B)
     group_names: list[str]  # target first, then other_group_masks in dict order
     per_track: torch.Tensor  # (B, n_tracks), averaged over folds
+    track_mean: torch.Tensor  # (B, n_tracks), mean across selected bins
+    track_max: torch.Tensor  # (B, n_tracks), maximum selected-bin signal
+    track_topk: torch.Tensor  # (B, n_tracks), mean of ordered top-K bins
+    track_topk_ratio: torch.Tensor  # (B, n_tracks), top-K mean / mean
 
 
 class SpecificityEnergy(nn.Module):
@@ -173,6 +177,8 @@ class SpecificityEnergy(nn.Module):
         self.fold_reduction = fold_reduction
         self.bin_reduction = bin_reduction
         self.topk_bins = int(topk_bins)
+        if self.topk_bins < 1:
+            raise ValueError("topk_bins must be >= 1")
 
     def bend(self, tensor: torch.Tensor) -> torch.Tensor:
         if not self.bending_factor:
@@ -188,14 +194,24 @@ class SpecificityEnergy(nn.Module):
         preds = preds.clamp(self.a_min, self.a_max)
         preds = self.bend(preds)
         windowed = preds[..., self.bins]  # (n_folds, B, n_tracks, n_bins_in_window)
+        if windowed.shape[-1] == 0:
+            raise ValueError("bins selects no prediction bins")
+        if self.bin_reduction == "topk" and self.topk_bins > windowed.shape[-1]:
+            raise ValueError(
+                f"topk_bins={self.topk_bins} exceeds selected bin count {windowed.shape[-1]}"
+            )
+        track_mean = windowed.mean(dim=-1)
+        track_max = windowed.max(dim=-1).values
+        diagnostic_k = min(self.topk_bins, windowed.shape[-1])
+        track_topk = windowed.topk(diagnostic_k, dim=-1).values.mean(dim=-1)
 
         # Explicit bool masks per group: the skeleton did `~self.target[0]` on a Python int
         # (`~5 == -6`), which silently selected the wrong track and reduced over the batch.
         group_masks = {self.groups.target: self.groups.target_idx, **self.groups.other_group_masks}
         if self.bin_reduction == "topk":
-            per_track = windowed.topk(min(self.topk_bins, windowed.shape[-1]), dim=-1).values.mean(dim=-1)
+            per_track = track_topk
         else:
-            per_track = windowed.mean(dim=-1)
+            per_track = track_mean
         group_scores = {}
         for group, mask in group_masks.items():
             if not bool(mask.any()):
@@ -235,4 +251,8 @@ class SpecificityEnergy(nn.Module):
             per_fold_energy=per_fold_energy,
             group_names=group_names,
             per_track=per_track.mean(dim=0),
+            track_mean=track_mean.mean(dim=0),
+            track_max=track_max.mean(dim=0),
+            track_topk=track_topk.mean(dim=0),
+            track_topk_ratio=(track_topk / track_mean.clamp_min(1e-8)).mean(dim=0),
         )
