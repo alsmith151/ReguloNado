@@ -1755,6 +1755,12 @@ def design(
     recomb_rate: Annotated[
         float, typer.Option("--recomb-rate", help="AdaLead: per-base recombination rate.")
     ] = 0.1,
+    threshold: Annotated[
+        float, typer.Option("--threshold", help="AdaLead: parent fitness threshold.")
+    ] = 0.1,
+    rho: Annotated[
+        int, typer.Option("--rho", help="AdaLead: recombination cycles per proposal round.")
+    ] = 2,
     on_missing: Annotated[
         str,
         typer.Option("--on-missing", help="'error', 'center' or 'skip' for unmatched candidates."),
@@ -2010,6 +2016,8 @@ def design(
             adalead_config = AdaLeadConfig(
                 rounds=rounds, population_size=population_size, mu=mu, recomb_rate=recomb_rate,
                 model_queries_per_batch=model_queries_per_batch,
+                threshold=threshold,
+                rho=rho,
             )
             state = adalead(energy_fn, seed, context, adalead_config,
                             rng=np.random.default_rng(np.random.SeedSequence([run_seed, candidate_index])), on_round=_on_round)
