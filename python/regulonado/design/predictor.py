@@ -59,12 +59,33 @@ class SequencePredictor:
             one_hot_batch = torch.from_numpy(one_hot_batch)
 
         outputs = []
+        start = 0
         with torch.inference_mode():
-            for start in range(0, one_hot_batch.shape[0], self.batch_size):
-                chunk = one_hot_batch[start : start + self.batch_size].to(
+            while start < one_hot_batch.shape[0]:
+                width = min(self.batch_size, one_hot_batch.shape[0] - start)
+                chunk = one_hot_batch[start : start + width].to(
                     device=self.device, dtype=self.dtype
                 )
-                outputs.append(self.model(chunk, **self.track_metadata))
+                try:
+                    outputs.append(self.model(chunk, **self.track_metadata))
+                    start += width
+                except RuntimeError as exc:
+                    message = str(exc).lower()
+                    recoverable = (
+                        "integer out of range" in message
+                        or "out of memory" in message
+                        or "max_pool1d" in message
+                    )
+                    if not recoverable or width <= 1:
+                        raise RuntimeError(
+                            "Oracle inference failed at batch size 1; check checkpoint/model "
+                            "geometry and input context length."
+                        ) from exc
+                    self.batch_size = max(1, width // 2)
+                    outputs.clear()
+                    start = 0
+                    if self.device.startswith("cuda"):
+                        torch.cuda.empty_cache()
         return torch.cat(outputs, dim=0)
 
     def to(self, device: str) -> "SequencePredictor":
