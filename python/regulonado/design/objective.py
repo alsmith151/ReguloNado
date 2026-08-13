@@ -139,6 +139,7 @@ class EnergyResult:
     per_group: torch.Tensor  # (B, n_groups), group order == group_names
     per_fold_energy: torch.Tensor  # (n_folds, B)
     group_names: list[str]  # target first, then other_group_masks in dict order
+    per_track: torch.Tensor  # (B, n_tracks), averaged over folds
 
 
 class SpecificityEnergy(nn.Module):
@@ -156,6 +157,8 @@ class SpecificityEnergy(nn.Module):
         offtarget_reduction: Literal["max", "logsumexp", "mean"] = "logsumexp",
         offtarget_temperature: float = 1.0,
         fold_reduction: Literal["mean", "mean_plus_std"] = "mean",
+        bin_reduction: Literal["mean", "topk"] = "mean",
+        topk_bins: int = 10,
     ) -> None:
         super().__init__()
         self.ensemble = ensemble
@@ -168,6 +171,8 @@ class SpecificityEnergy(nn.Module):
         self.offtarget_reduction = offtarget_reduction
         self.offtarget_temperature = float(offtarget_temperature)
         self.fold_reduction = fold_reduction
+        self.bin_reduction = bin_reduction
+        self.topk_bins = int(topk_bins)
 
     def bend(self, tensor: torch.Tensor) -> torch.Tensor:
         if not self.bending_factor:
@@ -187,10 +192,15 @@ class SpecificityEnergy(nn.Module):
         # Explicit bool masks per group: the skeleton did `~self.target[0]` on a Python int
         # (`~5 == -6`), which silently selected the wrong track and reduced over the batch.
         group_masks = {self.groups.target: self.groups.target_idx, **self.groups.other_group_masks}
-        group_scores = {
-            group: windowed[:, :, mask, :].mean(dim=-1).mean(dim=-1)  # mean over tracks, then bins
-            for group, mask in group_masks.items()
-        }
+        if self.bin_reduction == "topk":
+            per_track = windowed.topk(min(self.topk_bins, windowed.shape[-1]), dim=-1).values.mean(dim=-1)
+        else:
+            per_track = windowed.mean(dim=-1)
+        group_scores = {}
+        for group, mask in group_masks.items():
+            if not bool(mask.any()):
+                raise ValueError(f"Track group {group!r} selects no tracks")
+            group_scores[group] = per_track[:, :, mask].mean(dim=-1)
 
         target_score = group_scores[self.groups.target]  # (n_folds, B)
         other_names = list(self.groups.other_group_masks)
@@ -224,4 +234,5 @@ class SpecificityEnergy(nn.Module):
             per_group=per_group,
             per_fold_energy=per_fold_energy,
             group_names=group_names,
+            per_track=per_track.mean(dim=0),
         )

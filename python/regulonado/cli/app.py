@@ -1755,6 +1755,9 @@ def design(
     bending_factor: Annotated[
         float, typer.Option("--bending-factor", help="Bending transform strength.")
     ] = 0.0,
+    bin_reduction: Annotated[str, typer.Option("--bin-reduction", help="Bin statistic: mean or topk.")] = "mean",
+    topk_bins: Annotated[int, typer.Option("--topk-bins", help="Number of bins in top-K statistic.")] = 10,
+    seed: Annotated[Optional[int], typer.Option("--seed", help="Random seed for AdaLead.")] = None,
     fold_mode: Annotated[
         str, typer.Option("--fold-mode", help="'resident' or 'sequential' fold residency.")
     ] = "resident",
@@ -1791,10 +1794,17 @@ def design(
         raise typer.BadParameter("Expected 'error', 'center' or 'skip'", param_hint="--on-missing")
     if fold_mode not in ("resident", "sequential"):
         raise typer.BadParameter("Expected 'resident' or 'sequential'", param_hint="--fold-mode")
+    if bin_reduction not in ("mean", "topk"):
+        raise typer.BadParameter("Expected 'mean' or 'topk'", param_hint="--bin-reduction")
     if not checkpoint:
         raise typer.BadParameter("Provide at least one --checkpoint", param_hint="--checkpoint")
+    if seed is not None:
+        np.random.seed(seed)
+        torch.manual_seed(seed)
 
     import pyfaidx
+    import numpy as np
+    import torch
     from regulonado.design.objective import SpecificityEnergy, resolve_track_groups
     from regulonado.design.predictor import FoldEnsemble, FoldSpec
     from regulonado.design.report import DesignRecord, write_designs
@@ -1907,6 +1917,8 @@ def design(
             target_alpha=target_alpha,
             bending_factor=bending_factor,
             offtarget_reduction=offtarget_reduction,
+            bin_reduction=bin_reduction,
+            topk_bins=topk_bins,
         )
 
         if wandb:
@@ -1959,13 +1971,15 @@ def design(
                 positions=positions,
                 stride=ism_stride,
                 batch_size=batch_size,
+                rng=np.random.default_rng(seed),
                 on_round=_on_round,
             )
         else:
             adalead_config = AdaLeadConfig(
                 rounds=rounds, population_size=population_size, mu=mu, recomb_rate=recomb_rate
             )
-            state = adalead(energy_fn, seed, context, adalead_config, on_round=_on_round)
+            state = adalead(energy_fn, seed, context, adalead_config,
+                            rng=np.random.default_rng(seed), on_round=_on_round)
 
         final_result = energy_fn(state.context[None])
 

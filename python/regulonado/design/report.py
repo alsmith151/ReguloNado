@@ -13,7 +13,10 @@ import numpy as np
 from regulonado.design.search import DesignState
 from regulonado.design.sequence import Seed, decode
 
-__all__ = ["DesignRecord", "write_designs"]
+__all__ = ["DesignRecord", "write_designs", "hamming_distance"]
+
+def hamming_distance(original: np.ndarray, final: np.ndarray, editable: slice) -> int:
+    return int(np.any(original[:, editable] != final[:, editable], axis=0).sum())
 
 
 @dataclass(slots=True)
@@ -38,6 +41,7 @@ def write_designs(out_dir: str | Path, records: list[DesignRecord], *, run_info:
     _write_designs_bed(out_dir / "designs.bed", records)
     _write_trajectory(out_dir / "trajectory.tsv", records)
     _write_edits(out_dir / "edits.tsv", records)
+    _write_topk(out_dir / "topk.tsv", records)
     (out_dir / "run.json").write_text(json.dumps(run_info, indent=2, default=str))
 
 
@@ -46,7 +50,7 @@ def _write_fasta(path: Path, records: list[DesignRecord]) -> None:
         for record in records:
             seed, state = record.seed, record.state
             insert = decode(state.context[:, state.editable])
-            n_edits = sum(1 for h in state.history if h.get("n_edits"))  # rounds with an edit
+            n_edits = hamming_distance(record.original_context, state.context, state.editable)
             header = (
                 f">{seed.name}_{record.method} {seed.chrom}:{seed.cand_start}-{seed.cand_end} "
                 f"energy={state.energy:.6g} n_edits={n_edits}"
@@ -68,7 +72,7 @@ def _write_designs_tsv(path: Path, records: list[DesignRecord]) -> None:
     rows: list[dict[str, Any]] = []
     for record in records:
         seed, state, result = record.seed, record.state, record.result
-        n_edits = sum(1 for h in state.history if h.get("n_edits"))
+        n_edits = hamming_distance(record.original_context, state.context, state.editable)
         row: dict[str, Any] = {
             "name": seed.name,
             "chrom": seed.chrom,
@@ -167,3 +171,13 @@ def _write_tsv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()
         writer.writerows(rows)
+
+def _write_topk(path: Path, records: list[DesignRecord], k: int = 10) -> None:
+    rows = []
+    for record in records:
+        result = record.result
+        if result is None or not hasattr(result, "per_track"):
+            continue
+        for index, value in enumerate(result.per_track[0].tolist()):
+            rows.append({"name": record.seed.name, "track_index": index, "topk_mean": float(value), "k": k})
+    _write_tsv(path, rows)

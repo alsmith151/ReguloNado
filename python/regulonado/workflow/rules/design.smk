@@ -86,7 +86,11 @@ if DESIGN:
             merged.update(_flatten_settings(settings))
         flags = []
         for key, value in sorted(merged.items()):
-            flags.extend(("--" + key.replace("_", "-"), shlex.quote(str(value))))
+            flag = "--" + key.replace("_", "-")
+            if isinstance(value, bool):
+                flags.append(flag if value else "--no-" + key.replace("_", "-"))
+            else:
+                flags.extend((flag, shlex.quote(str(value))))
         return " ".join(flags)
 
     rule shard_candidates:

@@ -71,6 +71,10 @@ def _round_metrics(result, *, round_index: int, n_edits: int | None, **extra) ->
         values = _to_numpy(per_group)[0]
         for name, value in zip(group_names, values):
             entry[f"group_{name}"] = float(value)
+    per_track = getattr(result, "per_track", None)
+    if per_track is not None:
+        for index, value in enumerate(_to_numpy(per_track)[0]):
+            entry[f"track_{index}"] = float(value)
     return entry
 
 
@@ -161,6 +165,7 @@ def ism_greedy(
         if not accepted:
             break
 
+        previous = current.copy()
         for position, base_index in accepted:
             current[:, position] = 0
             current[base_index, position] = 1
@@ -176,9 +181,15 @@ def ism_greedy(
             sequence=decode(current[:, editable]),
         )
         history.append(entry)
-        if on_round is not None:
-            on_round(entry)
-        state.energy = new_energy
+        if new_energy < state.energy:
+            state.energy = new_energy
+            if on_round is not None:
+                on_round(entry)
+        else:
+            current = previous
+            n_edits -= len(accepted)
+            history.pop()
+            break
 
     state.context = current
     return state
@@ -254,6 +265,8 @@ class AdaLead:
             switch = (np.cumsum(switch_points) % 2 == 1)[None, :]
             recombined.append(np.where(switch, second, first))
             recombined.append(np.where(switch, first, second))
+        if len(shuffled) % 2:
+            recombined.append(shuffled[-1])
         return recombined if recombined else list(population)
 
     def _propose_sequences(
@@ -278,7 +291,7 @@ class AdaLead:
         sequences: dict[bytes, tuple[np.ndarray, float]] = {}
         roots = [parents[i % len(parents)] for i in range(population_size)]
 
-        self.model_cost = 0
+        self.model_cost = len(initial_inserts)
         while self.model_cost < model_queries_per_batch:
             for _ in range(rho):
                 roots = self._recombine_population(roots, recomb_rate)
