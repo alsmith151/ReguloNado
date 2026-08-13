@@ -368,6 +368,63 @@ def test_selective_activation_applies_offtarget_tolerance():
     assert result.energy.tolist() == pytest.approx([0.0])
 
 
+class _DisparateScaleEnsemble:
+    """Expose the same relative change on groups with very different count scales."""
+
+    def predict(self, one_hot_batch):
+        if isinstance(one_hot_batch, np.ndarray):
+            one_hot_batch = torch.from_numpy(one_hot_batch).float()
+        batch = one_hot_batch.shape[0]
+        changed = one_hot_batch[:, 0, 0]
+        preds = torch.zeros(1, batch, 3, 1)
+        preds[:, :, 0, 0] = 9.0 + 10.0 * changed
+        preds[:, :, 1, 0] = 99.0 + 100.0 * changed
+        preds[:, :, 2, 0] = 999.0 + 1000.0 * changed
+        return preds
+
+
+def test_log2_fold_change_normalizes_disparate_count_scales():
+    energy_fn = SpecificityEnergy(
+        _DisparateScaleEnsemble(),
+        _selective_groups(),
+        slice(0, 1),
+        objective="selective-activation",
+        gain_transform="log2-fold-change",
+        gain_pseudocount=1.0,
+        offtarget_boost_tolerance=1.0,
+    )
+    seed = np.zeros((4, 3), dtype=np.float32)
+    design = seed.copy()
+    design[0, 0] = 1
+    energy_fn.set_reference(seed[None])
+
+    result = energy_fn(design[None])
+
+    # With a pseudocount of one, all three groups exactly double: 10->20,
+    # 100->200 and 1000->2000 on the shifted scale.
+    assert torch.allclose(result.per_group_gain, torch.ones(1, 3))
+    assert result.target_gain.tolist() == pytest.approx([1.0])
+    assert result.offtarget_boost.tolist() == pytest.approx([0.0])
+    assert result.energy.tolist() == pytest.approx([-1.0])
+    assert result.gain_transform == "log2-fold-change"
+    assert result.gain_pseudocount == pytest.approx(1.0)
+
+
+def test_log2_fold_change_rejects_nonpositive_shifted_scores():
+    energy_fn = _selective_energy(
+        gain_transform="log2-fold-change", gain_pseudocount=0.5
+    )
+    with pytest.raises(ValueError, match="positive"):
+        energy_fn._gain(torch.tensor([-1.0]), torch.tensor([0.0]))
+
+
+def test_gain_transform_parameters_are_validated():
+    with pytest.raises(ValueError, match="gain_transform"):
+        _selective_energy(gain_transform="percent")
+    with pytest.raises(ValueError, match="gain_pseudocount"):
+        _selective_energy(gain_transform="log2-fold-change", gain_pseudocount=0.0)
+
+
 # --------------------------------------------------------------------------- #
 # 5. ism_greedy                                                              #
 # --------------------------------------------------------------------------- #
@@ -559,6 +616,7 @@ def test_design_config_parses_example_workflow_config():
     assert config.design.holdout_run == "fold_3"
     assert config.design.design_runs == ["fold_0", "fold_1", "fold_2"]
     assert config.design.common["objective"] == "selective-activation"
+    assert config.design.common["gain_transform"] == "log2-fold-change"
     assert config.design.common["offtarget_boost_weight"] == 1.0
 
 

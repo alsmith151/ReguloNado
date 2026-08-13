@@ -1808,6 +1808,20 @@ def design(
             "--offtarget-temperature", help="Temperature for soft off-target aggregation."
         ),
     ] = 1.0,
+    gain_transform: Annotated[
+        str,
+        typer.Option(
+            "--gain-transform",
+            help="Selective activation gain scale: 'raw' or 'log2-fold-change'.",
+        ),
+    ] = "raw",
+    gain_pseudocount: Annotated[
+        float,
+        typer.Option(
+            "--gain-pseudocount",
+            help="Positive pseudocount used by the log2-fold-change gain transform.",
+        ),
+    ] = 1.0,
     target_alpha: Annotated[
         float, typer.Option("--target-alpha", help="Scale applied to the on-target score.")
     ] = 1.0,
@@ -1873,6 +1887,12 @@ def design(
         raise typer.BadParameter("Must be >= 0", param_hint="--offtarget-boost-tolerance")
     if offtarget_temperature <= 0:
         raise typer.BadParameter("Must be > 0", param_hint="--offtarget-temperature")
+    if gain_transform not in ("raw", "log2-fold-change"):
+        raise typer.BadParameter(
+            "Expected 'raw' or 'log2-fold-change'", param_hint="--gain-transform"
+        )
+    if gain_pseudocount <= 0:
+        raise typer.BadParameter("Must be > 0", param_hint="--gain-pseudocount")
     if not checkpoint:
         raise typer.BadParameter("Provide at least one --checkpoint", param_hint="--checkpoint")
     import pyfaidx
@@ -2005,6 +2025,8 @@ def design(
             objective=objective,
             offtarget_boost_weight=offtarget_boost_weight,
             offtarget_boost_tolerance=offtarget_boost_tolerance,
+            gain_transform=gain_transform,
+            gain_pseudocount=gain_pseudocount,
         )
         if objective == "selective-activation":
             energy_fn.set_reference(context[None])
@@ -2024,6 +2046,8 @@ def design(
                     "fold_label": seed.fold_label,
                     "method": method,
                     "objective": objective,
+                    "gain_transform": gain_transform,
+                    "gain_pseudocount": gain_pseudocount,
                     "rounds": rounds,
                     "target": target,
                     "group_by": group_by,
@@ -2110,6 +2134,8 @@ def design(
                 objective=objective,
                 offtarget_boost_weight=offtarget_boost_weight,
                 offtarget_boost_tolerance=offtarget_boost_tolerance,
+                gain_transform=gain_transform,
+                gain_pseudocount=gain_pseudocount,
             )
             if objective == "selective-activation":
                 holdout_energy_fn.set_reference(context[None])
@@ -2201,6 +2227,8 @@ def design(
         "offtarget_temperature": offtarget_temperature,
         "offtarget_boost_weight": offtarget_boost_weight,
         "offtarget_boost_tolerance": offtarget_boost_tolerance,
+        "gain_transform": gain_transform,
+        "gain_pseudocount": gain_pseudocount,
         "batch_size": batch_size,
         "device": str(device or ("cuda" if torch.cuda.is_available() else "cpu")),
         "track_names": ensemble.track_names,

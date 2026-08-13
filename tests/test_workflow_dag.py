@@ -198,6 +198,8 @@ design:
     - {checkpoint_b}
   common:
     objective: selective-activation
+    gain_transform: log2-fold-change
+    gain_pseudocount: 1.0
     offtarget_boost_weight: 1.5
     offtarget_boost_tolerance: 0.05
     offtarget_temperature: 0.4
@@ -231,6 +233,8 @@ design:
     assert result.returncode == 0, output
     assert "regulonado design" in output
     assert "--objective selective-activation" in output
+    assert "--gain-transform log2-fold-change" in output
+    assert "--gain-pseudocount 1.0" in output
     assert "--offtarget-boost-weight 2.5" in output
     assert "--offtarget-boost-tolerance 0.05" in output
     assert "--offtarget-temperature 0.4" in output
@@ -255,3 +259,4 @@ design:
     cli_output = cli_result.stdout + cli_result.stderr
     assert cli_result.returncode == 0, cli_output
     assert "--objective selective-activation" in cli_output
+    assert "--gain-transform log2-fold-change" in cli_output

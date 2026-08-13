@@ -159,6 +159,8 @@ class EnergyResult:
     offtarget_boost: torch.Tensor  # (B,), aggregated positive off-target gain
     objective: str
     has_reference: bool
+    gain_transform: str
+    gain_pseudocount: float
 
 
 class SpecificityEnergy(nn.Module):
@@ -186,6 +188,8 @@ class SpecificityEnergy(nn.Module):
         objective: Literal["specificity", "selective-activation"] = "specificity",
         offtarget_boost_weight: float = 1.0,
         offtarget_boost_tolerance: float = 0.0,
+        gain_transform: Literal["raw", "log2-fold-change"] = "raw",
+        gain_pseudocount: float = 1.0,
     ) -> None:
         super().__init__()
         self.ensemble = ensemble
@@ -203,6 +207,8 @@ class SpecificityEnergy(nn.Module):
         self.objective = objective
         self.offtarget_boost_weight = float(offtarget_boost_weight)
         self.offtarget_boost_tolerance = float(offtarget_boost_tolerance)
+        self.gain_transform = gain_transform
+        self.gain_pseudocount = float(gain_pseudocount)
         self._reference_group_scores: dict[str, torch.Tensor] | None = None
         if self.topk_bins < 1:
             raise ValueError("topk_bins must be >= 1")
@@ -214,6 +220,10 @@ class SpecificityEnergy(nn.Module):
             raise ValueError("offtarget_boost_weight must be >= 0")
         if self.offtarget_boost_tolerance < 0:
             raise ValueError("offtarget_boost_tolerance must be >= 0")
+        if self.gain_transform not in ("raw", "log2-fold-change"):
+            raise ValueError(f"Unknown gain_transform={self.gain_transform!r}")
+        if self.gain_pseudocount <= 0:
+            raise ValueError("gain_pseudocount must be > 0")
 
     def bend(self, tensor: torch.Tensor) -> torch.Tensor:
         if not self.bending_factor:
@@ -270,6 +280,17 @@ class SpecificityEnergy(nn.Module):
             name: score.detach().clone() for name, score in group_scores.items()
         }
 
+    def _gain(self, score: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+        if self.gain_transform == "raw":
+            return score - reference
+        score_shifted = score + self.gain_pseudocount
+        reference_shifted = reference + self.gain_pseudocount
+        if bool((score_shifted <= 0).any()) or bool((reference_shifted <= 0).any()):
+            raise ValueError(
+                "log2-fold-change requires group scores + gain_pseudocount to be positive"
+            )
+        return torch.log2(score_shifted / reference_shifted)
+
     def forward(self, one_hot_batch) -> EnergyResult:
         # torch.inference_mode() lives in the predictor, not here, so a future gradient
         # path through the energy is not blocked by the objective itself.
@@ -308,7 +329,7 @@ class SpecificityEnergy(nn.Module):
                     "selective-activation requires set_reference(unedited_seed) before scoring"
                 )
             group_gains = {
-                name: group_scores[name] - self._reference_group_scores[name]
+                name: self._gain(group_scores[name], self._reference_group_scores[name])
                 for name in group_names
             }
             target_gain_by_fold = group_gains[self.groups.target]
@@ -365,4 +386,6 @@ class SpecificityEnergy(nn.Module):
             offtarget_boost=smooth_boost.mean(dim=0),
             objective=self.objective,
             has_reference=self._reference_group_scores is not None,
+            gain_transform=self.gain_transform,
+            gain_pseudocount=self.gain_pseudocount,
         )

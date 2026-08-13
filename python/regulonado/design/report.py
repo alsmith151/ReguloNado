@@ -85,6 +85,9 @@ def _write_designs_tsv(path: Path, records: list[DesignRecord]) -> None:
             "method": record.method,
             "energy": float(state.energy),
             "objective": getattr(result, "objective", "specificity") if result is not None else "",
+            "gain_transform": (
+                getattr(result, "gain_transform", "raw") if result is not None else ""
+            ),
             "specificity": float(result.specificity[0]) if result is not None else "",
             "target_score": float(result.target[0]) if result is not None else "",
             "target_gain": float(result.target_gain[0]) if result is not None else "",
