@@ -97,10 +97,8 @@ if DESIGN:
             merged.update(_flatten_settings(settings))
         # Keep each configured design target in its own W&B project by default.
         # An explicit wandb_project in common/target settings remains authoritative.
-        merged.setdefault(
-            "wandb_project",
-            f"regulonado-design-{wildcards.target}-{DESIGN_WANDB_RUN_ID}",
-        )
+        merged.setdefault("wandb_project", "regulonado-design")
+        merged.setdefault("wandb_group", f"{wildcards.target}-{DESIGN_WANDB_RUN_ID}")
         flags = []
         for key, value in sorted(merged.items()):
             flag = "--" + key.replace("_", "-")

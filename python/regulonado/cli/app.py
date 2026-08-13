@@ -1787,6 +1787,9 @@ def design(
     wandb_project: Annotated[
         str, typer.Option("--wandb-project", help="W&B project (one run per candidate).")
     ] = "regulonado-design",
+    wandb_group: Annotated[
+        Optional[str], typer.Option("--wandb-group", help="W&B group label for this design invocation.")
+    ] = None,
 ) -> None:
     """Mutate endogenous enhancer candidates to sharpen cell-type specificity.
 
@@ -1941,7 +1944,7 @@ def design(
         if wandb:
             wandb_run = _wandb.init(
                 project=wandb_project,
-                group=target,
+                group=wandb_group or target,
                 job_type=method,
                 name=f"{seed.name}_{method}",
                 reinit=True,
@@ -1955,6 +1958,7 @@ def design(
                     "rounds": rounds,
                     "target": target,
                     "group_by": group_by,
+                    "wandb_group": wandb_group or target,
                 },
             )
 
