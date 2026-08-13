@@ -46,6 +46,10 @@ if DESIGN:
     DESIGN_TARGETS = DESIGN["targets"]
     DESIGN_TARGET_NAMES = [target["name"] for target in DESIGN_TARGETS]
     DESIGN_TARGET_BY_NAME = {target["name"]: target for target in DESIGN_TARGETS}
+    DESIGN_CHECKPOINT_DIRS = DESIGN.get("checkpoint_dirs")
+    DESIGN_HOLDOUT_CHECKPOINT = DESIGN.get("holdout_checkpoint")
+    if DESIGN_CHECKPOINT_DIRS and len(DESIGN_CHECKPOINT_DIRS) != len(DESIGN_RUN_NAMES):
+        raise ValueError("design.checkpoint_dirs must match the number of design runs")
 
     _candidates_path = Path(DESIGN["candidates"])
     _n_candidates = (
@@ -67,12 +71,16 @@ if DESIGN:
         return str(phase_run_dir(holdout, PHASE_NAMES[-1])) if holdout else ""
 
     def _design_checkpoint_state_inputs(wildcards):
+        if DESIGN_CHECKPOINT_DIRS:
+            return list(DESIGN_CHECKPOINT_DIRS)
         return [
             str(phase_run_dir(run, PHASE_NAMES[-1]) / "trainer_state.json")
             for run in DESIGN_RUN_NAMES
         ]
 
     def _design_holdout_state_input(wildcards):
+        if DESIGN_HOLDOUT_CHECKPOINT:
+            return DESIGN_HOLDOUT_CHECKPOINT
         holdout = DESIGN.get("holdout_run")
         if not holdout:
             return []
@@ -95,6 +103,16 @@ if DESIGN:
             else:
                 flags.extend((flag, shlex.quote(str(value))))
         return " ".join(flags)
+
+    def _design_checkpoint_args():
+        if DESIGN_CHECKPOINT_DIRS:
+            return " ".join(f"--checkpoint {shlex.quote(str(path))}" for path in DESIGN_CHECKPOINT_DIRS)
+        return ""
+
+    def _design_holdout_args():
+        if DESIGN_HOLDOUT_CHECKPOINT:
+            return f"--holdout-checkpoint {shlex.quote(str(DESIGN_HOLDOUT_CHECKPOINT))}"
+        return ""
 
     rule shard_candidates:
         input:
@@ -130,6 +148,8 @@ if DESIGN:
             resolver=str(Path(workflow.basedir) / "scripts" / "resolve_checkpoint.py"),
             design_run_dirs=_design_run_dirs(),
             holdout_run_dir=_design_holdout_dir(),
+            explicit_checkpoint_args=_design_checkpoint_args(),
+            explicit_holdout_args=_design_holdout_args(),
         output:
             tsv=str(DESIGN_DIR / "{target}" / "shards" / "{shard}" / "designs.tsv"),
             fa=str(DESIGN_DIR / "{target}" / "shards" / "{shard}" / "designs.fa"),
@@ -150,13 +170,19 @@ if DESIGN:
             set -euo pipefail
 
             CHECKPOINT_ARGS=()
-            for run_dir in {params.design_run_dirs}; do
-                CKPT=$(python {params.resolver:q} "$run_dir")
-                CHECKPOINT_ARGS+=(--checkpoint "$CKPT")
-            done
+            if [ -n "{params.explicit_checkpoint_args}" ]; then
+                CHECKPOINT_ARGS=({params.explicit_checkpoint_args})
+            else
+                for run_dir in {params.design_run_dirs}; do
+                    CKPT=$(python {params.resolver:q} "$run_dir")
+                    CHECKPOINT_ARGS+=(--checkpoint "$CKPT")
+                done
+            fi
 
             HOLDOUT_ARGS=()
-            if [ -n "{params.holdout_run_dir}" ]; then
+            if [ -n "{params.explicit_holdout_args}" ]; then
+                HOLDOUT_ARGS=({params.explicit_holdout_args})
+            elif [ -n "{params.holdout_run_dir}" ]; then
                 HCKPT=$(python {params.resolver:q} "{params.holdout_run_dir}")
                 HOLDOUT_ARGS=(--holdout-checkpoint "$HCKPT")
             fi

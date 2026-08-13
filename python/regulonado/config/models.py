@@ -185,6 +185,8 @@ class DesignConfig(BaseModel):
     shards: int = Field(default=1, ge=1)
     holdout_run: str | None = None
     design_runs: list[str] | None = None
+    checkpoint_dirs: list[str] | None = None
+    holdout_checkpoint: str | None = None
     common: dict[str, Any] = Field(default_factory=dict)
     targets: list[DesignTarget] = Field(min_length=1)
 
