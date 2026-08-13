@@ -84,6 +84,12 @@ class Borzoi(_Borzoi):
     tensors) and producing NaN activations at the first transformer block.  We force
     the remote-code code path so loaded weights are preserved while genuinely missing
     keys (whose tensors lack the flag) are still initialized normally.
+
+    Not every installed transformers build's ``_initialize_weights`` takes
+    ``is_remote_code`` (the parameter was added/changed across 5.x point releases),
+    so the call falls back to the plain signature rather than crashing on a
+    ``TypeError`` — versions without the parameter don't have the clobbering
+    behaviour this works around either.
     """
 
     def __init__(self, config):
@@ -91,7 +97,10 @@ class Borzoi(_Borzoi):
         self.post_init()
 
     def _initialize_weights(self, module, is_remote_code: bool = False):
-        return super()._initialize_weights(module, is_remote_code=True)
+        try:
+            return super()._initialize_weights(module, is_remote_code=True)
+        except TypeError:
+            return super()._initialize_weights(module)
 
 
 class BaseBackboneAdapter(nn.Module):
