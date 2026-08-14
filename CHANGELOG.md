@@ -10,6 +10,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.0](https://github.com/alsmith151/ReguloNado/compare/regulonado-v0.1.0...regulonado-v0.2.0) (2026-08-14)
+
+
+### Features
+
+* **adapter:** adapt Borzoi for transformers v5 weight loading and improve architecture building ([725e400](https://github.com/alsmith151/ReguloNado/commit/725e400c0cb6c698460a53d85cb820146f4bbc2d))
+* **config:** enhance backbone architecture config handling for model weight loading ([ed2e8d3](https://github.com/alsmith151/ReguloNado/commit/ed2e8d3589f6e3c57b4591eed70047a546380aae))
+* **model:** add pretrained_name to backbone architecture initialization ([7fac5b0](https://github.com/alsmith151/ReguloNado/commit/7fac5b064d546d0501cf2cfc97f161adcac746cc))
+* **model:** upgrade to HF PreTrainedModel and add BigWig prediction ([69004a6](https://github.com/alsmith151/ReguloNado/commit/69004a61bcb6ce73f999fa7a3cce1ec54c9d4810))
+* **predict:** add option to include one-hot input in RegionPrediction ([7815dfb](https://github.com/alsmith151/ReguloNado/commit/7815dfb8f8d6625427414f249679920695f779fe))
+* **scripts:** add installation script for flash-attn with support for prebuilt wheels ([d629c07](https://github.com/alsmith151/ReguloNado/commit/d629c07634ccfb941ced9d447530fa4c214d2af7))
+* **scripts:** update dataset tag handling in training script output directory ([e4efc36](https://github.com/alsmith151/ReguloNado/commit/e4efc3610bf27b8a6b412af505fde5f0f7c379e0))
+* **sharding:** add shard size options to control Arrow shard file count and size ([8c622b2](https://github.com/alsmith151/ReguloNado/commit/8c622b220f579c3a612dadfd84f6ba07da612b68))
+* **training:** enhance logging and add rank handling for distributed training ([02b4be5](https://github.com/alsmith151/ReguloNado/commit/02b4be5ae0e0b2ca0c8f3084214077b92cb4e769))
+
+
+### Bug Fixes
+
+* **backbone:** fail on unset pretrained_name instead of silent random init ([078893d](https://github.com/alsmith151/ReguloNado/commit/078893da9482d1758a9587955c8c7e10dce32397))
+* **callbacks:** handle NaN/Inf values in axis limit calculations for plots ([ef49516](https://github.com/alsmith151/ReguloNado/commit/ef495165595bf890b4aa22e47571356705249a06))
+* **slurm:** require explicit REPO_DIR instead of unreliable BASH_SOURCE ([1283ec1](https://github.com/alsmith151/ReguloNado/commit/1283ec1fa884bf188ce0a601e0e7ec3691b08f11))
+
+
+### Documentation
+
+* document debug-writers feature build command ([a5edb20](https://github.com/alsmith151/ReguloNado/commit/a5edb20def11d84a81ca45c3b9d243ff97ec0e5d))
+
 ## [Unreleased]
 
 ### Changed

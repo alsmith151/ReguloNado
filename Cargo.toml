@@ -1,6 +1,6 @@
 [package]
 name = "regulonado_rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Fast BigWig/FASTA to Arrow dataset construction for sequence-to-function genomics models"
 license = "BSD-3-Clause"
