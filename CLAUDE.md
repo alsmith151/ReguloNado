@@ -68,6 +68,17 @@ Settings dicts are rendered to CLI flags (`_override_flags` in
 [rules/train.smk](python/regulonado/workflow/rules/train.smk)); checkpoints are resolved with
 [scripts/resolve_checkpoint.py](python/regulonado/workflow/scripts/resolve_checkpoint.py).
 
+## Attribution module
+
+`regulonado attribute` ([design/attribution.py](python/regulonado/design/attribution.py)) is the
+pre-selection front end for `design`: one ISM sweep against **one** named track (resolved with
+`inference._resolve_tracks`), then smooth/threshold/merge core calling via `scipy.ndimage`. Its
+`core_regions.bed` is fed back in as `design --candidates`. Attribution is base-resolution — the
+profile is indexed by mutated position, not by output bin. See [docs/attribution.md](docs/attribution.md).
+
+Not `tangermeme.saturation_mutagenesis`: it materialises every mutant up front, which is 3.8 GB
+per 600 bp candidate at a 524 288 bp context.
+
 ## Design module
 
 `python/regulonado/design/` (`regulonado design` CLI + optional `design:` workflow stage) mutates

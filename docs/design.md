@@ -7,6 +7,12 @@ sequence — sampling truly de-novo sequence pushes the search far off that
 training manifold and predictions stop being reliable. Starting from an
 endogenous enhancer and mutating it keeps the search on-manifold.
 
+Candidates are usually not raw called peaks but the **cores** produced by
+`regulonado attribute`, which locates the sub-span of each candidate that
+actually drives a chosen track — see [attribution.md](attribution.md).
+Designing the whole of a 600 bp peak wastes the search (and the synthesis
+budget) on bases that do nothing.
+
 ## Why the dataset window, not the candidate, sets the context
 
 Each candidate in `--candidates` must fall inside the *predicted* region of a
