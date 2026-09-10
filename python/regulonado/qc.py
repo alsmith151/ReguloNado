@@ -226,7 +226,10 @@ def evaluate_rules(
     failed: list[list[str]] = [[] for _ in range(len(df))]
     for column, bounds in rules.items():
         if column not in df.columns:
-            continue
+            available = ", ".join(sorted(str(name) for name in df.columns))
+            raise ValueError(f"Unknown QC metric {column!r}; available metrics: {available}")
+        if "min" in bounds and "max" in bounds and bounds["min"] > bounds["max"]:
+            raise ValueError(f"QC metric {column!r} has min greater than max")
         values = pd.to_numeric(df[column], errors="coerce")
         fails = pd.Series(False, index=df.index)
         if "min" in bounds:
