@@ -1,5 +1,6 @@
 """Noise-robust per-track signal summaries."""
 from __future__ import annotations
+
 import torch
 
 __all__ = ["topk_signal", "signal_summary"]

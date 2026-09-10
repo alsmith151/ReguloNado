@@ -17,11 +17,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: astral-sh/setup-uv@v6
+
       - name: Install ruff
         run: pip install ruff
 
       - name: ruff check
         run: ruff check python/ tests/
+
+      - name: uv lock check
+        run: uv lock --check
 
   clippy:
     name: Clippy
@@ -43,6 +48,12 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo fmt check
+        run: cargo fmt --check
+
+      - name: cargo test
+        run: cargo test --all-targets
 
   test:
     name: "Data tests — Python ${{ matrix.python-version }}"
@@ -75,23 +86,13 @@ jobs:
       - name: Core install imports without the data/train extras
         run: |
           pip install .
-          python -c "import regulonado.tracks_table, regulonado.normalization"
+          python -c "import regulonado.config.models, regulonado.config.schema_gen, regulonado.tracks_table, regulonado.normalization"
 
       - name: Install with test dependencies
-        run: pip install ".[test,workflow]" pyyaml
+        run: pip install ".[test,workflow]"
 
-      - name: Run data, chrom-pass, and track-table tests
-        run: |
-          pytest \
-            tests/test_chrom_pass.py \
-            tests/test_dataset_staging.py \
-            tests/test_tracks_table.py \
-            tests/test_track_qc.py \
-            tests/test_tracks_cli.py \
-            tests/test_tracks.py \
-            tests/test_config_models.py \
-            tests/test_workflow_dag.py \
-            -v
+      - name: Run full Python test suite
+        run: pytest tests/ -q
 
       - name: Check config.schema.yaml matches the pydantic models
         run: |
