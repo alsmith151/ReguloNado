@@ -118,11 +118,8 @@ def _write_provenance(
         return
 
     repo = Path.cwd()
-    metadata_candidates = [
-        data_path / "regulonado_metadata.json",
-        data_path / "track_metadata.json",
-    ]
-    metadata_path = next((path for path in metadata_candidates if path.exists()), None)
+    metadata_path = data_path / "tracks.parquet"
+    metadata_path = metadata_path if metadata_path.exists() else None
     git_status = _run_git(repo, "status", "--short")
     provenance = {
         "config": cfg,

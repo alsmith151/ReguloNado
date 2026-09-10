@@ -32,12 +32,12 @@ def read_regions(path: Path) -> list[tuple[str, int, int]]:
             (str(chrom), int(start), int(end))
             for chrom, start, end in frame[cols].itertuples(index=False, name=None)
         ]
-    import pyranges as pr
+    import bioframe as bf
 
-    frame = pr.read_bed(str(path)).df
+    frame = bf.read_table(str(path), schema="bed")
     return [
         (str(chrom), int(start), int(end))
-        for chrom, start, end in frame[["Chromosome", "Start", "End"]].itertuples(
+        for chrom, start, end in frame[["chrom", "start", "end"]].itertuples(
             index=False, name=None
         )
     ]
@@ -50,7 +50,7 @@ def track_window_stat(reader, windows, *, bin_size: int, window_stat_bp: int) ->
     for chrom, start, end in windows:
         n_bins = max(1, int(np.ceil((end - start) / bin_size)))
         values = np.asarray(
-            reader.values(chrom, start, end, bins=n_bins, summary="mean", exact=True, fillna=0),
+            reader.values(chrom, start, end, bins=n_bins, summary="mean", exact=True, missing=0),
             dtype=np.float32,
         )
         np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
@@ -218,58 +218,6 @@ def compute_clip_thresholds(
     df["clip_soft"] = (soft_reads_per_million * lib / 1e6).round(1)
     df["clip_hard"] = (hard_reads_per_million * lib / 1e6).round(1)
     return df
-
-
-def _read_arrow_shard_shape(shard_path: Path) -> tuple[int, int]:
-    """Return (n_tracks, n_bins) from the labels field metadata of the first shard."""
-    import pyarrow.ipc as ipc
-
-    reader = ipc.open_stream(str(shard_path))
-    schema = reader.schema_arrow
-    meta = schema.field("labels").metadata
-    if meta is None:
-        raise ValueError(f"No field metadata on 'labels' in {shard_path}")
-    shape_str = json.loads(meta[b"ARROW:extension:metadata"])
-    n_tracks, n_bins = shape_str[0]
-    return int(n_tracks), int(n_bins)
-
-
-def read_dataset_means(
-    dataset_dir: Path,
-    *,
-    split: str = "train",
-) -> tuple[np.ndarray, int, int]:
-    """Read per-sample per-track mean RPKM from Arrow IPC shards.
-
-    Returns:
-        means:    (n_samples, n_tracks) float32 mean signal per region
-        n_tracks: number of signal tracks
-        n_bins:   number of bins per sample (including shift buffer)
-    """
-    import pyarrow.compute as pc
-    import pyarrow.ipc as ipc
-
-    shard_dir = dataset_dir / split
-    shards = sorted(shard_dir.glob("*.arrow"))
-    if not shards:
-        raise FileNotFoundError(f"No .arrow shards found in {shard_dir}")
-
-    n_tracks, n_bins = _read_arrow_shard_shape(shards[0])
-
-    chunks: list[np.ndarray] = []
-    for shard_path in tqdm(shards, desc="Reading shards"):
-        reader = ipc.open_stream(str(shard_path))
-        for batch in reader:
-            n_rows = batch.num_rows
-            col = batch.column("labels")
-            # Flatten list<list<float>> → flat float array then reshape
-            flat = pc.list_flatten(pc.list_flatten(col))
-            arr = np.frombuffer(flat.buffers()[-1], dtype=np.float32)
-            # Buffer may be larger than needed due to Arrow alignment padding
-            arr = arr[: n_rows * n_tracks * n_bins].reshape(n_rows, n_tracks, n_bins)
-            chunks.append(arr.mean(axis=2))  # (n_rows, n_tracks)
-
-    return np.concatenate(chunks, axis=0), n_tracks, n_bins
 
 
 def compute_tmm_factors(

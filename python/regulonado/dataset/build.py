@@ -34,12 +34,14 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterator, Sequence
 
 import numpy as np
+import pandas as pd
 
 if TYPE_CHECKING:
     from datasets import Features
@@ -52,7 +54,6 @@ _DEFAULT_SIGNAL_SAMPLE_CHUNK = 8
 _DEFAULT_SIGNAL_TRACK_CHUNK = 128
 _DEFAULT_ARROW_BATCH_SIZE = 8
 _DEFAULT_ARROW_COMPRESSION = "lz4"
-_DEDUPE_TRACK_MODES = {"none", "identity", "content"}
 
 # Target on-disk size per Arrow shard file. The chrom_pass writer groups whole
 # record batches into shard files to hit roughly this size, decoupling the
@@ -96,6 +97,15 @@ def _recommend_shard_size(
     # Round up to a whole number of record batches, but never below one batch.
     n_batches = max(1, -(-est_samples // batch_size))
     return n_batches * batch_size
+
+
+def _regulonado_version() -> str:
+    from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+
+    try:
+        return version("regulonado")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 DEFAULT_SPLITS: dict[str, list[str]] = {
@@ -178,267 +188,6 @@ def _stage_files(
                 logger.info(f"  staged {done}/{n}")
     # preserve input order
     return [staged_map[str(Path(p))] for p in paths]
-
-
-# ---------------------------------------------------------------------------
-# Track filtering/provenance
-# ---------------------------------------------------------------------------
-
-
-def _hash_file_blake2b(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
-    h = hashlib.blake2b(digest_size=32)
-    with path.open("rb") as fh:
-        while chunk := fh.read(chunk_size):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _track_file_record(source_index: int, path: str) -> dict:
-    p = Path(path).expanduser()
-    try:
-        resolved = p.resolve()
-    except OSError:
-        resolved = p.absolute()
-
-    try:
-        st = resolved.stat()
-        size_bytes = int(st.st_size)
-        identity_key = f"inode:{st.st_dev}:{st.st_ino}"
-    except OSError:
-        size_bytes = None
-        identity_key = f"path:{resolved}"
-
-    return {
-        "source_index": source_index,
-        "path": path,
-        "resolved_path": str(resolved),
-        "size_bytes": size_bytes,
-        "identity_key": identity_key,
-    }
-
-
-def _resolve_bigwig_tracks(
-    bigwig_paths: Sequence[str | Path],
-    *,
-    drop_missing: bool,
-    dedupe_tracks: str,
-    annotations: dict[str, dict] | None = None,
-) -> tuple[list[str], dict]:
-    """Filter requested tracks and return final paths plus provenance metadata.
-
-    `annotations` maps a resolved BigWig path to biological annotation
-    (``condition_id``, ``target_id``, …) from a track sheet. Annotation is merged
-    into each surviving track record; provenance fields always win on a key
-    clash, so a sheet can never overwrite dedupe bookkeeping.
-    """
-    if dedupe_tracks not in _DEDUPE_TRACK_MODES:
-        raise ValueError(
-            f"dedupe_tracks must be one of {sorted(_DEDUPE_TRACK_MODES)}, got {dedupe_tracks!r}"
-        )
-
-    requested = [str(p).strip().strip('"').strip("'") for p in bigwig_paths]
-    existing: list[dict] = []
-    missing_records: list[dict] = []
-    for source_index, path in enumerate(requested):
-        if Path(path).expanduser().exists():
-            existing.append(_track_file_record(source_index, path))
-        else:
-            missing_records.append({"source_index": source_index, "path": path})
-
-    if missing_records:
-        if drop_missing:
-            logger.warning(
-                f"Dropping {len(missing_records)}/{len(requested)} missing bigwig paths:\n"
-                + "\n".join(f"  {r['path']}" for r in missing_records)
-            )
-        else:
-            raise FileNotFoundError(
-                f"{len(missing_records)}/{len(requested)} bigwig paths do not exist:\n"
-                + "\n".join(f"  {r['path']}" for r in missing_records)
-            )
-
-    identity_canonical: dict[int, int] = {}
-    identity_first: dict[str, int] = {}
-    survivors: list[dict] = []
-    n_identity_dropped = 0
-    if dedupe_tracks in {"identity", "content"}:
-        for rec in existing:
-            source_index = int(rec["source_index"])
-            key = str(rec["identity_key"])
-            if key in identity_first:
-                identity_canonical[source_index] = identity_first[key]
-                n_identity_dropped += 1
-            else:
-                identity_first[key] = source_index
-                identity_canonical[source_index] = source_index
-                survivors.append(rec)
-    else:
-        for rec in existing:
-            source_index = int(rec["source_index"])
-            identity_canonical[source_index] = source_index
-            survivors.append(rec)
-
-    content_canonical: dict[int, int] = {
-        int(rec["source_index"]): int(rec["source_index"]) for rec in survivors
-    }
-    content_hash_by_source: dict[int, str] = {}
-    n_hashed = 0
-    n_content_dropped = 0
-    hash_algorithm = "blake2b-256"
-    if dedupe_tracks == "content":
-        by_size: dict[int, list[dict]] = {}
-        for rec in survivors:
-            size = rec.get("size_bytes")
-            if size is not None:
-                by_size.setdefault(int(size), []).append(rec)
-
-        for same_size in by_size.values():
-            if len(same_size) < 2:
-                continue
-            first_for_hash: dict[str, int] = {}
-            for rec in same_size:
-                source_index = int(rec["source_index"])
-                digest = _hash_file_blake2b(Path(str(rec["resolved_path"])))
-                content_hash_by_source[source_index] = digest
-                n_hashed += 1
-                if digest in first_for_hash:
-                    content_canonical[source_index] = first_for_hash[digest]
-                    n_content_dropped += 1
-                else:
-                    first_for_hash[digest] = source_index
-
-    final_canonical: dict[int, int] = {}
-    for rec in existing:
-        source_index = int(rec["source_index"])
-        identity_source = identity_canonical[source_index]
-        final_canonical[source_index] = content_canonical.get(identity_source, identity_source)
-
-    final_source_indices = {
-        source_index
-        for source_index, canonical in final_canonical.items()
-        if source_index == canonical
-    }
-    final_records: list[dict] = []
-    final_track_index_by_source: dict[int, int] = {}
-    rec_by_source = {int(rec["source_index"]): rec for rec in existing}
-    for rec in existing:
-        source_index = int(rec["source_index"])
-        if source_index not in final_source_indices:
-            continue
-        track_index = len(final_records)
-        final_track_index_by_source[source_index] = track_index
-        content_hash = content_hash_by_source.get(source_index)
-        dedupe_method = (
-            "content"
-            if content_hash is not None
-            else ("identity" if dedupe_tracks in {"identity", "content"} else "none")
-        )
-        dedupe_key = (
-            f"content:{content_hash}" if content_hash is not None else str(rec["identity_key"])
-        )
-        out = {
-            "track_index": track_index,
-            "source_index": source_index,
-            "path": rec["path"],
-            "resolved_path": rec["resolved_path"],
-            "size_bytes": rec["size_bytes"],
-            "dedupe_key": dedupe_key,
-            "dedupe_method": dedupe_method,
-        }
-        if content_hash is not None:
-            out["content_hash"] = content_hash
-        if annotations:
-            annotation = annotations.get(str(rec["resolved_path"]))
-            if annotation:
-                # Provenance keys take precedence over sheet-supplied ones.
-                out = {**annotation, **out}
-        final_records.append(out)
-
-    dropped_records: list[dict] = []
-    for rec in existing:
-        source_index = int(rec["source_index"])
-        if source_index in final_source_indices:
-            continue
-        duplicate_of_source_index = final_canonical[source_index]
-        identity_source = identity_canonical[source_index]
-        content_hash = content_hash_by_source.get(identity_source)
-        dedupe_method = "identity" if identity_source != source_index else "content"
-        dropped = {
-            "source_index": source_index,
-            "path": rec["path"],
-            "resolved_path": rec["resolved_path"],
-            "size_bytes": rec["size_bytes"],
-            "duplicate_of_track_index": final_track_index_by_source[duplicate_of_source_index],
-            "duplicate_of_source_index": duplicate_of_source_index,
-            "dedupe_method": dedupe_method,
-            "dedupe_key": (
-                f"content:{content_hash}"
-                if dedupe_method == "content" and content_hash is not None
-                else str(rec["identity_key"])
-            ),
-        }
-        if dedupe_method == "content" and content_hash is not None:
-            dropped["content_hash"] = content_hash
-        duplicate_of = rec_by_source[duplicate_of_source_index]
-        dropped["duplicate_of_path"] = duplicate_of["path"]
-        dropped["duplicate_of_resolved_path"] = duplicate_of["resolved_path"]
-        dropped_records.append(dropped)
-
-    final_paths = [str(rec["path"]) for rec in final_records]
-
-    if annotations:
-        annotated = {
-            str(rec["resolved_path"])
-            for rec in final_records
-            if str(rec["resolved_path"]) in annotations
-        }
-        unannotated = len(final_records) - len(annotated)
-        if unannotated:
-            # Silently unannotated tracks would train with condition_id=-1, so
-            # name the problem rather than letting it look like a sheet worked.
-            logger.warning(
-                f"{unannotated}/{len(final_records)} track(s) have no track-sheet "
-                f"annotation; their categorical ids will be -1"
-            )
-        unused = set(annotations) - annotated
-        if unused:
-            sample = "\n".join(f"  {path}" for path in sorted(unused)[:5])
-            logger.warning(
-                f"{len(unused)} track-sheet row(s) matched no built track "
-                f"(dropped as missing or duplicate):\n{sample}"
-            )
-
-    if dedupe_tracks != "none":
-        logger.info(
-            f"Track dedupe mode={dedupe_tracks}: {len(final_paths)} final track(s) from "
-            f"{len(requested)} requested; dropped {len(dropped_records)} duplicate(s) "
-            f"({n_identity_dropped} identity, {n_content_dropped} content); "
-            f"hashed {n_hashed} file(s)"
-        )
-
-    provenance = {
-        "bigwig_paths": final_paths,
-        "final_bigwig_paths": final_paths,
-        "requested_bigwig_paths": requested,
-        "final_track_records": final_records,
-        "dropped_duplicate_tracks": dropped_records,
-        "missing_bigwig_paths": missing_records,
-        "n_requested_tracks": len(requested),
-        "n_missing_tracks": len(missing_records),
-        "n_dropped_duplicate_tracks": len(dropped_records),
-        "n_final_tracks": len(final_paths),
-        "dedupe_tracks": {
-            "mode": dedupe_tracks,
-            "keep": "first",
-            "identity_method": "stat(st_dev,st_ino) after resolve; fallback resolved_path",
-            "hash_algorithm": hash_algorithm if dedupe_tracks == "content" else None,
-            "hash_limited_to_same_size_groups": dedupe_tracks == "content",
-            "n_hashed_files": n_hashed,
-            "n_identity_duplicates": n_identity_dropped,
-            "n_content_duplicates": n_content_dropped,
-        },
-    }
-    return final_paths, provenance
 
 
 # ---------------------------------------------------------------------------
@@ -658,7 +407,7 @@ def _write_hf_split_metadata(
 def build_dataset_fast(
     bed_file: str | Path,
     fasta_file: str | Path,
-    bigwig_paths: Sequence[str | Path],
+    track_table: str | Path,
     output_dir: str | Path,
     *,
     splits: dict[str, list[str]] | None = None,
@@ -679,10 +428,6 @@ def build_dataset_fast(
     writer_batch_size: int = 500,
     stage_to_scratch: bool = False,
     overwrite: bool = False,
-    drop_missing: bool = False,
-    dedupe_tracks: str = "none",
-    annotations: dict[str, dict] | None = None,
-    track_metadata_vocab: dict[str, list[str]] | None = None,
     profile: bool = False,
     strategy: str = "chrom_pass",
     chrom_filter: list[str] | None = None,
@@ -693,6 +438,12 @@ def build_dataset_fast(
     Each split is written directly from BigWig + FASTA sources into compressed
     Arrow shards. Peak scratch is the current Arrow output plus one in-memory
     record batch, not a full dense `(tracks, samples, bins)` signal file.
+
+    Track identity, dedupe and QC are already settled by the time this runs —
+    ``track_table`` is ``tracks.parquet`` from ``regulonado tracks assemble``,
+    the *only* place a track list is named. This function reads it, verifies
+    each included track's fingerprint against disk, and writes the same table
+    (with build-time scalars merged in) to ``output_dir/tracks.parquet``.
 
     Parameters
     ----------
@@ -715,6 +466,8 @@ def build_dataset_fast(
         This avoids an expensive post-build reload when the caller only
         needs the on-disk dataset.
     """
+    from regulonado.tracks_table import read_track_table, verify_fingerprint
+
     if splits is None:
         splits = DEFAULT_SPLITS
     if shift_max_bp % bin_size != 0:
@@ -724,12 +477,17 @@ def build_dataset_fast(
 
     bed_file = Path(bed_file)
     output_dir = Path(output_dir)
-    bw_paths, track_metadata = _resolve_bigwig_tracks(
-        bigwig_paths,
-        drop_missing=drop_missing,
-        dedupe_tracks=dedupe_tracks,
-        annotations=annotations,
-    )
+    table = read_track_table(track_table)
+    included = table[table["status"] == "included"].sort_values("track_index")
+    bw_paths = included["resolved_path"].tolist()
+    for _, row in included.iterrows():
+        expected = {k: row[k] for k in row.index if k.startswith("fp_") and pd.notna(row[k])}
+        problems = verify_fingerprint(row["resolved_path"], expected)
+        if problems:
+            raise ValueError(
+                f"Track {row['track_name']!r} no longer matches its recorded fingerprint "
+                f"({row['resolved_path']}): {'; '.join(problems)}. Re-run discovery/assembly."
+            )
     n_tracks = len(bw_paths)
     stored_context = context_length + 2 * shift_max_bp
     shift_bins = shift_max_bp // bin_size
@@ -1010,25 +768,26 @@ def build_dataset_fast(
     logger.info(f"Rsync completed in {time.perf_counter() - t_rsync:.1f}s")
     shutil.rmtree(scratch_out)
 
-    metadata = {
-        **track_metadata,
-        "bed_file": str(bed_file),
-        "fasta_file": str(fasta_file),
-        "context_length": context_length,
-        "bin_size": bin_size,
-        "n_pred_bins": n_pred_bins,
-        "shift_max_bp": shift_max_bp,
-        "splits": splits,
-        "build_strategy": strategy,
-        "arrow_write_threads": effective_arrow_write_threads,
-    }
-    if track_metadata_vocab:
-        # Ordered label list per categorical field. The training code recovers
-        # cardinality from max(id)+1, which cannot recover the labels themselves,
-        # so store them here to keep predictions decodable.
-        metadata["track_metadata_vocab"] = track_metadata_vocab
-    metadata_file = output_dir / "regulonado_metadata.json"
-    metadata_file.write_text(json.dumps(metadata, indent=2))
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    from regulonado.tracks_table import write_track_table  # noqa: PLC0415
+
+    write_track_table(
+        table,
+        output_dir / "tracks.parquet",
+        bed_file=str(bed_file),
+        fasta_file=str(fasta_file),
+        context_length=context_length,
+        bin_size=bin_size,
+        n_pred_bins=n_pred_bins,
+        shift_max_bp=shift_max_bp,
+        splits=splits,
+        build_strategy=strategy,
+        arrow_write_threads=effective_arrow_write_threads,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        regulonado_version=_regulonado_version(),
+        command=" ".join(sys.argv),
+    )
 
     logger.info(f"Dataset saved to {output_dir}")
     if not return_dataset:
