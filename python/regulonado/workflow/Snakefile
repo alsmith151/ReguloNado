@@ -99,6 +99,7 @@ ENRICHED_METADATA = SCALING_DIR / "regulonado_metadata.enriched.json"
 
 
 DESIGN = config.get("design")
+ATTRIBUTION = config.get("attribution")
 
 
 rule all:
@@ -115,9 +116,18 @@ rule all:
             if DESIGN
             else []
         ),
+        *(
+            expand(
+                str(RESULTS / "attribution" / "{target}" / "core_regions.bed"),
+                target=[target["name"] for target in ATTRIBUTION["targets"]],
+            )
+            if ATTRIBUTION
+            else []
+        ),
 
 
 include: "rules/dataset.smk"
 include: "rules/scaling.smk"
 include: "rules/train.smk"
+include: "rules/attribute.smk"
 include: "rules/design.smk"

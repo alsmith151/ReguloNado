@@ -201,6 +201,43 @@ class DesignConfig(BaseModel):
         return self
 
 
+class AttributionTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    track: str
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+    _check_name = field_validator("name")(staticmethod(_validate_name))
+
+
+class AttributionConfig(BaseModel):
+    """Optional ISM-attribution stage: locate each candidate's high-attribution core.
+
+    Upstream of ``design``: point ``design.candidates`` at this stage's
+    ``core_regions.bed`` to optimise only the core rather than the whole candidate.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidates: str = Field(min_length=1)
+    shards: int = Field(default=1, ge=1)
+    runs: list[str] | None = None
+    checkpoint_dirs: list[str] | None = None
+    common: dict[str, Any] = Field(default_factory=dict)
+    targets: list[AttributionTarget] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _target_names_are_unique(self) -> "AttributionConfig":
+        names = [target.name for target in self.targets]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(
+                f"attribution.targets names must be unique; repeated: {', '.join(duplicates)}"
+            )
+        return self
+
+
 class RegulonadoConfig(BaseModel):
     """Top-level workflow config."""
 
@@ -213,6 +250,7 @@ class RegulonadoConfig(BaseModel):
     scaling: ScalingConfig = Field(default_factory=ScalingConfig)
     train: TrainConfig
     design: DesignConfig | None = None
+    attribution: AttributionConfig | None = None
 
     @model_validator(mode="after")
     def _design_runs_are_known(self) -> "RegulonadoConfig":
@@ -229,6 +267,19 @@ class RegulonadoConfig(BaseModel):
                     f"design.{label} names train.runs entries that don't exist: "
                     f"{', '.join(unknown)}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _attribution_runs_are_known(self) -> "RegulonadoConfig":
+        if self.attribution is None or not self.attribution.runs:
+            return self
+        run_names = {run.name for run in self.train.runs}
+        unknown = sorted(name for name in self.attribution.runs if name not in run_names)
+        if unknown:
+            raise ValueError(
+                f"attribution.runs names train.runs entries that don't exist: "
+                f"{', '.join(unknown)}"
+            )
         return self
 
     @model_validator(mode="after")
