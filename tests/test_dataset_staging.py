@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -34,6 +35,29 @@ def test_stage_files_copies_exact_duplicate_once_preserves_order(tmp_path):
 
     assert staged[0] == staged[1] == staged[2]
     assert Path(staged[0]).read_text() == "track"
+
+
+def test_concurrent_stage_files_are_isolated(tmp_path):
+    from regulonado.dataset import _stage_files
+
+    source_a = tmp_path / "source" / "a.bw"
+    source_b = tmp_path / "source" / "b.bw"
+    source_a.parent.mkdir()
+    source_a.write_bytes(b"a" * 4096)
+    source_b.write_bytes(b"b" * 4096)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(_stage_files, [source_a, source_b], tmp_path / f"scratch-{i}")
+            for i in range(2)
+        ]
+        staged = [future.result() for future in futures]
+
+    assert Path(staged[0][0]).read_bytes() == source_a.read_bytes()
+    assert Path(staged[0][1]).read_bytes() == source_b.read_bytes()
+    assert Path(staged[1][0]).read_bytes() == source_a.read_bytes()
+    assert Path(staged[1][1]).read_bytes() == source_b.read_bytes()
+    assert set(staged[0]).isdisjoint(staged[1])
 
 
 def test_track_dedupe_none_preserves_repeated_tracks(tmp_path):

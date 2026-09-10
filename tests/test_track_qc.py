@@ -82,11 +82,16 @@ def test_evaluate_rules_min_and_max_thresholds():
     assert failed.tolist() == [[], ["qc_nonzero_bin_fraction"], ["qc_dynamic_range"]]
 
 
-def test_evaluate_rules_ignores_unknown_columns():
+def test_evaluate_rules_rejects_unknown_columns():
     df = pd.DataFrame({"qc_bases_covered": [10, 20]})
-    verdict, failed = qc.evaluate_rules(df, {"qc_does_not_exist": {"min": 1}})
-    assert verdict.tolist() == ["passed", "passed"]
-    assert failed.tolist() == [[], []]
+    with pytest.raises(ValueError, match="Unknown QC metric"):
+        qc.evaluate_rules(df, {"qc_does_not_exist": {"min": 1}})
+
+
+def test_evaluate_rules_rejects_inverted_bounds():
+    df = pd.DataFrame({"qc_bases_covered": [10, 20]})
+    with pytest.raises(ValueError, match="min greater than max"):
+        qc.evaluate_rules(df, {"qc_bases_covered": {"min": 20, "max": 1}})
 
 
 def test_intervals_from_bed_samples_when_requested(tmp_path):

@@ -118,7 +118,7 @@ def load_model_weights_only(model: torch.nn.Module, checkpoint: str | Path) -> N
 
         state_dict = load_file(str(weight_path), device="cpu")
     else:
-        state_dict = torch.load(weight_path, map_location="cpu")
+        state_dict = torch.load(weight_path, map_location="cpu", weights_only=True)
     # HF Trainer saves the TrainerCompatibleModel wrapper, so keys are prefixed with "model.".
     # Strip that prefix if present so the state dict loads into a bare RegulonadoModel.
     first_keys = list(state_dict)[:5]
@@ -998,6 +998,31 @@ def run_training(
         - init_weights_from_checkpoint: path if warm-started
         - history: dict with "train/loss" and "eval/loss" lists
     """
+    required_sections = ("data", "backbone", "head", "model", "loss", "trainer")
+    missing_sections = [section for section in required_sections if section not in cfg]
+    if missing_sections:
+        raise ValueError(
+            "Training configuration is missing required section(s): "
+            + ", ".join(missing_sections)
+        )
+    try:
+        trainer_cfg = OmegaConf.to_object(
+            OmegaConf.merge(OmegaConf.structured(TrainerConfig), cfg["trainer"])
+        )
+    except OmegaConfBaseException as exc:
+        raise ValueError(f"Invalid trainer configuration: {exc}") from exc
+    if not isinstance(trainer_cfg, TrainerConfig):
+        raise TypeError("Trainer configuration did not resolve to TrainerConfig")
+    trainer_cfg = dataclasses.replace(
+        trainer_cfg,
+        resume_from_checkpoint=_normalise_checkpoint_mode(trainer_cfg.resume_from_checkpoint),
+        init_weights_from_checkpoint=(trainer_cfg.init_weights_from_checkpoint or None),
+    )
+    if trainer_cfg.resume_from_checkpoint and trainer_cfg.init_weights_from_checkpoint:
+        raise ValueError(
+            "Set only one of trainer.resume_from_checkpoint or trainer.init_weights_from_checkpoint"
+        )
+
     seed = int(cfg.get("seed", 42))
     _seed_everything(seed)
 
@@ -1104,24 +1129,6 @@ def run_training(
         clip_hard=clip_hard,
         labels_already_scaled=labels_already_scaled,
     )
-
-    try:
-        trainer_cfg = OmegaConf.to_object(
-            OmegaConf.merge(OmegaConf.structured(TrainerConfig), cfg["trainer"])
-        )
-    except OmegaConfBaseException as exc:
-        raise ValueError(f"Invalid trainer configuration: {exc}") from exc
-    if not isinstance(trainer_cfg, TrainerConfig):
-        raise TypeError("Trainer configuration did not resolve to TrainerConfig")
-    trainer_cfg = dataclasses.replace(
-        trainer_cfg,
-        resume_from_checkpoint=_normalise_checkpoint_mode(trainer_cfg.resume_from_checkpoint),
-        init_weights_from_checkpoint=(trainer_cfg.init_weights_from_checkpoint or None),
-    )
-    if trainer_cfg.resume_from_checkpoint and trainer_cfg.init_weights_from_checkpoint:
-        raise ValueError(
-            "Set only one of trainer.resume_from_checkpoint or trainer.init_weights_from_checkpoint"
-        )
 
     # Persistent workers with HF IterableDataset accumulate Arrow file handles and
     # shuffle-buffer state between iterator cycles — workers never restart to clear them.

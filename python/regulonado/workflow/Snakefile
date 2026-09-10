@@ -24,7 +24,7 @@ if config["scaling"]["method"] == "seqnado":
     # Naming a single project does not rescue an aggregated dataset: tracks from
     # the other projects have no entry in that project's table, so scaling would
     # fail once it ran. Reject it here instead.
-    if len(SEQNADO_PROJECTS) > 1:
+    if len(SEQNADO_PROJECTS) > 1 and not config["scaling"].get("seqnado_project"):
         raise ValueError(
             "scaling.method 'seqnado' reuses one project's normalisation factors, "
             f"but {len(SEQNADO_PROJECTS)} projects are configured. Use scaling.method "

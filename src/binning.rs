@@ -68,21 +68,19 @@ pub(crate) fn bin_region_into<R: BBIFileRead>(
     region_end: u32,
     out: &mut [f32],
     scratch: &mut BinningScratch,
-) -> BinningUsage {
+) -> Result<BinningUsage, String> {
     let n_bins = out.len();
     if n_bins == 0 || region_end <= region_start {
         out.fill(0.0);
-        return BinningUsage::default();
+        return Ok(BinningUsage::default());
     }
     let region_width = region_end - region_start;
 
-    let iter = match reader.get_interval(chrom, region_start, region_end) {
-        Ok(it) => it,
-        Err(_) => {
-            out.fill(0.0);
-            return BinningUsage::default();
-        }
-    };
+    let iter = reader
+        .get_interval(chrom, region_start, region_end)
+        .map_err(|error| {
+            format!("failed to read BigWig interval {chrom}:{region_start}-{region_end}: {error}")
+        })?;
 
     let mut interval_count = 0usize;
     let (sums, covered) = scratch.direct_buffers(n_bins);
@@ -90,10 +88,11 @@ pub(crate) fn bin_region_into<R: BBIFileRead>(
     if region_width as usize % n_bins == 0 {
         let bin_bp = (region_width as usize) / n_bins;
         for val_result in iter {
-            let val = match val_result {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+            let val = val_result.map_err(|error| {
+                format!(
+                    "failed while reading BigWig intervals for {chrom}:{region_start}-{region_end}: {error}"
+                )
+            })?;
             if val.value.is_nan() {
                 continue;
             }
@@ -140,10 +139,11 @@ pub(crate) fn bin_region_into<R: BBIFileRead>(
     } else {
         let bin_bp = region_width as f64 / n_bins as f64;
         for val_result in iter {
-            let val = match val_result {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+            let val = val_result.map_err(|error| {
+                format!(
+                    "failed while reading BigWig intervals for {chrom}:{region_start}-{region_end}: {error}"
+                )
+            })?;
             if val.value.is_nan() {
                 continue;
             }
@@ -191,5 +191,5 @@ pub(crate) fn bin_region_into<R: BBIFileRead>(
         };
     }
 
-    BinningUsage::direct(interval_count)
+    Ok(BinningUsage::direct(interval_count))
 }

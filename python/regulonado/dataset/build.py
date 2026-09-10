@@ -35,6 +35,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -496,12 +497,12 @@ def build_dataset_fast(
     scratch_root = Path(os.environ.get("SLURM_TMPDIR") or os.environ.get("TMPDIR") or "/tmp")
     if cache_dir is None:
         cache_dir = str(scratch_root / "hf_cache")
-    scratch_out = scratch_root / "regulonado_build"
+    scratch_out = Path(tempfile.mkdtemp(prefix="regulonado-build-", dir=scratch_root))
 
     active_fasta = str(fasta_file)
     active_bw_paths = bw_paths
     if stage_to_scratch:
-        stage_dir = scratch_root / "regulonado_stage"
+        stage_dir = scratch_out / "stage"
         logger.info(f"Staging source files to {stage_dir}")
         active_fasta = _stage_files([fasta_file], stage_dir, _FASTA_COMPANIONS)[0]
         _stage_files([bed_file], stage_dir)
@@ -760,12 +761,15 @@ def build_dataset_fast(
                 split_datasets[split] = Dataset.load_from_disk(str(split_scratch))
     logger.info(f"Arrow writing completed in {time.perf_counter() - t_arrow_total:.1f}s")
 
-    (scratch_out / "dataset_dict.json").write_text(json.dumps({"splits": list(splits)}, indent=2))
-    logger.info(f"Rsyncing dataset from scratch to {output_dir}")
+    logger.info(f"Publishing rebuilt splits to {output_dir}")
     t_rsync = time.perf_counter()
     output_dir.mkdir(parents=True, exist_ok=True)
-    _rsync_tree(scratch_out, output_dir, delete=True)
-    logger.info(f"Rsync completed in {time.perf_counter() - t_rsync:.1f}s")
+    for split in splits_to_build:
+        _rsync_tree(scratch_out / split, output_dir / split, delete=True)
+    (output_dir / "dataset_dict.json").write_text(
+        json.dumps({"splits": list(splits)}, indent=2)
+    )
+    logger.info(f"Publication completed in {time.perf_counter() - t_rsync:.1f}s")
     shutil.rmtree(scratch_out)
 
     from datetime import datetime, timezone  # noqa: PLC0415

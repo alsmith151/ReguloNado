@@ -223,7 +223,7 @@ def build_config(
         )
 
     # --- scaling -----------------------------------------------------------
-    scaling_choices = ["tmm", "original", "bamnado"]
+    scaling_choices = ["tmm", "original", "bamnado", "anchor"]
     if len(projects) == 1:
         # Reusing SeqNado's factors only makes sense for a single project;
         # across projects they are not on a comparable scale.
@@ -235,6 +235,20 @@ def build_config(
         interactive=interactive,
     )
     scaling = ScalingConfig(method=str(scaling_method))
+
+    if scaling.method == "anchor":
+        for field, prompt in (
+            ("anchor_regions", "Anchor regions BED/parquet file?"),
+            ("background_regions", "Background regions BED/parquet file?"),
+            ("heldout_regions", "Held-out regions BED/parquet file (optional)?"),
+        ):
+            value = ask(
+                prompt,
+                scaling_defaults.get(field),
+                is_path=bool(interactive),
+                interactive=interactive,
+            )
+            setattr(scaling, field, str(value) if value else None)
 
     bam_dir = inputs_defaults.get("bam_dir")
     if scaling.method == "bamnado":
