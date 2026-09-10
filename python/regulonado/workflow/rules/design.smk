@@ -54,17 +54,22 @@ if DESIGN:
     if DESIGN_CHECKPOINT_DIRS and len(DESIGN_CHECKPOINT_DIRS) != len(DESIGN_RUN_NAMES):
         raise ValueError("design.checkpoint_dirs must match the number of design runs")
 
-    _candidates_path = Path(DESIGN["candidates"])
-    _n_candidates = (
-        sum(1 for line in _candidates_path.read_text().splitlines() if line.strip())
-        if _candidates_path.exists()
-        else 0
-    )
-    _requested_shards = DESIGN.get("shards", 1)
-    DESIGN_SHARD_COUNT = (
-        max(1, min(_requested_shards, _n_candidates)) if _n_candidates else _requested_shards
-    )
-    DESIGN_SHARDS = [str(i) for i in range(DESIGN_SHARD_COUNT)]
+    _design_requested_shards = DESIGN.get("shards", 1)
+
+    def _design_shard_names(wildcards):
+        """Actual shard file stems, resolved only once shard_candidates has run.
+
+        Candidates may themselves be an attribution-stage output
+        (`results/attribution/{target}/core_regions.bed`), which does not exist
+        at DAG-construction time. Reading its line count then — as a plain
+        module-level computation — would either guess wrong (falling back to
+        the requested shard count) or, worse, give a *different* answer on a
+        second run once the file exists: a DAG whose job count depends on
+        whether a previous run happened. `shard_candidates` is a checkpoint
+        precisely so this resolves from its real output instead.
+        """
+        shard_dir = Path(checkpoints.shard_candidates.get().output[0])
+        return sorted(path.stem for path in shard_dir.glob("*.bed"))
 
     def _design_run_dirs():
         return [str(phase_run_dir(run, PHASE_NAMES[-1])) for run in DESIGN_RUN_NAMES]
@@ -121,25 +126,39 @@ if DESIGN:
             return f"--holdout-checkpoint {shlex.quote(str(DESIGN_HOLDOUT_CHECKPOINT))}"
         return ""
 
-    rule shard_candidates:
+    checkpoint shard_candidates:
+        """Split candidates into shards, using the real row count of a file guaranteed to exist.
+
+        A `checkpoint` (not a plain `rule`) because the shard count depends on
+        this rule's own input content, which itself may only exist once an
+        upstream rule (e.g. attribution's `merge_attributions`) has produced
+        it — unknowable at DAG-construction time. Downstream rules resolve the
+        actual shard count via `_design_shard_names()` instead of a
+        precomputed module-level list.
+        """
         input:
             DESIGN["candidates"],
         output:
-            expand(str(DESIGN_DIR / "shards" / "{shard}.bed"), shard=DESIGN_SHARDS),
+            directory(str(DESIGN_DIR / "shards")),
         run:
             # Round-robin, not contiguous blocks, so chromosome clustering in the BED
             # doesn't make one shard dominate the runtime.
             lines = [line for line in Path(input[0]).read_text().splitlines() if line.strip()]
-            buckets = [[] for _ in output]
+            n_shards = max(1, min(_design_requested_shards, len(lines))) if lines else (
+                _design_requested_shards
+            )
+            Path(output[0]).mkdir(parents=True, exist_ok=True)
+            buckets = [[] for _ in range(n_shards)]
             for index, line in enumerate(lines):
-                buckets[index % len(buckets)].append(line)
-            for bucket, out_path in zip(buckets, output):
+                buckets[index % n_shards].append(line)
+            for shard_index, bucket in enumerate(buckets):
                 text = "\n".join(bucket)
-                Path(out_path).write_text(text + "\n" if text else "")
+                (Path(output[0]) / f"{shard_index}.bed").write_text(text + "\n" if text else "")
 
     rule design_shard:
         input:
-            shard=str(DESIGN_DIR / "shards" / "{shard}.bed"),
+            shard=lambda w: str(Path(checkpoints.shard_candidates.get().output[0])
+                                 / f"{w.shard}.bed"),
             intervals=config["inputs"]["intervals"],
             checkpoints=_design_checkpoint_state_inputs,
             holdout=_design_holdout_state_input,
@@ -169,7 +188,7 @@ if DESIGN:
             runtime=240,
         wildcard_constraints:
             target="|".join(re.escape(name) for name in DESIGN_TARGET_NAMES),
-            shard="|".join(re.escape(s) for s in DESIGN_SHARDS),
+            shard=r"\d+",
         log:
             str(RESULTS / "logs" / "design_{target}_{shard}.log"),
         shell:
@@ -219,23 +238,23 @@ if DESIGN:
         input:
             tsv=lambda w: expand(
                 str(DESIGN_DIR / w.target / "shards" / "{shard}" / "designs.tsv"),
-                shard=DESIGN_SHARDS,
+                shard=_design_shard_names(w),
             ),
             fa=lambda w: expand(
                 str(DESIGN_DIR / w.target / "shards" / "{shard}" / "designs.fa"),
-                shard=DESIGN_SHARDS,
+                shard=_design_shard_names(w),
             ),
             bed=lambda w: expand(
                 str(DESIGN_DIR / w.target / "shards" / "{shard}" / "designs.bed"),
-                shard=DESIGN_SHARDS,
+                shard=_design_shard_names(w),
             ),
             trajectory=lambda w: expand(
                 str(DESIGN_DIR / w.target / "shards" / "{shard}" / "trajectory.tsv"),
-                shard=DESIGN_SHARDS,
+                shard=_design_shard_names(w),
             ),
             edits=lambda w: expand(
                 str(DESIGN_DIR / w.target / "shards" / "{shard}" / "edits.tsv"),
-                shard=DESIGN_SHARDS,
+                shard=_design_shard_names(w),
             ),
         output:
             tsv=str(DESIGN_DIR / "{target}" / "designs.tsv"),
