@@ -169,12 +169,11 @@ def test_build_cli_skips_final_reload_for_fast_path(tmp_path, monkeypatch):
 
     bed = tmp_path / "intervals.bed"
     fasta = tmp_path / "genome.fa"
-    bigwig_dir = tmp_path / "bw"
+    track_table = tmp_path / "tracks.parquet"
     output_dir = tmp_path / "out"
-    bigwig_dir.mkdir()
     bed.write_text("")
     fasta.write_text("")
-    (bigwig_dir / "track.bw").write_text("")
+    track_table.write_text("")
 
     def fake_build_dataset_fast(*args, **kwargs):
         captured.update(kwargs)
@@ -189,8 +188,8 @@ def test_build_cli_skips_final_reload_for_fast_path(tmp_path, monkeypatch):
             str(bed),
             str(fasta),
             str(output_dir),
-            "--bigwig-dir",
-            str(bigwig_dir),
+            "--track-table",
+            str(track_table),
         ],
     )
 

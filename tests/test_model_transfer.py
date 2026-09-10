@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pandas as pd
 import torch
 import torch.nn as nn
 from datasets import Dataset, DatasetDict
@@ -19,6 +20,7 @@ from regulonado.model import (
     TransferMLPPerturbHead,
     build_condition_shared_track_index,
 )
+from regulonado.tracks_table import write_track_table
 from regulonado.training.config import TrainerConfig
 from regulonado.training.data import stack_batch_tensors
 from regulonado.training.losses import scaled_poisson_multinomial_loss
@@ -254,35 +256,32 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
         }
     )
     ds.save_to_disk(str(data_dir))
-    (data_dir / "regulonado_metadata.json").write_text(
-        """
-{
-  "context_length": 12,
-  "n_pred_bins": 12,
-  "bin_size": 1,
-  "shift_max_bp": 0,
-  "final_track_records": [
-    {"track_index": 0, "condition_id": 0, "assay_type_id": 0, "scale_factor": 1.0},
-    {"track_index": 1, "condition_id": 1, "assay_type_id": 0, "scale_factor": 1.0}
-  ]
-}
-""".strip()
-    )
-    enriched_metadata = tmp_path / "regulonado_metadata.enriched.json"
-    enriched_metadata.write_text(
-        """
-{
-  "context_length": 12,
-  "n_pred_bins": 12,
-  "bin_size": 1,
-  "shift_max_bp": 0,
-  "final_track_records": [
-    {"track_index": 0, "condition_id": 2, "assay_type_id": 0, "scale_factor": 2.0},
-    {"track_index": 1, "condition_id": 3, "assay_type_id": 0, "scale_factor": 3.0}
-  ]
-}
-""".strip()
-    )
+
+    # 'condition' is a label, not an id — categorical ids are derived by sorted
+    # factorisation at load time (see tracks_table.to_track_records), which is
+    # why the two tables below use different label sets rather than literal ids.
+    def _write_tracks(path, conditions, scale_factors):
+        write_track_table(
+            pd.DataFrame(
+                {
+                    "track_name": ["t0", "t1"],
+                    "status": ["included", "included"],
+                    "track_index": [0, 1],
+                    "condition": conditions,
+                    "assay": ["atac", "atac"],
+                    "scale_factor": scale_factors,
+                }
+            ),
+            path,
+            context_length=12,
+            bin_size=1,
+            n_pred_bins=12,
+            shift_max_bp=0,
+        )
+
+    _write_tracks(data_dir / "tracks.parquet", ["a", "b"], [1.0, 1.0])
+    enriched_metadata = tmp_path / "tracks.enriched.parquet"
+    _write_tracks(enriched_metadata, ["z", "a"], [2.0, 3.0])
 
     summary = run_training(
         {
@@ -348,4 +347,6 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
 
     saved_config = RegulonadoConfig.from_pretrained(tmp_path / "run")
     assert saved_config.track_names == ["track0", "track1"]
-    assert saved_config.track_metadata["track_condition_ids"] == [2, 3]
+    # Enriched labels ["z", "a"] sort to ["a", "z"] -> a=0, z=1, so t0("z")=1, t1("a")=0 —
+    # distinct from the dataset-copy's ["a", "b"] -> [0, 1], proving metadata_path won.
+    assert saved_config.track_metadata["track_condition_ids"] == [1, 0]

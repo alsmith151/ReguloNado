@@ -72,11 +72,31 @@ jobs:
             ${{ runner.os }}-cargo-${{ matrix.python-version }}-
             ${{ runner.os }}-cargo-
 
-      - name: Install with test dependencies
-        run: pip install ".[test]"
+      - name: Core install imports without the data/train extras
+        run: |
+          pip install .
+          python -c "import regulonado.tracks_table, regulonado.normalization"
 
-      - name: Run data and chrom-pass tests
-        run: pytest tests/test_chrom_pass.py tests/test_dataset_staging.py -v
+      - name: Install with test dependencies
+        run: pip install ".[test,workflow]" pyyaml
+
+      - name: Run data, chrom-pass, and track-table tests
+        run: |
+          pytest \
+            tests/test_chrom_pass.py \
+            tests/test_dataset_staging.py \
+            tests/test_tracks_table.py \
+            tests/test_track_qc.py \
+            tests/test_tracks_cli.py \
+            tests/test_tracks.py \
+            tests/test_config_models.py \
+            tests/test_workflow_dag.py \
+            -v
+
+      - name: Check config.schema.yaml matches the pydantic models
+        run: |
+          python -m regulonado.config.schema_gen
+          git diff --exit-code -- python/regulonado/workflow/schemas/config.schema.yaml
 
   test-model:
     # The model/loss/metric tests import torch, which the [test] extra deliberately
@@ -125,4 +145,5 @@ jobs:
             tests/test_train_metrics.py \
             tests/test_design.py \
             tests/test_attribution.py \
-            tests/test_normalization_anchor.py -v
+            tests/test_normalization_anchor.py \
+            tests/test_cli.py -v

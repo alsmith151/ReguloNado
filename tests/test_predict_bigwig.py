@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 import torch.nn as nn
@@ -261,21 +262,23 @@ def test_load_model_for_inference_legacy_run_root_returns_regulonado_model(
 ):
     import regulonado.model as model_module
     from regulonado.inference import load_model_for_inference
+    from regulonado.tracks_table import write_track_table
 
     data_dir = tmp_path / "dataset"
     data_dir.mkdir()
-    (data_dir / "regulonado_metadata.json").write_text(
-        json.dumps(
+    write_track_table(
+        pd.DataFrame(
             {
-                "context_length": CONTEXT,
-                "n_pred_bins": N_PRED_BINS,
-                "bin_size": BIN_SIZE,
-                "final_track_records": [
-                    {"track_index": 0, "path": "/x/alpha.bw"},
-                    {"track_index": 1, "path": "/x/beta.bw"},
-                ],
+                "track_name": ["alpha", "beta"],
+                "status": ["included", "included"],
+                "track_index": [0, 1],
+                "path": ["/x/alpha.bw", "/x/beta.bw"],
             }
-        )
+        ),
+        data_dir / "tracks.parquet",
+        context_length=CONTEXT,
+        n_pred_bins=N_PRED_BINS,
+        bin_size=BIN_SIZE,
     )
     run_root = tmp_path / "run"
     checkpoint = run_root / "checkpoint-1"
