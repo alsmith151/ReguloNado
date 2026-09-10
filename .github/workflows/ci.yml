@@ -123,4 +123,5 @@ jobs:
             tests/test_model_transfer.py \
             tests/test_predict_bigwig.py \
             tests/test_train_metrics.py \
-            tests/test_design.py -v
+            tests/test_design.py \
+            tests/test_attribution.py -v

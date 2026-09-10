@@ -260,3 +260,172 @@ design:
     assert cli_result.returncode == 0, cli_output
     assert "--objective selective-activation" in cli_output
     assert "--gain-transform log2-fold-change" in cli_output
+
+
+def test_attribution_stage_chains_into_design(tmp_path):
+    """The attribution stage's core_regions.bed can be design's candidates input."""
+    snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
+    if snakemake is None:
+        pytest.skip("Snakemake is an optional workflow dependency")
+
+    intervals = tmp_path / "intervals.bed"
+    fasta = tmp_path / "genome.fa"
+    candidates = tmp_path / "candidates.bed"
+    intervals.touch()
+    fasta.touch()
+    candidates.write_text("chr1\t100\t700\tcand1\nchr1\t2000\t2600\tcand2\n")
+
+    results = tmp_path / "results"
+    config = tmp_path / "attribution-config.yaml"
+    config.write_text(
+        f"""
+results_dir: {results}
+inputs:
+  intervals: {intervals}
+  fasta: {fasta}
+  bigwig_dir: {tmp_path / "bigwigs"}
+build:
+  context_length: 100
+  bin_size: 10
+  n_pred_bins: 4
+  shift_max_bp: 0
+  extract_threads: 1
+  arrow_write_threads: 1
+  arrow_batch_size: 4
+  compression: lz4
+  stage_to_scratch: false
+  drop_missing: true
+  dedupe_tracks: content
+recompress:
+  enabled: false
+  zstd_level: 3
+  max_batch_size: 4
+  workers: 1
+scaling:
+  method: tmm
+train:
+  nproc_per_node: 1
+  phases:
+    - {{name: first, preset: head_only}}
+  runs:
+    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
+    - {{name: fold_1, seed: 20, pretrained_model: model/b}}
+attribution:
+  candidates: {candidates}
+  shards: 2
+  runs: [fold_0, fold_1]
+  common:
+    stride: 4
+    fix_width: 300
+    bigwig: true
+  targets:
+    - {{name: hl60, track: atac_hl60, settings: {{quantile: 0.92}}}}
+design:
+  candidates: {results / "attribution" / "hl60" / "core_regions.bed"}
+  shards: 1
+  design_runs: [fold_0]
+  holdout_run: fold_1
+  targets:
+    - {{name: hl60_design, target: HL-60, group_by: source, method: ism}}
+"""
+    )
+
+    result = subprocess.run(
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            "--dry-run",
+            "--printshellcmds",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    assert result.returncode == 0, result.stderr
+
+    assert re.search(r"attribute_shard\s+2", result.stdout)
+    assert re.search(r"merge_attributions\s+1", result.stdout)
+    assert "regulonado attribute" in result.stdout
+    # The named track and both common and per-target settings must reach the command line.
+    assert "--track atac_hl60" in result.stdout
+    assert "--stride 4" in result.stdout
+    assert "--fix-width 300" in result.stdout
+    assert "--quantile 0.92" in result.stdout
+    assert "--bigwig" in result.stdout
+    # And design must run downstream of attribution, not in parallel with it.
+    assert "attribution/hl60/core_regions.bed" in result.stdout
+    assert re.search(r"design_shard\s+1", result.stdout)
+
+
+def test_attribution_stage_is_absent_unless_configured(tmp_path):
+    """No 'attribution:' key means the rules are never defined and rule all is unaffected."""
+    snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
+    if snakemake is None:
+        pytest.skip("Snakemake is an optional workflow dependency")
+
+    intervals = tmp_path / "intervals.bed"
+    fasta = tmp_path / "genome.fa"
+    intervals.touch()
+    fasta.touch()
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"""
+results_dir: {tmp_path / "results"}
+inputs:
+  intervals: {intervals}
+  fasta: {fasta}
+  bigwig_dir: {tmp_path / "bigwigs"}
+build:
+  context_length: 100
+  bin_size: 10
+  n_pred_bins: 4
+  shift_max_bp: 0
+  extract_threads: 1
+  arrow_write_threads: 1
+  arrow_batch_size: 4
+  compression: lz4
+  stage_to_scratch: false
+  drop_missing: true
+  dedupe_tracks: content
+recompress:
+  enabled: false
+  zstd_level: 3
+  max_batch_size: 4
+  workers: 1
+scaling:
+  method: tmm
+train:
+  nproc_per_node: 1
+  phases:
+    - {{name: first, preset: head_only}}
+  runs:
+    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
+"""
+    )
+    result = subprocess.run(
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            "--dry-run",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "attribute_shard" not in result.stdout
+    assert "merge_attributions" not in result.stdout
+    assert "regulonado attribute" not in result.stdout
+    assert "core_regions.bed" not in result.stdout
