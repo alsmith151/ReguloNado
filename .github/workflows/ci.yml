@@ -124,4 +124,5 @@ jobs:
             tests/test_predict_bigwig.py \
             tests/test_train_metrics.py \
             tests/test_design.py \
-            tests/test_attribution.py -v
+            tests/test_attribution.py \
+            tests/test_normalization_anchor.py -v

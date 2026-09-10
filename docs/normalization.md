@@ -1,5 +1,35 @@
 # Normalize track signal
 
+## Anchor scaling
+
+Anchor scaling puts every track into literal biological units: `1.0` is the
+track's housekeeping-promoter reference. It subtracts the median of a supplied
+GC-matched, regulatory-sequence-depleted background set and divides by the
+median common-essential-promoter anchor signal. Values above 1 remain
+unclipped. Region inputs may be BED files (read with PyRanges) or parquet files
+with `chrom`, `start`, and `end` columns.
+
+```yaml
+scaling:
+  method: anchor
+  anchor_regions: resources/common_essential_windows.bed
+  background_regions: resources/null-windows.parquet
+  heldout_regions: resources/common_essential_windows_heldout.bed
+  window_stat_bp: 1000
+  background_sample: 5000
+
+train:
+  common:
+    data.apply_squash: false
+```
+
+The command emits `background`, `scale_factor`, anchor/background quantiles,
+held-out recovery, and a diagnostic `quality` band. Degenerate tracks are a
+hard error; use `--allow-degenerate` only for exploratory runs. The source
+project's provenance notebooks should be used to construct the two region
+sets. The enriched metadata must include the `background` field so training
+applies subtraction and scaling together.
+
 Normalization is optional. Use it when BigWigs contain normalized values such
 as RPKM and training should operate on approximate raw counts.
 

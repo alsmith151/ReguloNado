@@ -68,6 +68,11 @@ Settings dicts are rendered to CLI flags (`_override_flags` in
 [rules/train.smk](python/regulonado/workflow/rules/train.smk)); checkpoints are resolved with
 [scripts/resolve_checkpoint.py](python/regulonado/workflow/scripts/resolve_checkpoint.py).
 
+## Normalisation
+
+`scaling.method: anchor` uses PyRanges BED/parquet biological reference windows; set
+`data.apply_squash: false` when training anchor-scaled targets.
+
 ## Attribution module
 
 `regulonado attribute` ([design/attribution.py](python/regulonado/design/attribution.py)) is the
