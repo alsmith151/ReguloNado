@@ -2241,6 +2241,328 @@ def design(
     typer.echo(f"Wrote {len(records)} design(s) to {out_dir}")
 
 
+@app.command()
+def attribute(
+    candidates: Annotated[
+        Path, typer.Option("--candidates", help="BED of candidate regions to scan.")
+    ],
+    checkpoint: Annotated[
+        list[Path],
+        typer.Option("--checkpoint", help="Fold checkpoint dir; repeat once per fold."),
+    ],
+    fasta_file: Annotated[
+        Path, typer.Option("--fasta", help="Genome FASTA (needs a .fai index).")
+    ],
+    track: Annotated[
+        str, typer.Option("--track", help="Track to attribute against: name or index.")
+    ],
+    out_dir: Annotated[Path, typer.Option("--out", help="Directory to write attribution outputs.")],
+    intervals: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--intervals",
+            help="Build-time interval BED the folds were trained on; default: the 'bed_file' "
+            "recorded in --dataset-dir's regulonado_metadata.json.",
+        ),
+    ] = None,
+    dataset_dir: Annotated[
+        Optional[Path],
+        typer.Option("--dataset-dir", help="Dataset dir with regulonado_metadata.json."),
+    ] = None,
+    bin_reduction: Annotated[
+        str, typer.Option("--bin-reduction", help="Bin statistic: 'mean', 'topk' or 'max'.")
+    ] = "mean",
+    topk_bins: Annotated[
+        int, typer.Option("--topk-bins", help="Number of bins in the top-K statistic.")
+    ] = 10,
+    fold_reduction: Annotated[
+        str, typer.Option("--fold-reduction", help="Across folds: 'mean' or 'median'.")
+    ] = "mean",
+    pad: Annotated[
+        int,
+        typer.Option("--pad", help="Widen each candidate's scanned span by N bp on both sides."),
+    ] = 0,
+    stride: Annotated[
+        int, typer.Option("--stride", help="Only scan every Nth position.")
+    ] = 1,
+    positions: Annotated[
+        Optional[Path],
+        typer.Option("--positions", help="BED restricting the sweep to these positions."),
+    ] = None,
+    on_missing: Annotated[
+        str,
+        typer.Option("--on-missing", help="'error', 'center' or 'skip' for unmatched candidates."),
+    ] = "error",
+    smooth_bp: Annotated[
+        int, typer.Option("--smooth-bp", help="Width of the centred rolling mean, bp.")
+    ] = 25,
+    quantile: Annotated[
+        float, typer.Option("--quantile", help="Threshold quantile of the smoothed profile.")
+    ] = 0.90,
+    min_width_bp: Annotated[
+        int, typer.Option("--min-width-bp", help="Discard called segments narrower than this.")
+    ] = 50,
+    merge_gap_bp: Annotated[
+        int, typer.Option("--merge-gap-bp", help="Bridge dips up to this wide, bp.")
+    ] = 20,
+    min_zscore: Annotated[
+        float,
+        typer.Option(
+            "--min-zscore",
+            help="SDs above the candidate's own mean a core must reach; guards flat profiles.",
+        ),
+    ] = 1.5,
+    max_cores: Annotated[
+        int, typer.Option("--max-cores-per-candidate", help="Cores emitted per candidate.")
+    ] = 1,
+    anchor: Annotated[
+        str, typer.Option("--anchor", help="Re-centring anchor: 'centroid' or 'peak'.")
+    ] = "centroid",
+    fix_width: Annotated[
+        Optional[int],
+        typer.Option("--fix-width", help="Re-centre each core to exactly N bp for synthesis."),
+    ] = None,
+    bigwig: Annotated[
+        bool, typer.Option("--bigwig/--no-bigwig", help="Write a per-base attribution BigWig.")
+    ] = True,
+    rtol: Annotated[
+        float, typer.Option("--rtol", help="Relative tolerance for BigWig run-length collapsing.")
+    ] = 0.01,
+    fold_mode: Annotated[
+        str, typer.Option("--fold-mode", help="'resident' or 'sequential' fold residency.")
+    ] = "resident",
+    batch_size: Annotated[
+        int, typer.Option("--batch-size", help="Forward-pass batch size.")
+    ] = 8,
+    device: Annotated[
+        Optional[str], typer.Option("--device", help="Torch device (default: cuda if available).")
+    ] = None,
+) -> None:
+    """Locate the high-attribution core of each candidate by in-silico mutagenesis.
+
+    Scores every alternative base at every position against one output track, then calls the
+    contiguous sub-span that drives it — in practice the nucleosome-free core. The resulting
+    core_regions.bed is designed to be fed straight back in as `regulonado design --candidates`,
+    so that design and synthesis target only the span that matters.
+    """
+    import json
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"
+    )
+
+    if bin_reduction not in ("mean", "topk", "max"):
+        raise typer.BadParameter("Expected 'mean', 'topk' or 'max'", param_hint="--bin-reduction")
+    if fold_reduction not in ("mean", "median"):
+        raise typer.BadParameter("Expected 'mean' or 'median'", param_hint="--fold-reduction")
+    if on_missing not in ("error", "center", "skip"):
+        raise typer.BadParameter("Expected 'error', 'center' or 'skip'", param_hint="--on-missing")
+    if fold_mode not in ("resident", "sequential"):
+        raise typer.BadParameter("Expected 'resident' or 'sequential'", param_hint="--fold-mode")
+    if anchor not in ("centroid", "peak"):
+        raise typer.BadParameter("Expected 'centroid' or 'peak'", param_hint="--anchor")
+    if not 0.0 < quantile < 1.0:
+        raise typer.BadParameter("Must be in (0, 1)", param_hint="--quantile")
+    if stride < 1:
+        raise typer.BadParameter("Must be >= 1", param_hint="--stride")
+    if max_cores < 1:
+        raise typer.BadParameter("Must be >= 1", param_hint="--max-cores-per-candidate")
+    if fix_width is not None and fix_width < 1:
+        raise typer.BadParameter("Must be >= 1", param_hint="--fix-width")
+    if not checkpoint:
+        raise typer.BadParameter("Provide at least one --checkpoint", param_hint="--checkpoint")
+    if smooth_bp > 1 and stride > smooth_bp:
+        logger.warning(
+            f"--stride {stride} exceeds --smooth-bp {smooth_bp}; smoothing windows will often "
+            f"contain a single scanned position. Raise --smooth-bp or lower --stride."
+        )
+
+    import pyfaidx
+    from regulonado.design.attribution import (
+        AttributionRecord,
+        TrackReadout,
+        _smooth,
+        call_cores,
+        ism_scan,
+        write_attributions,
+    )
+    from regulonado.design.predictor import FoldEnsemble, FoldSpec
+    from regulonado.design.sequence import DatasetWindowIndex, resolve_seeds
+    from regulonado.inference import _parse_bed, _resolve_tracks, one_hot_context
+
+    if intervals is None:
+        if dataset_dir is None:
+            raise typer.BadParameter(
+                "Provide --intervals, or --dataset-dir with a regulonado_metadata.json "
+                "recording 'bed_file'",
+                param_hint="--intervals",
+            )
+        metadata = json.loads((dataset_dir / "regulonado_metadata.json").read_text())
+        bed_file = metadata.get("bed_file")
+        if not bed_file:
+            raise typer.BadParameter(
+                f"No 'bed_file' recorded in {dataset_dir / 'regulonado_metadata.json'}",
+                param_hint="--intervals",
+            )
+        intervals = Path(bed_file)
+
+    typer.echo(f"Loading {len(checkpoint)} fold(s)...")
+    ensemble = FoldEnsemble(
+        [FoldSpec(checkpoint_dir=c, dataset_dir=dataset_dir) for c in checkpoint],
+        device=device,
+        batch_size=batch_size,
+        mode=fold_mode,
+    )
+
+    try:
+        track_index = _resolve_tracks([track], ensemble.track_names)[0]
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--track") from exc
+    typer.echo(
+        f"Attributing against track {ensemble.track_names[track_index]!r} "
+        f"(index {track_index})"
+    )
+
+    index = DatasetWindowIndex.from_bed(
+        intervals,
+        context_length=ensemble.context_length,
+        n_pred_bins=ensemble.n_pred_bins,
+        bin_size=ensemble.bin_size,
+    )
+    seeds = resolve_seeds(candidates, index, on_missing=on_missing, pad=pad)
+    typer.echo(f"Resolved {len(seeds)} candidate(s) against dataset windows")
+
+    scan_positions = None
+    if positions is not None:
+        scan_positions = []
+        for chrom, start, end in _parse_bed(positions):
+            scan_positions.append((chrom, start, end))
+
+    total_positions = sum(
+        len(range(seed.editable.start, seed.editable.stop, stride)) for seed in seeds
+    )
+    typer.echo(
+        f"Projected forward passes: ~{total_positions * 3 * len(checkpoint):,} "
+        f"({total_positions} position(s) x 3 alt bases x {len(checkpoint)} fold(s))"
+    )
+
+    fasta = pyfaidx.Fasta(str(fasta_file), as_raw=True, sequence_always_upper=False)
+    chrom_sizes = {name: len(fasta[name]) for name in fasta.keys()}
+
+    run_info = {
+        "status": "in_progress",
+        "candidates": str(candidates),
+        "intervals": str(intervals),
+        "checkpoints": [str(c) for c in checkpoint],
+        "track": ensemble.track_names[track_index],
+        "track_index": track_index,
+        "track_names": list(ensemble.track_names),
+        "bin_reduction": bin_reduction,
+        "topk_bins": topk_bins,
+        "fold_reduction": fold_reduction,
+        "pad": pad,
+        "stride": stride,
+        "smooth_bp": smooth_bp,
+        "quantile": quantile,
+        "min_width_bp": min_width_bp,
+        "merge_gap_bp": merge_gap_bp,
+        "min_zscore": min_zscore,
+        "max_cores_per_candidate": max_cores,
+        "anchor": anchor,
+        "fix_width": fix_width,
+        "n_candidates": len(seeds),
+    }
+
+    records: list[AttributionRecord] = []
+    for candidate_index, seed in enumerate(seeds, start=1):
+        logger.info(
+            f"[{candidate_index}/{len(seeds)}] {seed.name} "
+            f"({seed.chrom}:{seed.cand_start}-{seed.cand_end})"
+        )
+        chrom_length = chrom_sizes.get(seed.chrom)
+        if chrom_length is None:
+            raise typer.BadParameter(f"Chromosome {seed.chrom!r} not present in {fasta_file}")
+        context = one_hot_context(fasta, seed.window, ensemble.context_length, chrom_length)
+
+        seed_positions = None
+        if scan_positions is not None:
+            seed_positions = [
+                position - seed.window.ctx_start
+                for chrom, start, end in scan_positions
+                if chrom == seed.chrom
+                for position in range(start, end)
+            ]
+
+        result = ism_scan(
+            TrackReadout(
+                ensemble,
+                track_index=track_index,
+                bins=seed.bins,
+                reduction=bin_reduction,
+                topk_bins=topk_bins,
+                fold_reduction=fold_reduction,
+            ),
+            seed,
+            context,
+            positions=seed_positions,
+            stride=stride,
+            batch_size=batch_size,
+        )
+        cores, diagnostics = call_cores(
+            result.importance,
+            editable=seed.editable,
+            smooth_bp=smooth_bp,
+            quantile=quantile,
+            min_width_bp=min_width_bp,
+            merge_gap_bp=merge_gap_bp,
+            min_zscore=min_zscore,
+            max_cores=max_cores,
+            anchor=anchor,
+            fix_width=fix_width,
+            bounds=(
+                seed.window.pred_start - seed.window.ctx_start,
+                seed.window.pred_end - seed.window.ctx_start,
+            ),
+        )
+        if not cores:
+            logger.warning(f"  no core called for {seed.name}: {diagnostics.get('reason')}")
+        else:
+            best = cores[0]
+            logger.info(
+                f"  core {seed.chrom}:{seed.window.ctx_start + best.start}-"
+                f"{seed.window.ctx_start + best.end} ({best.width} bp, z={best.zscore:.2f})"
+            )
+        records.append(
+            AttributionRecord(
+                seed=seed,
+                ism=result,
+                smoothed=_smooth(result.importance, smooth_bp),
+                cores=cores,
+                diagnostics=diagnostics,
+            )
+        )
+        # Checkpoint after every candidate so a long run stays inspectable and resumable.
+        write_attributions(
+            out_dir,
+            records,
+            run_info=run_info,
+            chrom_sizes=chrom_sizes,
+            bigwig=bigwig,
+            rtol=rtol,
+        )
+
+    n_called = sum(1 for record in records if record.cores)
+    run_info["status"] = "complete"
+    run_info["n_cores_called"] = n_called
+    write_attributions(
+        out_dir, records, run_info=run_info, chrom_sizes=chrom_sizes, bigwig=bigwig, rtol=rtol
+    )
+    typer.echo(
+        f"Called cores for {n_called}/{len(records)} candidate(s); wrote {out_dir}/core_regions.bed"
+    )
+
+
 def main() -> None:
     app()
 
