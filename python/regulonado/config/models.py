@@ -19,6 +19,7 @@ NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 PHASE_PRESETS = ("head_only", "unfreeze_output", "deep_finetune", "peak_finetune")
 SCALING_METHODS = ("tmm", "original", "bamnado", "seqnado", "anchor")
 BAMNADO_METHODS = ("tmm", "csaw-background", "cpm", "median-of-ratios", "spike-in")
+QC_CHECKS = ("sparsity", "interval_signal", "replicate_concordance", "anchor")
 
 
 def _validate_name(value: str) -> str:
@@ -60,6 +61,13 @@ class InputsConfig(BaseModel):
     seqnado_projects: list[SeqNadoProjectRef] = Field(
         default_factory=list,
         description="SeqNado projects to draw tracks from, in order.",
+    )
+    exclude_tracks: list[str] = Field(
+        default_factory=list,
+        description=(
+            "track_name(s) to force-exclude at 'tracks assemble', honoured whether or "
+            "not QC is enabled."
+        ),
     )
 
     @model_validator(mode="after")
@@ -139,6 +147,22 @@ class ScalingConfig(BaseModel):
         if self.method != "anchor" and any(getattr(self, field) is not None for field in fields):
             raise ValueError("scaling anchor region options are only valid when method is 'anchor'")
         return self
+
+
+class QCConfig(BaseModel):
+    """Opt-in track QC, run before the Arrow build. Empty/absent ``checks`` means no QC."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    checks: list[Literal["sparsity", "interval_signal", "replicate_concordance", "anchor"]] = (
+        Field(default_factory=list)
+    )
+    rules: dict[str, dict[Literal["min", "max"], float]] = Field(default_factory=dict)
+    drop_degenerate: bool = False
+    sample_windows: int | None = Field(
+        default=None, description="Sample this many BED rows for interval-scan checks."
+    )
+    max_workers: int = Field(default=16, ge=1)
 
 
 class TrainPhase(BaseModel):
@@ -266,6 +290,7 @@ class RegulonadoConfig(BaseModel):
     build: BuildConfig = Field(default_factory=BuildConfig)
     recompress: RecompressConfig = Field(default_factory=RecompressConfig)
     scaling: ScalingConfig = Field(default_factory=ScalingConfig)
+    qc: QCConfig = Field(default_factory=QCConfig)
     train: TrainConfig
     design: DesignConfig | None = None
     attribution: AttributionConfig | None = None
@@ -312,6 +337,15 @@ class RegulonadoConfig(BaseModel):
             raise ValueError(
                 f"attribution.runs names train.runs entries that don't exist: "
                 f"{', '.join(unknown)}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _anchor_qc_requires_anchor_scaling(self) -> "RegulonadoConfig":
+        if "anchor" in self.qc.checks and self.scaling.method != "anchor":
+            raise ValueError(
+                "qc.checks includes 'anchor', which reuses the anchor scale-factor "
+                "diagnostics; requires scaling.method: anchor"
             )
         return self
 
