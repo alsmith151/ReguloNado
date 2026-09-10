@@ -7,7 +7,8 @@ from typing import Any
 @dataclass(slots=True)
 class ProvenanceConfig:
     enabled: bool = True
-    save_git_diff: bool = True
+    save_git_diff: bool = False
+    save_git_diff_max_bytes: int = 100_000
 
 
 @dataclass(slots=True)
