@@ -6,7 +6,7 @@ import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -15,6 +15,128 @@ from tqdm import tqdm
 BAMNADO = os.environ.get("BAMNADO", "bamnado")
 
 log = logging.getLogger(__name__)
+
+
+def read_regions(path: Path) -> list[tuple[str, int, int]]:
+    """Read ``chrom/start/end`` regions from parquet or a BED-like file."""
+    if path.suffix.lower() in {".parquet", ".pq"}:
+        frame = pd.read_parquet(path)
+        columns = {str(c).lower(): c for c in frame.columns}
+        try:
+            cols = [columns[name] for name in ("chrom", "start", "end")]
+        except KeyError as exc:
+            raise ValueError(
+                f"Region parquet must contain chrom/start/end columns: {path}"
+            ) from exc
+        return [
+            (str(chrom), int(start), int(end))
+            for chrom, start, end in frame[cols].itertuples(index=False, name=None)
+        ]
+    import pyranges as pr
+
+    frame = pr.read_bed(str(path)).df
+    return [
+        (str(chrom), int(start), int(end))
+        for chrom, start, end in frame[["Chromosome", "Start", "End"]].itertuples(
+            index=False, name=None
+        )
+    ]
+
+
+def track_window_stat(reader, windows, *, bin_size: int, window_stat_bp: int) -> np.ndarray:
+    """Summarise each window using the maximum rolling mean at model bin size."""
+    stats = []
+    width = max(1, round(window_stat_bp / bin_size))
+    for chrom, start, end in windows:
+        n_bins = max(1, int(np.ceil((end - start) / bin_size)))
+        values = np.asarray(
+            reader.values(chrom, start, end, bins=n_bins, summary="mean", exact=True, fillna=0),
+            dtype=np.float32,
+        )
+        np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+        if width >= len(values):
+            stats.append(float(values.mean()))
+        else:
+            means = np.convolve(values, np.ones(width, dtype=np.float32) / width, mode="valid")
+            stats.append(float(means.max()))
+    return np.asarray(stats, dtype=np.float32)
+
+
+def anchor_scale_factors(
+    track_paths: Sequence[Path],
+    anchor_regions: Path,
+    background_regions: Path,
+    *,
+    heldout_regions: Path | None = None,
+    bin_size: int,
+    window_stat_bp: int = 1000,
+    window_stat_bp_by_assay: Mapping[str, int] | None = None,
+    assays: Sequence[str | None] | None = None,
+    background_sample: int | None = 5000,
+    max_workers: int = 16,
+    clip_soft_anchors: float = 10.0,
+    clip_hard_anchors: float = 20.0,
+) -> pd.DataFrame:
+    """Calculate biological anchor normalisation factors directly from BigWigs."""
+    import pybigtools
+
+    anchors = read_regions(anchor_regions)
+    backgrounds = read_regions(background_regions)
+    heldout = read_regions(heldout_regions) if heldout_regions is not None else None
+    if background_sample is not None and len(backgrounds) > background_sample:
+        rng = np.random.default_rng(0)
+        backgrounds = [
+            backgrounds[i]
+            for i in rng.choice(len(backgrounds), background_sample, replace=False)
+        ]
+    assays = list(assays) if assays is not None else [None] * len(track_paths)
+
+    def calculate(index: int) -> dict:
+        path = Path(track_paths[index])
+        assay = assays[index] if index < len(assays) else None
+        stat_bp = (window_stat_bp_by_assay or {}).get(str(assay), window_stat_bp)
+        reader = pybigtools.open(str(path))
+        try:
+            anchor = track_window_stat(reader, anchors, bin_size=bin_size, window_stat_bp=stat_bp)
+            background = track_window_stat(
+                reader, backgrounds, bin_size=bin_size, window_stat_bp=stat_bp
+            )
+            heldout_stat = (
+                track_window_stat(reader, heldout, bin_size=bin_size, window_stat_bp=stat_bp)
+                if heldout is not None else np.array([], dtype=np.float32)
+            )
+        finally:
+            close = getattr(reader, "close", None)
+            if close:
+                close()
+        bg_q50 = float(np.quantile(background, 0.5))
+        bg_q99 = float(np.quantile(background, 0.99))
+        anchor_ref = float(np.median(anchor))
+        recovery = float(np.mean(heldout_stat > bg_q99)) if heldout_stat.size else float("nan")
+        quality = "failed" if anchor_ref <= bg_q50 else (
+            "informative" if not heldout_stat.size or recovery >= 0.70 else
+            "weak" if recovery >= 0.30 else "failed"
+        )
+        sf = 1.0 / (anchor_ref - bg_q50) if anchor_ref > bg_q50 else 1.0
+        return {
+            "track_index": index,
+            "scale_factor": sf,
+            "background": bg_q50,
+            "clip_soft": clip_soft_anchors,
+            "clip_hard": clip_hard_anchors,
+            "anchor_reference": anchor_ref,
+            "background_q50": bg_q50,
+            "background_q99": bg_q99,
+            "heldout_reference": float(np.median(heldout_stat)) if heldout_stat.size else np.nan,
+            "heldout_recovery": recovery,
+            "window_stat_bp": stat_bp,
+            "quality": quality,
+            "path": str(path),
+        }
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        rows = list(executor.map(calculate, range(len(track_paths))))
+    return pd.DataFrame(rows)
 
 
 def _check_bamnado() -> None:
