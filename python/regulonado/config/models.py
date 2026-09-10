@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 PHASE_PRESETS = ("head_only", "unfreeze_output", "deep_finetune", "peak_finetune")
-SCALING_METHODS = ("tmm", "original", "bamnado", "seqnado")
+SCALING_METHODS = ("tmm", "original", "bamnado", "seqnado", "anchor")
 BAMNADO_METHODS = ("tmm", "csaw-background", "cpm", "median-of-ratios", "spike-in")
 
 
@@ -108,7 +108,13 @@ class RecompressConfig(BaseModel):
 class ScalingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    method: Literal["tmm", "original", "bamnado", "seqnado"] = "tmm"
+    method: Literal["tmm", "original", "bamnado", "seqnado", "anchor"] = "tmm"
+    anchor_regions: str | None = None
+    background_regions: str | None = None
+    heldout_regions: str | None = None
+    window_stat_bp: int = Field(default=1000, ge=1)
+    window_stat_bp_by_assay: dict[str, int] | None = None
+    background_sample: int | None = Field(default=5000, ge=1)
     bamnado_method: Literal[
         "tmm", "csaw-background", "cpm", "median-of-ratios", "spike-in"
     ] | None = None
@@ -121,6 +127,18 @@ class ScalingConfig(BaseModel):
         default=None,
         description="Which resources/<method>/normalisation_factors.tsv to read.",
     )
+
+    @model_validator(mode="after")
+    def _anchor_regions_match_method(self) -> "ScalingConfig":
+        fields = ("anchor_regions", "background_regions", "heldout_regions")
+        if self.method == "anchor" and (not self.anchor_regions or not self.background_regions):
+            raise ValueError(
+                "scaling.anchor_regions and scaling.background_regions are required "
+                "for method 'anchor'"
+            )
+        if self.method != "anchor" and any(getattr(self, field) is not None for field in fields):
+            raise ValueError("scaling anchor region options are only valid when method is 'anchor'")
+        return self
 
 
 class TrainPhase(BaseModel):
@@ -266,6 +284,21 @@ class RegulonadoConfig(BaseModel):
                 raise ValueError(
                     f"design.{label} names train.runs entries that don't exist: "
                     f"{', '.join(unknown)}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _anchor_disables_squash(self) -> "RegulonadoConfig":
+        if self.scaling.method == "anchor":
+            common_squash = self.train.common.get("data.apply_squash", True)
+            phase_squash = [
+                phase.settings.get("data.apply_squash", common_squash)
+                for phase in self.train.phases
+            ]
+            if common_squash or any(phase_squash):
+                raise ValueError(
+                    "scaling.method='anchor' requires data.apply_squash=false in "
+                    "train.common or every phase settings"
                 )
         return self
 

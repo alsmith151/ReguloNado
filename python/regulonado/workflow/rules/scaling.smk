@@ -28,6 +28,19 @@ rule scale_factors:
             seqnado_scaling_project() if config["scaling"]["method"] == "seqnado" else ""
         ),
         seqnado_spikein_method=config["scaling"].get("seqnado_spikein_method", ""),
+        anchor_regions=config["scaling"].get("anchor_regions", ""),
+        background_regions=config["scaling"].get("background_regions", ""),
+        heldout_regions=config["scaling"].get("heldout_regions", ""),
+        heldout_arg=(
+            "--heldout-regions " + config["scaling"]["heldout_regions"]
+            if config["scaling"].get("heldout_regions") else ""
+        ),
+        window_stat_bp=config["scaling"].get("window_stat_bp", 1000),
+        background_sample=config["scaling"].get("background_sample", 5000),
+        background_sample_arg=(
+            "--background-sample " + str(config["scaling"]["background_sample"])
+            if config["scaling"].get("background_sample") is not None else ""
+        ),
     output:
         parquet=str(SCALING_DIR / "scale_factors.parquet"),
     log:
@@ -69,6 +82,14 @@ rule scale_factors:
                     --scale-factors {params.initial:q} \
                     --output {output.parquet:q}
             fi
+        elif [ "{params.method}" = "anchor" ]; then
+            regulonado normalization anchor {input.metadata:q} \
+                --anchor-regions {params.anchor_regions:q} \
+                --background-regions {params.background_regions:q} \
+                {params.heldout_arg} \
+                --window-stat-bp {params.window_stat_bp} \
+                {params.background_sample_arg} \
+                --output {output.parquet:q}
         else
             regulonado normalization original {input.metadata:q} --output {output.parquet:q}
         fi > {log} 2>&1
@@ -90,5 +111,6 @@ rule enrich_metadata:
             {input.metadata:q} \
             {input.parquet:q} \
             --output {output.enriched:q} \
+            --field scale_factor --field clip_soft --field clip_hard --field background \
             > {log:q} 2>&1
         """

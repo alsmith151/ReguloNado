@@ -92,7 +92,15 @@ properties:
     additionalProperties: false
     required: [method]
     properties:
-      method: {enum: [tmm, original, bamnado, seqnado]}
+      method: {enum: [tmm, original, bamnado, seqnado, anchor]}
+      anchor_regions: {type: string, minLength: 1}
+      background_regions: {type: string, minLength: 1}
+      heldout_regions: {type: string, minLength: 1}
+      window_stat_bp: {type: integer, minimum: 1}
+      window_stat_bp_by_assay:
+        type: object
+        additionalProperties: {type: integer, minimum: 1}
+      background_sample: {type: [integer, 'null'], minimum: 1}
       bamnado_method:
         enum: [tmm, csaw-background, cpm, median-of-ratios, spike-in]
         description: >-

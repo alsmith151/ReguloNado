@@ -555,6 +555,69 @@ def calculate_original_scaling(
 
     save_scale_factors(df, out_path, fmt=fmt)  # type: ignore[arg-type]
     typer.echo(f"Saved scale factors to {out_path}")
+
+
+@normalization_app.command("anchor")
+def calculate_anchor_scaling(
+    metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json")],
+    anchor_regions: Annotated[
+        Path, typer.Option("--anchor-regions", help="High-anchor BED/parquet")
+    ],
+    background_regions: Annotated[
+        Path, typer.Option("--background-regions", help="Background BED/parquet")
+    ],
+    heldout_regions: Annotated[Optional[Path], typer.Option("--heldout-regions")] = None,
+    output: Annotated[Optional[Path], typer.Option("--output", "-o")] = None,
+    fmt: Annotated[str, typer.Option("--format", "-f")] = "parquet",
+    window_stat_bp: Annotated[int, typer.Option("--window-stat-bp")] = 1000,
+    background_sample: Annotated[Optional[int], typer.Option("--background-sample")] = 5000,
+    max_workers: Annotated[int, typer.Option("--workers", "-w")] = 16,
+    allow_degenerate: Annotated[bool, typer.Option("--allow-degenerate")] = False,
+) -> None:
+    """Scale tracks to housekeeping-promoter anchor units."""
+    import json
+
+    from regulonado.normalization import anchor_scale_factors, save_scale_factors
+
+    if not metadata.exists():
+        typer.echo(f"Metadata file not found: {metadata}", err=True)
+        raise typer.Exit(1)
+    with metadata.open() as handle:
+        meta = json.load(handle)
+    records = sorted(meta.get("final_track_records", []), key=lambda r: r["track_index"])
+    if not records:
+        typer.echo("No 'final_track_records' found in metadata.", err=True)
+        raise typer.Exit(1)
+    out_path = output or metadata.parent / f"scale_factors.{fmt}"
+    df = anchor_scale_factors(
+        [Path(record["resolved_path"]) for record in records],
+        anchor_regions,
+        background_regions,
+        heldout_regions=heldout_regions,
+        bin_size=int(meta.get("bin_size", 32)),
+        window_stat_bp=window_stat_bp,
+        background_sample=background_sample,
+        assays=[record.get("assay") for record in records],
+        max_workers=max_workers,
+    )
+    degenerate = df[df["quality"] == "failed"]
+    if len(degenerate) and not allow_degenerate:
+        names = [Path(records[int(i)]["resolved_path"]).stem for i in degenerate["track_index"]]
+        typer.echo("Degenerate anchor tracks (anchor <= background): " + ", ".join(names), err=True)
+        typer.echo(
+            "Remove them from the track sheet and rebuild, or pass --allow-degenerate.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if len(degenerate):
+        typer.echo(
+            "Warning: writing degenerate tracks with scale_factor=1 and background=0.",
+            err=True,
+        )
+        df.loc[df["quality"] == "failed", ["scale_factor", "background"]] = [1.0, 0.0]
+    save_scale_factors(df, out_path, fmt=fmt)  # type: ignore[arg-type]
+    typer.echo(f"Saved anchor scale factors to {out_path}")
+    typer.echo("Training requirement: data.apply_squash=false")
     typer.echo("Run 'regulonado enrich-metadata' to write these values into final_track_records.")
 
 
