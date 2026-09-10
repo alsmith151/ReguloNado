@@ -211,6 +211,28 @@ design:
 """
     )
 
+    # shard_candidates is a checkpoint (its shard count depends on its own input's real
+    # row count, which may not exist at DAG-construction time — see design.smk), so a
+    # plain --dry-run can't resolve design_shard/merge_designs until it has actually run.
+    # Executing it for real here is cheap: it only splits a BED file.
+    checkpoint_result = subprocess.run(
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            str(tmp_path / "results" / "design" / "shards"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    assert checkpoint_result.returncode == 0, checkpoint_result.stdout + checkpoint_result.stderr
+
     result = subprocess.run(
         [
             snakemake,
@@ -358,9 +380,16 @@ design:
     assert "--fix-width 300" in result.stdout
     assert "--quantile 0.92" in result.stdout
     assert "--bigwig" in result.stdout
-    # And design must run downstream of attribution, not in parallel with it.
-    assert "attribution/hl60/core_regions.bed" in result.stdout
-    assert re.search(r"design_shard\s+1", result.stdout)
+    # And design must run downstream of attribution, not in parallel with it: shard_candidates
+    # (a checkpoint, since its shard count depends on content merge_attributions produces)
+    # depends on attribution's merged output, and merge_designs in turn depends on the
+    # checkpoint — Snakemake can't resolve its exact shard-level inputs in a single dry-run
+    # before the checkpoint has actually executed, which is the correctness fix itself: the
+    # old code guessed a shard count from a file that might not exist yet, silently wrong.
+    assert re.search(r"checkpoint shard_candidates:\n\s+input: .*core_regions\.bed", result.stdout)
+    assert re.search(r"shard_candidates\s+1", result.stdout)
+    assert "will result in alteration of the DAG of jobs" in result.stdout
+    assert re.search(r"rule merge_designs:\n\s+input: <TBD>", result.stdout)
 
 
 def test_attribution_stage_is_absent_unless_configured(tmp_path):
@@ -429,3 +458,102 @@ train:
     assert "merge_attributions" not in result.stdout
     assert "regulonado attribute" not in result.stdout
     assert "core_regions.bed" not in result.stdout
+
+
+def test_design_shard_count_is_stable_across_runs_once_candidates_exist(tmp_path):
+    """Regression guard for the DAG-time read_text() bug this checkpoint replaces.
+
+    Before: `shard_candidates` read `design.candidates`'s line count as a plain
+    module-level computation — correct once the file existed, but with no
+    guarantee it stayed that way if re-evaluated before vs. after the file was
+    written (as happens when candidates chain from another rule's output; see
+    `test_attribution_stage_chains_into_design`). Now: `shard_candidates` is a
+    checkpoint, so the shard count only ever comes from the file's real
+    content, resolved fresh (and identically) every time it's asked for.
+    """
+    snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
+    if snakemake is None:
+        pytest.skip("Snakemake is an optional workflow dependency")
+
+    intervals = tmp_path / "intervals.bed"
+    fasta = tmp_path / "genome.fa"
+    candidates = tmp_path / "candidates.bed"
+    intervals.touch()
+    fasta.touch()
+    # 5 rows, shards: 2 below -> min(2, 5) = 2 real shard files.
+    candidates.write_text("\n".join(f"chr1\t{i * 100}\t{i * 100 + 50}" for i in range(5)) + "\n")
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"""
+results_dir: {tmp_path / "results"}
+inputs:
+  intervals: {intervals}
+  fasta: {fasta}
+  bigwig_dir: {tmp_path / "bigwigs"}
+build:
+  context_length: 100
+  bin_size: 10
+  n_pred_bins: 4
+  shift_max_bp: 0
+  extract_threads: 1
+  arrow_write_threads: 1
+  arrow_batch_size: 4
+  compression: lz4
+  stage_to_scratch: false
+  drop_missing: true
+  dedupe_tracks: content
+recompress:
+  enabled: false
+  zstd_level: 3
+  max_batch_size: 4
+  workers: 1
+scaling:
+  method: tmm
+train:
+  nproc_per_node: 1
+  phases:
+    - {{name: first, preset: head_only}}
+  runs:
+    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
+design:
+  candidates: {candidates}
+  shards: 2
+  targets:
+    - {{name: k562, target: K562, group_by: source, method: ism}}
+"""
+    )
+    env = {**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")}
+    shards_dir = tmp_path / "results" / "design" / "shards"
+
+    def dry_run():
+        return subprocess.run(
+            [snakemake, "--snakefile", str(WORKFLOW), "--configfile", str(config),
+             "--cores", "1", "--dry-run"],
+            check=False, capture_output=True, text=True, env=env,
+        )
+
+    # 1. Before the checkpoint has run, Snakemake correctly refuses to guess the shard
+    #    count — merge_designs' inputs are unresolved rather than a wrong number.
+    before = dry_run()
+    assert before.returncode == 0, before.stderr
+    assert re.search(r"rule merge_designs:\n\s+input: <TBD>", before.stdout)
+
+    # 2. Run the checkpoint for real.
+    build_checkpoint = subprocess.run(
+        [snakemake, "--snakefile", str(WORKFLOW), "--configfile", str(config),
+         "--cores", "1", str(shards_dir)],
+        check=False, capture_output=True, text=True, env=env,
+    )
+    assert build_checkpoint.returncode == 0, build_checkpoint.stdout + build_checkpoint.stderr
+    assert sorted(p.name for p in shards_dir.glob("*.bed")) == ["0.bed", "1.bed"]
+
+    # 3. Now resolvable, and resolves to the real count — not the requested-shards guess.
+    after = dry_run()
+    assert after.returncode == 0, after.stderr
+    assert re.search(r"design_shard\s+2", after.stdout)
+
+    # 4. Re-resolving (a second dry-run) gives the *same* count: no silent drift.
+    again = dry_run()
+    assert re.search(r"design_shard\s+2", again.stdout)
+    assert sorted(p.name for p in shards_dir.glob("*.bed")) == ["0.bed", "1.bed"]

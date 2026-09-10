@@ -76,6 +76,14 @@ design:
   common:
     fold_mode: sequential
     batch_size: 8
+    # Reward target-cell gain from the endogenous seed while penalising activation elsewhere.
+    objective: selective-activation
+    gain_transform: log2-fold-change
+    gain_pseudocount: 1.0
+    offtarget_boost_weight: 1.0
+    # log2(1.10): allow roughly 10% off-target growth before applying a penalty.
+    offtarget_boost_tolerance: 0.138
+    offtarget_temperature: 0.1
   targets:
     - name: target_ism
       target: <cell type>

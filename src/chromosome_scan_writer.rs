@@ -548,7 +548,7 @@ pub(crate) fn write_arrow_splits_chrom_pass(
         let mut chrom_signals: Vec<f32> = vec![0.0; n_tracks * n_chrom_bins];
         let chrom_str: &str = chrom.as_str();
 
-        let scan_usage: Vec<BinningUsage> = py.allow_threads(|| {
+        let scan_usage = py.allow_threads(|| {
             chrom_signals
                 .par_chunks_mut(n_chrom_bins)
                 .zip(handles.par_iter_mut())
@@ -580,8 +580,9 @@ pub(crate) fn write_arrow_splits_chrom_pass(
                         usage
                     },
                 )
-                .collect()
+                .collect::<Result<Vec<_>, _>>()
         });
+        let scan_usage = scan_usage.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         if profile {
             prof_chrom_scan_s.push(t_scan.elapsed().as_secs_f64());
             for usage in scan_usage {

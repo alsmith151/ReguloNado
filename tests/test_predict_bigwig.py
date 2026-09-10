@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 import torch.nn as nn
@@ -12,6 +13,7 @@ from regulonado.inference import (
     Window,
     _model_track_metadata,
     _resolve_tracks,
+    _safe_track_filename,
     _unique_track_names,
     collapse_bins,
     iter_windows,
@@ -100,6 +102,17 @@ def test_collapse_clamps_to_chromosome_length():
     values = np.array([1.0, 1.0, 1.0, 1.0])
     intervals = collapse_bins(values, "chr1", 0, BIN_SIZE, rtol=0.0, chrom_length=25)
     assert intervals == [("chr1", 0, 25, 1.0)]
+
+
+@pytest.mark.parametrize("name", ["../escape", "nested/track", r"nested\track", "track\x00bad"])
+def test_track_filename_rejects_path_components_and_controls(name):
+    with pytest.raises(ValueError, match="Track name"):
+        _safe_track_filename(name)
+
+
+def test_track_filename_rejects_length_overflow():
+    with pytest.raises(ValueError, match="too long"):
+        _safe_track_filename("x" * 201)
 
 
 # --------------------------------------------------------------------------- #
@@ -261,21 +274,23 @@ def test_load_model_for_inference_legacy_run_root_returns_regulonado_model(
 ):
     import regulonado.model as model_module
     from regulonado.inference import load_model_for_inference
+    from regulonado.tracks_table import write_track_table
 
     data_dir = tmp_path / "dataset"
     data_dir.mkdir()
-    (data_dir / "regulonado_metadata.json").write_text(
-        json.dumps(
+    write_track_table(
+        pd.DataFrame(
             {
-                "context_length": CONTEXT,
-                "n_pred_bins": N_PRED_BINS,
-                "bin_size": BIN_SIZE,
-                "final_track_records": [
-                    {"track_index": 0, "path": "/x/alpha.bw"},
-                    {"track_index": 1, "path": "/x/beta.bw"},
-                ],
+                "track_name": ["alpha", "beta"],
+                "status": ["included", "included"],
+                "track_index": [0, 1],
+                "path": ["/x/alpha.bw", "/x/beta.bw"],
             }
-        )
+        ),
+        data_dir / "tracks.parquet",
+        context_length=CONTEXT,
+        n_pred_bins=N_PRED_BINS,
+        bin_size=BIN_SIZE,
     )
     run_root = tmp_path / "run"
     checkpoint = run_root / "checkpoint-1"
@@ -405,6 +420,39 @@ def test_quick_predictor_allows_per_call_tracks_and_validates_coordinates(
         predictor.predict("chrX", 10, 10)
 
 
+def test_quick_predictor_batches_predict_many(tmp_path, monkeypatch):
+    pytest.importorskip("pyfaidx")
+    import regulonado.inference as predict_module
+
+    fa_path = tmp_path / "g.fa"
+    fa_path.write_text(">chr1\n" + "ACGT" * 100 + "\n")
+    model = DummyPredictModel()
+    calls: list[int] = []
+    original_forward = model.forward
+
+    def counting_forward(input_ids, **kwargs):
+        calls.append(input_ids.shape[0])
+        return original_forward(input_ids, **kwargs)
+
+    model.forward = counting_forward
+    monkeypatch.setattr(
+        predict_module,
+        "load_model_for_inference",
+        lambda checkpoint_dir, dataset_dir=None, device=None: model,
+    )
+    predictor = RegionPredictor.from_paths(tmp_path / "checkpoint", fa_path, device="cpu")
+
+    results = predictor.predict_many(
+        [("chr1", 190, 210), ("chr1", 200, 220), ("chr1", 210, 230)],
+        tracks=["beta"],
+        batch_size=2,
+    )
+
+    assert calls == [2, 1]
+    assert [result.query_start for result in results] == [190, 200, 210]
+    assert all(result.track_names == ["beta"] for result in results)
+
+
 def test_find_config_and_weights_hf_layout(tmp_path):
     """Run root has resolved_config.json; weights live in checkpoint-NNNN/ subdirs."""
     from regulonado.inference import _find_config, _find_weights
@@ -475,3 +523,25 @@ def test_write_and_read_bigwig_roundtrip(tmp_path):
     vals = np.asarray(bw.values("chr1", 0, 1000), dtype=np.float32)
     assert vals[0] == pytest.approx(0.0)
     assert vals[600] == pytest.approx(3.0)
+
+
+def test_write_spooled_bigwig_roundtrip(tmp_path):
+    pybigtools = pytest.importorskip("pybigtools")
+    from regulonado.inference import _write_spooled_bigwigs
+
+    spool = tmp_path / "spool" / "0"
+    spool.mkdir(parents=True)
+    (spool / "000000.tsv").write_text("0\t10\t1.0\n")
+    (spool / "000001.tsv").write_text("0\t10\t2.0\n")
+
+    written = _write_spooled_bigwigs(
+        tmp_path / "out",
+        ["track0"],
+        [0],
+        tmp_path / "spool",
+        {"chr1": 10, "chr2": 10},
+    )
+
+    bw = pybigtools.open(str(written[0]))
+    assert np.asarray(bw.values("chr1", 0, 10))[0] == pytest.approx(1.0)
+    assert np.asarray(bw.values("chr2", 0, 10))[0] == pytest.approx(2.0)

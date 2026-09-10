@@ -118,7 +118,7 @@ def load_model_weights_only(model: torch.nn.Module, checkpoint: str | Path) -> N
 
         state_dict = load_file(str(weight_path), device="cpu")
     else:
-        state_dict = torch.load(weight_path, map_location="cpu")
+        state_dict = torch.load(weight_path, map_location="cpu", weights_only=True)
     # HF Trainer saves the TrainerCompatibleModel wrapper, so keys are prefixed with "model.".
     # Strip that prefix if present so the state dict loads into a bare RegulonadoModel.
     first_keys = list(state_dict)[:5]
@@ -146,20 +146,39 @@ def load_dataset_metadata(
     data_path: Path,
     metadata_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Load dataset metadata, preferring an explicit enriched sidecar."""
-    if metadata_path is not None:
-        if not metadata_path.is_file():
-            raise FileNotFoundError(f"Dataset metadata JSON not found: {metadata_path}")
-        return json.loads(metadata_path.read_text())
+    """Load dataset metadata from ``tracks.parquet``, preferring an explicit path.
 
-    candidates = [data_path / "regulonado_metadata.json", data_path / "track_metadata.json"]
-    for candidate in candidates:
-        if candidate.exists():
-            return json.loads(candidate.read_text())
-    raise FileNotFoundError(
-        "No dataset metadata JSON found under "
-        f"{data_path}; expected one of {[path.name for path in candidates]}"
-    )
+    Returns a plain dict merging the table's run-level scalars (``df.attrs`` —
+    ``context_length``, ``bin_size``, ...) with ``final_track_records``, so
+    every existing caller of :func:`track_records` keeps working unchanged.
+    """
+    import pandas as pd
+
+    from regulonado.tracks_table import read_track_table, to_track_records, verify_fingerprint
+
+    table_path = metadata_path if metadata_path is not None else data_path / "tracks.parquet"
+    if not table_path.is_file():
+        raise FileNotFoundError(f"Track table not found: {table_path}")
+    table = read_track_table(table_path)
+
+    # Unlike track_qc/build, a fingerprint mismatch here only warns: the Arrow
+    # data is already committed, so there is nothing left to abort.
+    for _, row in table[table["status"] == "included"].iterrows():
+        expected = {k: row[k] for k in row.index if k.startswith("fp_") and pd.notna(row[k])}
+        if not expected:
+            continue
+        try:
+            problems = verify_fingerprint(row["resolved_path"], expected)
+        except OSError as exc:
+            logger.warning(f"Could not verify fingerprint for {row['track_name']!r}: {exc}")
+            continue
+        if problems:
+            logger.warning(
+                f"Track {row['track_name']!r} fingerprint drift since assembly: "
+                f"{'; '.join(problems)}"
+            )
+
+    return {**table.attrs, "final_track_records": to_track_records(table)}
 
 
 def _load_dataset_streaming(data_path: Path) -> dict[str, Any]:
@@ -172,15 +191,12 @@ def _load_dataset_streaming(data_path: Path) -> dict[str, Any]:
 
 
 def track_records(metadata: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Extract track metadata records from dataset metadata.
-
-    Looks for ``final_track_records`` first, then falls back to
-    ``track_records`` for backward compatibility.
+    """Extract track metadata records (``final_track_records``) from dataset metadata.
 
     Parameters
     ----------
     metadata : Mapping[str, Any]
-        Dataset metadata dictionary.
+        Dataset metadata dictionary, as returned by :func:`load_dataset_metadata`.
 
     Returns
     -------
@@ -192,7 +208,7 @@ def track_records(metadata: Mapping[str, Any]) -> list[dict[str, Any]]:
     ValueError
         If no track records are found or the field is not a non-empty list.
     """
-    records = metadata.get("final_track_records") or metadata.get("track_records")
+    records = metadata.get("final_track_records")
     if not isinstance(records, list) or not records:
         raise ValueError("Dataset metadata does not contain any track records")
     return [dict(record) for record in records]
@@ -982,6 +998,31 @@ def run_training(
         - init_weights_from_checkpoint: path if warm-started
         - history: dict with "train/loss" and "eval/loss" lists
     """
+    required_sections = ("data", "backbone", "head", "model", "loss", "trainer")
+    missing_sections = [section for section in required_sections if section not in cfg]
+    if missing_sections:
+        raise ValueError(
+            "Training configuration is missing required section(s): "
+            + ", ".join(missing_sections)
+        )
+    try:
+        trainer_cfg = OmegaConf.to_object(
+            OmegaConf.merge(OmegaConf.structured(TrainerConfig), cfg["trainer"])
+        )
+    except OmegaConfBaseException as exc:
+        raise ValueError(f"Invalid trainer configuration: {exc}") from exc
+    if not isinstance(trainer_cfg, TrainerConfig):
+        raise TypeError("Trainer configuration did not resolve to TrainerConfig")
+    trainer_cfg = dataclasses.replace(
+        trainer_cfg,
+        resume_from_checkpoint=_normalise_checkpoint_mode(trainer_cfg.resume_from_checkpoint),
+        init_weights_from_checkpoint=(trainer_cfg.init_weights_from_checkpoint or None),
+    )
+    if trainer_cfg.resume_from_checkpoint and trainer_cfg.init_weights_from_checkpoint:
+        raise ValueError(
+            "Set only one of trainer.resume_from_checkpoint or trainer.init_weights_from_checkpoint"
+        )
+
     seed = int(cfg.get("seed", 42))
     _seed_everything(seed)
 
@@ -1010,6 +1051,19 @@ def run_training(
     metadata = load_dataset_metadata(data_path, metadata_path)
     records = track_records(metadata)
     logger.info(f"[rank {rank}] metadata loaded | {len(records)} tracks")
+
+    if not streaming:
+        labels_feature = dataset_dict[next(iter(dataset_dict))].features.get("labels")
+        # Array2D (the real, Rust-built dataset) exposes .shape; other feature
+        # types (e.g. a plain Sequence, as in small hand-built test datasets)
+        # don't carry a fixed track count to check against.
+        arrow_n_tracks = getattr(labels_feature, "shape", (None,))[0]
+        if arrow_n_tracks is not None and arrow_n_tracks != len(records):
+            raise ValueError(
+                f"Arrow label width ({arrow_n_tracks}) != included track count "
+                f"({len(records)}); tracks.parquet and the Arrow dataset are out of sync — "
+                "rebuild the dataset."
+            )
 
     if streaming and "train" in dataset_dict:
         shuffle_buffer = _estimate_shuffle_buffer(cfg["data"], metadata)
@@ -1075,24 +1129,6 @@ def run_training(
         clip_hard=clip_hard,
         labels_already_scaled=labels_already_scaled,
     )
-
-    try:
-        trainer_cfg = OmegaConf.to_object(
-            OmegaConf.merge(OmegaConf.structured(TrainerConfig), cfg["trainer"])
-        )
-    except OmegaConfBaseException as exc:
-        raise ValueError(f"Invalid trainer configuration: {exc}") from exc
-    if not isinstance(trainer_cfg, TrainerConfig):
-        raise TypeError("Trainer configuration did not resolve to TrainerConfig")
-    trainer_cfg = dataclasses.replace(
-        trainer_cfg,
-        resume_from_checkpoint=_normalise_checkpoint_mode(trainer_cfg.resume_from_checkpoint),
-        init_weights_from_checkpoint=(trainer_cfg.init_weights_from_checkpoint or None),
-    )
-    if trainer_cfg.resume_from_checkpoint and trainer_cfg.init_weights_from_checkpoint:
-        raise ValueError(
-            "Set only one of trainer.resume_from_checkpoint or trainer.init_weights_from_checkpoint"
-        )
 
     # Persistent workers with HF IterableDataset accumulate Arrow file handles and
     # shuffle-buffer state between iterator cycles — workers never restart to clear them.

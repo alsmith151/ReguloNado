@@ -42,7 +42,7 @@ def _override_flags(wildcards):
 rule train_phase:
     input:
         dataset=str(training_dataset_dir() / "dataset_dict.json"),
-        metadata=str(ENRICHED_METADATA),
+        metadata=str(training_dataset_dir() / "tracks.parquet"),
         previous=previous_phase_state,
     params:
         preset=lambda w: PHASE_BY_NAME[w.phase]["preset"],

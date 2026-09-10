@@ -24,26 +24,32 @@ classifiers = [
 ]
 
 # Core: minimum to import the package and run the CLI without any ML deps.
+# pandas/pyarrow/tqdm/pandera live here (not in `data`) because
+# regulonado.tracks_table and regulonado.normalization need them at module
+# scope — normalization.py already imported pandas/tqdm unconditionally, so
+# this is a correction, not a loosening. pyarrow was previously undeclared at
+# runtime, arriving only transitively via `datasets` in the `test` extra.
 dependencies = [
     "loguru>=0.7",
     "numpy>=2",
+    "pandas>=2",
+    "pandera>=0.33",
+    "pyarrow",
+    "pyyaml",
     "pydantic>=2.0",
+    "tqdm>=4.65",
     "typer",
 ]
 
 [project.optional-dependencies]
 # ── data pipeline (BigWig / Arrow / FASTA) ────────────────────────────────────
 data = [
+    "bioframe",
     "datasets>=5.0.0",
-    "pandas>=2",
-    "polars",
     "psutil",
     "pybigtools",
-    "pyranges1>=1.0",
     "pysam>=0.23",
     "scipy",
-    "tangermeme>=1.3.0",
-    "tqdm>=4.65",
 ]
 
 # ── full training stack (includes data) ───────────────────────────────────────
@@ -97,7 +103,7 @@ dev = [
 # ── CI test suite (no torch/GPU needed) ───────────────────────────────────────
 test = [
     "regulonado[data]",
-    "pyarrow",
+    "pandera[strategies]",
     "pyfaidx",
     "pytest>=9.1.1",
 ]
@@ -110,11 +116,10 @@ workflow = [
 # SeqNado interoperability: read tracks, sample metadata and normalisation
 # factors straight out of a SeqNado project. Kept optional because SeqNado pins
 # pydantic exactly and pulls in a full NGS stack that model training never needs.
-# The project API (seqnado.open_project) is not in any published release yet;
-# until 1.1 ships, install it from the development branch:
-#   pip install "seqnado @ git+https://github.com/Milne-Group/SeqNado@develop"
+# The project API (seqnado.open_project) is currently provided by SeqNado's
+# main branch rather than a published release.
 seqnado = [
-    "seqnado>=1.1",
+    "seqnado @ git+https://github.com/Milne-Group/SeqNado.git@main",
 ]
 
 # ── convenience meta-extra ────────────────────────────────────────────────────
@@ -141,6 +146,12 @@ include = ["python/configs/**/*.yaml", "python/regulonado/workflow/**/*"]
 exclude = ["tests/bench_*", "notes.md", "scripts/**/*", ".github/**/*"]
 
 [tool.uv]
+# ReguloNado supports POSIX platforms only; SeqNado's optional metadata is not
+# compatible with the Windows resolution split.
+environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
+# SeqNado main still publishes an older Pandera upper bound; its API is
+# compatible with ReguloNado's supported Pandera range.
+override-dependencies = ["pandera>=0.33"]
 extra-build-dependencies = { flash-attn = ["torch", "psutil", "ninja"] }
 
 [[tool.uv.index]]

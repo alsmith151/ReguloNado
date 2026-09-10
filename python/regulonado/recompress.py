@@ -10,6 +10,7 @@ Use through the CLI:
 """
 
 import shutil
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -25,18 +26,16 @@ def recompress_shard(
     with open(src, "rb") as fh:
         reader = ipc.open_stream(fh)
         schema = reader.schema
-        batches = list(reader)
-
-    with open(dst, "wb") as fh:
-        with ipc.new_stream(fh, schema, options=opts) as writer:
-            for batch in batches:
-                if max_batch_size and batch.num_rows > max_batch_size:
-                    for start in range(0, batch.num_rows, max_batch_size):
-                        writer.write_batch(
-                            batch.slice(start, min(max_batch_size, batch.num_rows - start))
-                        )
-                else:
-                    writer.write_batch(batch)
+        with open(dst, "wb") as out_fh:
+            with ipc.new_stream(out_fh, schema, options=opts) as writer:
+                for batch in reader:
+                    if max_batch_size and batch.num_rows > max_batch_size:
+                        for start in range(0, batch.num_rows, max_batch_size):
+                            writer.write_batch(
+                                batch.slice(start, min(max_batch_size, batch.num_rows - start))
+                            )
+                    else:
+                        writer.write_batch(batch)
 
     return src.stat().st_size, dst.stat().st_size
 
@@ -95,25 +94,43 @@ def recompress_dataset(
     dst = dst.resolve()
     if not src.exists():
         raise FileNotFoundError(f"Source not found: {src}")
+    if src == dst or src in dst.parents or dst in src.parents:
+        raise ValueError("Source and destination must be distinct, non-nested directories")
     if dst.exists():
         if not overwrite:
             raise ValueError(f"Destination already exists — remove it first: {dst}")
-        logger.info(f"Removing existing destination: {dst}")
-        shutil.rmtree(dst)
 
-    dst.mkdir(parents=True)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    temporary_dst = Path(tempfile.mkdtemp(prefix=f".{dst.name}.", dir=dst.parent))
+    try:
+        # Copy top-level metadata files verbatim (dataset_dict.json, regulonado_metadata.json, etc.)
+        for f in src.iterdir():
+            if f.is_file():
+                shutil.copy2(f, temporary_dst / f.name)
+                logger.info(f"copied  {f.name}")
 
-    # Copy top-level metadata files verbatim (dataset_dict.json, regulonado_metadata.json, etc.)
-    for f in src.iterdir():
-        if f.is_file():
-            shutil.copy2(f, dst / f.name)
-            logger.info(f"copied  {f.name}")
+        splits = [d for d in src.iterdir() if d.is_dir()]
+        for split in sorted(splits):
+            logger.info(f"\n=== {split.name} ===")
+            recompress_split(split, temporary_dst / split.name, level, workers, max_batch_size)
 
-    # Recompress each split
-    splits = [d for d in src.iterdir() if d.is_dir()]
-    for split in sorted(splits):
-        logger.info(f"\n=== {split.name} ===")
-        recompress_split(split, dst / split.name, level, workers, max_batch_size)
+        backup_dst: Path | None = None
+        if dst.exists():
+            backup_dst = Path(tempfile.mkdtemp(prefix=f".{dst.name}.backup.", dir=dst.parent))
+            backup_dst.rmdir()
+            dst.rename(backup_dst)
+        try:
+            temporary_dst.rename(dst)
+        except Exception:
+            if backup_dst is not None and not dst.exists():
+                backup_dst.rename(dst)
+            raise
+        if backup_dst is not None:
+            shutil.rmtree(backup_dst)
+            backup_dst = None
+    finally:
+        if temporary_dst.exists():
+            shutil.rmtree(temporary_dst)
 
     logger.info(f"\nDone. Output: {dst}")
 

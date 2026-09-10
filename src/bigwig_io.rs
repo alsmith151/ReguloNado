@@ -45,7 +45,7 @@ pub(crate) fn extract_bigwig_labels_batch(
             for (row_idx, (chrom, start, end)) in intervals.iter().enumerate() {
                 let row_start = row_idx * n_bins;
                 let row = &mut values[row_start..row_start + n_bins];
-                bin_region_into(reader, chrom, *start, *end, row, &mut scratch);
+                bin_region_into(reader, chrom, *start, *end, row, &mut scratch)?;
 
                 if is_minus {
                     for &v in row.iter() {

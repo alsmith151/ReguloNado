@@ -8,7 +8,6 @@ a flat ``max``.
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,7 +49,7 @@ def resolve_track_groups(
 ) -> TrackGroups:
     """Resolve per-track group labels and build target/off-target masks.
 
-    Resolution order: an explicit ``track_sheet`` CSV, then ``final_track_records`` under
+    Resolution order: an explicit ``track_sheet`` CSV, then ``tracks.parquet`` under
     ``dataset_dir``, then the id vectors already stored on a model ``config``.
     """
     if track_sheet is not None:
@@ -105,17 +104,14 @@ def _labels_from_track_sheet(
 def _labels_from_dataset_metadata(
     track_names: list[str], dataset_dir: str | Path, group_by: str
 ) -> list[str | None]:
-    metadata_path = Path(dataset_dir) / "regulonado_metadata.json"
-    metadata = json.loads(metadata_path.read_text())
-    records = metadata.get("final_track_records") or []
+    from regulonado.tracks_table import read_track_table, to_track_records
+
+    table = read_track_table(Path(dataset_dir) / "tracks.parquet")
+    records = to_track_records(table)
     if not records:
-        raise ValueError(f"No 'final_track_records' in dataset metadata under {dataset_dir}")
-    by_name = {record.get("track_name"): record for record in records}
-    labels: list[str | None] = []
-    for index, name in enumerate(track_names):
-        record = by_name.get(name) or (records[index] if index < len(records) else None)
-        labels.append(record.get(group_by) if record else None)
-    return labels
+        raise ValueError(f"No included tracks in {dataset_dir}/tracks.parquet")
+    by_name = {record["track_name"]: record for record in records}
+    return [by_name[name].get(group_by) if name in by_name else None for name in track_names]
 
 
 def _labels_from_config_metadata(

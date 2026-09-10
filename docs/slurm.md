@@ -56,8 +56,8 @@ an Apptainer image; it carries the same scheduling settings plus
 
 ## Resources
 
-`default-resources` covers the light rules (`scale_factors`, `enrich_metadata`)
-at 240 minutes, 16 GB, and 1 CPU. The heavy rules are called out individually:
+`default-resources` covers the light rules (`track_discovery`, `track_qc`, `track_assemble`,
+`scale_factors`) at 240 minutes, 16 GB, and 1 CPU. The heavy rules are called out individually:
 
 | Rule | Runtime | Memory | CPUs | Notes |
 | --- | --- | --- | --- | --- |

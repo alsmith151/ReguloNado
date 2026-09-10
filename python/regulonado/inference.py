@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Sequence
@@ -603,9 +604,77 @@ class RegionPredictor:
         coordinates: Sequence[tuple[str, int, int]],
         *,
         tracks: Sequence[str] | None = None,
+        batch_size: int = 32,
     ) -> list[RegionPrediction]:
-        """Predict multiple coordinate intervals with the loaded model and FASTA."""
-        return [self.predict(chrom, start, end, tracks=tracks) for chrom, start, end in coordinates]
+        """Predict multiple coordinate intervals with batched model inference."""
+        import torch
+
+        if batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
+        selected = (
+            _resolve_tracks(tracks, self.track_names)
+            if tracks is not None
+            else self.selected_tracks
+        )
+        selected_names = [self.track_names[index] for index in selected]
+        predictions: list[RegionPrediction] = []
+        pred_bp = self.n_pred_bins * self.bin_size
+
+        for coordinate_batch in _chunks(list(coordinates), batch_size):
+            windows: list[Window] = []
+            sequences: list[np.ndarray] = []
+            for chrom, start, end in coordinate_batch:
+                if chrom not in self.chrom_sizes:
+                    raise ValueError(
+                        f"Chromosome {chrom!r} is not present in the configured FASTA/sizes"
+                    )
+                if start < 0 or end < start:
+                    raise ValueError("Coordinates must satisfy 0 <= start <= end")
+                center = (start + end) // 2
+                pred_start = center - pred_bp // 2
+                window = Window(
+                    chrom=chrom,
+                    pred_start=pred_start,
+                    pred_end=pred_start + pred_bp,
+                    ctx_start=center - self.context_length // 2,
+                    ctx_end=center - self.context_length // 2 + self.context_length,
+                )
+                windows.append(window)
+                sequences.append(
+                    one_hot_context(
+                        self.fasta, window, self.context_length, self.chrom_sizes[chrom]
+                    )
+                )
+
+            x = torch.from_numpy(np.stack(sequences)).to(
+                dtype=self.model_dtype, device=self.model_device
+            )
+            with torch.no_grad():
+                batch_values = self.model(x, **self.track_metadata).float().cpu().numpy()
+            for (chrom, start, end), window, seq, values in zip(
+                coordinate_batch, windows, sequences, batch_values, strict=True
+            ):
+                if self.config.inverse_squash:
+                    from regulonado.dataset.build import inverse_transform_signal
+
+                    values = inverse_transform_signal(values, apply_squash=True, apply_scale=False)
+                selected_values = values[selected]
+                predictions.append(
+                    RegionPrediction(
+                        chrom=chrom,
+                        query_start=start,
+                        query_end=end,
+                        input_start=window.ctx_start,
+                        input_end=window.ctx_end,
+                        pred_start=window.pred_start,
+                        pred_end=window.pred_start + selected_values.shape[-1] * self.bin_size,
+                        bin_size=self.bin_size,
+                        track_names=selected_names,
+                        values=selected_values,
+                        input=seq if self.config.include_input else None,
+                    )
+                )
+        return predictions
 
 
 def predict_to_bigwig(
@@ -680,6 +749,16 @@ def predict_to_bigwig(
     )
 
     accum: dict[int, list[tuple[str, int, int, float]]] = {t: [] for t in selected}
+    spool_root: Path | None = None
+    spool_handles: dict[int, object] = {}
+    chrom_rank = {name: index for index, name in enumerate(chrom_sizes)}
+    if whole_genome:
+        spool_root = Path(tempfile.mkdtemp(prefix="regulonado-predict-"))
+
+    def close_spool_handles() -> None:
+        for handle in spool_handles.values():
+            handle.close()
+        spool_handles.clear()
 
     # Bound to a local rather than left as a bare conditional import: the call site below
     # sits under a separate `if inverse_squash` guard, so the name being defined depended
@@ -705,26 +784,91 @@ def predict_to_bigwig(
             preds = inverse_signal(preds, apply_squash=True, apply_scale=False)
         for batch_index, window in enumerate(batch):
             if window.chrom != current_chrom:
+                if spool_root is not None:
+                    close_spool_handles()
                 current_chrom = window.chrom
                 bar.set_postfix(chrom=current_chrom)
             chrom_length = chrom_sizes[window.chrom]
             for track in selected:
-                accum[track].extend(
-                    collapse_bins(
-                        preds[batch_index, track],
-                        window.chrom,
-                        window.pred_start,
-                        bin_size,
-                        rtol,
-                        chrom_length,
-                    )
+                intervals = collapse_bins(
+                    preds[batch_index, track],
+                    window.chrom,
+                    window.pred_start,
+                    bin_size,
+                    rtol,
+                    chrom_length,
                 )
+                if spool_root is None:
+                    accum[track].extend(intervals)
+                    continue
+                if track not in spool_handles:
+                    track_dir = spool_root / str(track)
+                    track_dir.mkdir(parents=True, exist_ok=True)
+                    spool_handles[track] = (track_dir / f"{chrom_rank[window.chrom]:06d}.tsv").open(
+                        "a", encoding="utf-8"
+                    )
+                handle = spool_handles[track]
+                for _, start, end, value in intervals:
+                    handle.write(f"{start}\t{end}\t{value!r}\n")
         bar.update(len(batch))
     bar.close()
+    if spool_root is not None:
+        close_spool_handles()
 
     log.info("Writing %d BigWig(s) to %s", len(selected), out_dir)
-    written = _write_bigwigs(out_dir, track_names, selected, accum, chrom_sizes)
+    if spool_root is None:
+        written = _write_bigwigs(out_dir, track_names, selected, accum, chrom_sizes)
+    else:
+        written = _write_spooled_bigwigs(
+            out_dir, track_names, selected, spool_root, chrom_sizes
+        )
+        import shutil
+
+        shutil.rmtree(spool_root)
     log.info("Done — wrote %s", ", ".join(str(p.name) for p in written))
+    return written
+
+
+def _write_spooled_bigwigs(
+    out_dir: str | Path,
+    track_names: Sequence[str],
+    selected: Sequence[int],
+    spool_root: Path,
+    chrom_sizes: dict[str, int],
+) -> list[Path]:
+    import pybigtools
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    output_names: set[str] = set()
+    chrom_names = list(chrom_sizes)
+    for track in selected:
+        track_name = _safe_track_filename(track_names[track])
+        if track_name in output_names:
+            raise ValueError(f"Track names produce duplicate output filename: {track_name!r}")
+        output_names.add(track_name)
+        track_dir = spool_root / str(track)
+
+        def intervals() -> Iterator[tuple[str, int, int, float]]:
+            for chrom_index, chrom in enumerate(chrom_names):
+                path = track_dir / f"{chrom_index:06d}.tsv"
+                if not path.exists():
+                    continue
+                with path.open(encoding="utf-8") as handle:
+                    for line in handle:
+                        start, end, value = line.rstrip("\n").split("\t")
+                        yield chrom, int(start), int(end), float(value)
+
+        path = out_dir / f"{track_name}.bw"
+        writer = pybigtools.open(str(path), "w")
+        try:
+            writer.write(chrom_sizes, intervals())
+        finally:
+            close = getattr(writer, "close", None)
+            if close is not None:
+                close()
+        written.append(path)
     return written
 
 
@@ -741,13 +885,29 @@ def _write_bigwigs(
     out_dir.mkdir(parents=True, exist_ok=True)
     chrom_rank = {name: i for i, name in enumerate(chrom_sizes)}
     written: list[Path] = []
+    output_names: set[str] = set()
     for track in selected:
         intervals = sorted(accum[track], key=lambda r: (chrom_rank[r[0]], r[1]))
-        path = out_dir / f"{track_names[track]}.bw"
+        track_name = _safe_track_filename(track_names[track])
+        if track_name in output_names:
+            raise ValueError(f"Track names produce duplicate output filename: {track_name!r}")
+        output_names.add(track_name)
+        path = out_dir / f"{track_name}.bw"
         writer = pybigtools.open(str(path), "w")
         writer.write(chrom_sizes, iter(intervals))
         written.append(path)
     return written
+
+
+def _safe_track_filename(name: str) -> str:
+    """Validate a track name before using it as a filesystem component."""
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise ValueError(f"Track name is not a safe filename: {name!r}")
+    if any(character in name for character in "\x00\r\n"):
+        raise ValueError(f"Track name contains a control character: {name!r}")
+    if len(name.encode("utf-8")) > 200:
+        raise ValueError("Track name is too long to use as a filename")
+    return name
 
 
 __all__ = [

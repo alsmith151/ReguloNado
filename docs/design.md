@@ -41,7 +41,7 @@ temperature-scaled soft-max: a hard `max` gives a flat, whack-a-mole
 landscape where the search fixes whichever group is currently worst and
 immediately swaps to another. Cell-type groups come from `--group-by`
 (default `source`), resolved from an explicit `--track-sheet`, then
-`--dataset-dir`'s `regulonado_metadata.json`, then the id vectors already
+`--dataset-dir`'s `tracks.parquet`, then the id vectors already
 baked into a checkpoint's config.
 
 ### Seed-relative selective activation

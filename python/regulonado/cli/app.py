@@ -9,10 +9,12 @@ from shlex import join as shell_join
 from typing import Annotated, Optional
 
 import numpy as np
+import pandas as pd
 import torch
 import typer
 from loguru import logger
 from regulonado.cli.pipeline import pipeline as _pipeline
+from regulonado.cli.tracks import tracks_app
 
 app = typer.Typer(no_args_is_help=True)
 normalization_app = typer.Typer(
@@ -48,32 +50,6 @@ def _main_callback(
     ),
 ) -> None:
     """Build datasets, train models, run inference, and manage workflows."""
-
-
-def _parse_seqnado_projects(values: Optional[list[str]]) -> dict[str, str]:
-    """Parse repeated ``PATH`` / ``NAME=PATH`` project options.
-
-    Without an explicit name a project is labelled by the directory containing
-    its output dir, which for a SeqNado layout is the project folder itself
-    (``2026-08-10_myproj/seqnado_output`` -> ``2026-08-10_myproj``).
-    """
-    projects: dict[str, str] = {}
-    for value in values or []:
-        name, sep, path = value.partition("=")
-        if not sep:
-            path = name
-            name = Path(path).expanduser().resolve().parent.name
-        if not path:
-            raise typer.BadParameter(
-                f"Expected PATH or NAME=PATH, got {value!r}", param_hint="--seqnado-project"
-            )
-        if name in projects:
-            raise typer.BadParameter(
-                f"Duplicate project name {name!r}; give each one an explicit NAME=PATH",
-                param_hint="--seqnado-project",
-            )
-        projects[name] = path
-    return projects
 
 
 @app.command()
@@ -292,7 +268,7 @@ def train(
     ] = "head_only",
     metadata: Annotated[
         Optional[Path],
-        typer.Option("--metadata", help="Metadata JSON to use instead of the dataset copy"),
+        typer.Option("--metadata", help="tracks.parquet to use instead of the dataset copy"),
     ] = None,
     nproc_per_node: Annotated[
         int,
@@ -472,61 +448,65 @@ def scale(
     typer.echo(f"Saved scale factors to {output}")
 
 
+def _included_tracks(track_table: Path) -> pd.DataFrame:
+    """Included rows of a ``tracks.parquet``-shaped table, ordered by ``track_index``."""
+    from regulonado.tracks_table import read_track_table
+
+    if not track_table.exists():
+        typer.echo(f"Track table not found: {track_table}", err=True)
+        raise typer.Exit(1)
+    table = read_track_table(track_table)
+    included = table[table["status"] == "included"].sort_values("track_index").reset_index(
+        drop=True
+    )
+    if included.empty:
+        typer.echo(f"No included tracks in {track_table}.", err=True)
+        raise typer.Exit(1)
+    return included
+
+
 @normalization_app.command("original")
 def calculate_original_scaling(
-    metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json")],
+    track_table: Annotated[
+        Path, typer.Argument(help="tracks/_stages/discovered.parquet (or any tracks.parquet)")
+    ],
     output: Annotated[
         Optional[Path],
         typer.Option(
             "--output",
             "-o",
-            help="Output file path (default: <metadata_dir>/scale_factors.parquet)",
+            help="Output file path (default: <track_table_dir>/scale_factors.parquet)",
         ),
     ] = None,
     fmt: Annotated[
         str,
         typer.Option("--format", "-f", help="Output format: csv or parquet"),
     ] = "parquet",
+    bin_size: Annotated[
+        int, typer.Option("--bin-size", help="build.bin_size; scales RPKM to raw counts")
+    ] = 32,
     max_workers: Annotated[int, typer.Option("--workers", "-w", help="Thread pool size")] = 16,
 ) -> None:
-    """Infer original scale factors for the final_bigwig_paths recorded in a dataset metadata file.
+    """Infer original scale factors for every included track in a track table.
 
     Output rows are sorted by track_index so they can be applied directly by position.
     """
-    import json
-
-    import pandas as pd
     from regulonado.normalization import (
         compute_clip_thresholds,
         infer_scale_factors,
         save_scale_factors,
     )
 
-    if not metadata.exists():
-        typer.echo(f"Metadata file not found: {metadata}", err=True)
-        raise typer.Exit(1)
-
-    with metadata.open() as fh:
-        meta = json.load(fh)
-
-    track_records = meta.get("final_track_records", [])
-    if not track_records:
-        typer.echo("No 'final_track_records' found in metadata.", err=True)
-        raise typer.Exit(1)
-
-    bin_size: int = int(meta.get("bin_size", 32))
-
-    # Sort records by track_index to define the canonical order.
-    track_records = sorted(track_records, key=lambda r: r["track_index"])
-    bw_paths = [Path(r["resolved_path"]) for r in track_records]
+    included = _included_tracks(track_table)
+    bw_paths = [Path(p) for p in included["resolved_path"]]
 
     ext = "parquet" if fmt == "parquet" else "csv"
-    out_path = output if output is not None else metadata.parent / f"scale_factors.{ext}"
+    out_path = output if output is not None else track_table.parent / f"scale_factors.{ext}"
 
-    typer.echo(f"Metadata : {metadata}")
-    typer.echo(f"Tracks   : {len(bw_paths)}")
-    typer.echo(f"Bin size : {bin_size} bp")
-    typer.echo(f"Output   : {out_path}")
+    typer.echo(f"Track table : {track_table}")
+    typer.echo(f"Tracks      : {len(bw_paths)}")
+    typer.echo(f"Bin size    : {bin_size} bp")
+    typer.echo(f"Output      : {out_path}")
 
     df = infer_scale_factors(bw_paths, max_workers=max_workers)
 
@@ -535,21 +515,18 @@ def calculate_original_scaling(
     # so raw_count = RPKM × (lib/1e6) × (bin_size/1e3) = RPKM × sf_bamnado × bin_size.
     df["scale_factor"] = df["scale_factor"] * bin_size
 
-    # Join track_index and resolved_path from the records, then sort so row i
-    # corresponds to track i — enabling direct positional application.
-    records_df = pd.DataFrame(
-        [
-            {"track_index": r["track_index"], "resolved_path": r["resolved_path"]}
-            for r in track_records
-        ]
+    # Join track_index/track_name from the table, then sort so row i corresponds
+    # to track i — enabling direct positional application.
+    join_cols = included[["track_index", "track_name", "resolved_path"]]
+    df = df.merge(
+        join_cols, left_on="path", right_on="resolved_path", how="left", validate="one_to_one"
     )
-    df = df.merge(records_df, left_on="path", right_on="resolved_path", how="left")
     df = df.drop(columns=["resolved_path"]).sort_values("track_index").reset_index(drop=True)
 
     df = compute_clip_thresholds(df)
 
     # Put the fields consumed during training first.
-    priority = ["track_index", "scale_factor", "clip_soft", "clip_hard"]
+    priority = ["track_index", "track_name", "scale_factor", "clip_soft", "clip_hard"]
     rest = [c for c in df.columns if c not in priority]
     df = df[priority + rest]
 
@@ -559,7 +536,9 @@ def calculate_original_scaling(
 
 @normalization_app.command("anchor")
 def calculate_anchor_scaling(
-    metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json")],
+    track_table: Annotated[
+        Path, typer.Argument(help="tracks/_stages/discovered.parquet (or any tracks.parquet)")
+    ],
     anchor_regions: Annotated[
         Path, typer.Option("--anchor-regions", help="High-anchor BED/parquet")
     ],
@@ -569,61 +548,69 @@ def calculate_anchor_scaling(
     heldout_regions: Annotated[Optional[Path], typer.Option("--heldout-regions")] = None,
     output: Annotated[Optional[Path], typer.Option("--output", "-o")] = None,
     fmt: Annotated[str, typer.Option("--format", "-f")] = "parquet",
+    bin_size: Annotated[int, typer.Option("--bin-size", help="build.bin_size")] = 32,
     window_stat_bp: Annotated[int, typer.Option("--window-stat-bp")] = 1000,
+    window_stat_bp_by_assay: Annotated[
+        Optional[str],
+        typer.Option(
+            "--window-stat-bp-by-assay",
+            help='JSON {"assay": bp}; overrides --window-stat-bp for named assays',
+        ),
+    ] = None,
     background_sample: Annotated[Optional[int], typer.Option("--background-sample")] = 5000,
     max_workers: Annotated[int, typer.Option("--workers", "-w")] = 16,
-    allow_degenerate: Annotated[bool, typer.Option("--allow-degenerate")] = False,
 ) -> None:
-    """Scale tracks to housekeeping-promoter anchor units."""
+    """Scale tracks to housekeeping-promoter anchor units.
+
+    Degenerate tracks (``quality == "failed"``) are written as-is, not dropped
+    here — ``regulonado tracks qc --check anchor`` (or ``qc.rules``) decides
+    whether to drop them, since that decision belongs to the opt-in QC gate,
+    not to scaling.
+    """
     import json
 
     from regulonado.normalization import anchor_scale_factors, save_scale_factors
 
-    if not metadata.exists():
-        typer.echo(f"Metadata file not found: {metadata}", err=True)
-        raise typer.Exit(1)
-    with metadata.open() as handle:
-        meta = json.load(handle)
-    records = sorted(meta.get("final_track_records", []), key=lambda r: r["track_index"])
-    if not records:
-        typer.echo("No 'final_track_records' found in metadata.", err=True)
-        raise typer.Exit(1)
-    out_path = output or metadata.parent / f"scale_factors.{fmt}"
+    included = _included_tracks(track_table)
+    out_path = output or track_table.parent / f"scale_factors.{fmt}"
+    by_assay = json.loads(window_stat_bp_by_assay) if window_stat_bp_by_assay else None
     df = anchor_scale_factors(
-        [Path(record["resolved_path"]) for record in records],
+        included["resolved_path"].tolist(),
         anchor_regions,
         background_regions,
         heldout_regions=heldout_regions,
-        bin_size=int(meta.get("bin_size", 32)),
+        bin_size=bin_size,
         window_stat_bp=window_stat_bp,
+        window_stat_bp_by_assay=by_assay,
+        assays=included.get("assay", pd.Series([None] * len(included))).tolist(),
         background_sample=background_sample,
-        assays=[record.get("assay") for record in records],
         max_workers=max_workers,
     )
-    degenerate = df[df["quality"] == "failed"]
-    if len(degenerate) and not allow_degenerate:
-        names = [Path(records[int(i)]["resolved_path"]).stem for i in degenerate["track_index"]]
-        typer.echo("Degenerate anchor tracks (anchor <= background): " + ", ".join(names), err=True)
-        typer.echo(
-            "Remove them from the track sheet and rebuild, or pass --allow-degenerate.",
-            err=True,
-        )
-        raise typer.Exit(1)
-    if len(degenerate):
-        typer.echo(
-            "Warning: writing degenerate tracks with scale_factor=1 and background=0.",
-            err=True,
-        )
-        df.loc[df["quality"] == "failed", ["scale_factor", "background"]] = [1.0, 0.0]
+    df["track_name"] = included["track_name"].to_numpy()
+    degenerate = int((df["quality"] == "failed").sum())
+    if degenerate:
+        typer.echo(f"{degenerate} degenerate anchor track(s) (anchor <= background).", err=True)
     save_scale_factors(df, out_path, fmt=fmt)  # type: ignore[arg-type]
     typer.echo(f"Saved anchor scale factors to {out_path}")
     typer.echo("Training requirement: data.apply_squash=false")
-    typer.echo("Run 'regulonado enrich-metadata' to write these values into final_track_records.")
 
 
 @normalization_app.command("tmm")
 def calculate_tmm_scaling(
-    metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json")],
+    track_table: Annotated[
+        Path, typer.Argument(help="tracks/_stages/discovered.parquet (or any tracks.parquet)")
+    ],
+    intervals: Annotated[
+        Optional[Path],
+        typer.Option("--intervals", help="BED of sampling regions (inputs.intervals)"),
+    ] = None,
+    interval_means: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--interval-means",
+            help="Precomputed 'tracks interval-means' output; skips a fresh scan when given",
+        ),
+    ] = None,
     scale_factors: Annotated[
         Optional[Path],
         typer.Option(
@@ -631,7 +618,7 @@ def calculate_tmm_scaling(
             "-s",
             help=(
                 "Scale-factors parquet from normalization original "
-                "(default: <metadata_dir>/scale_factors.parquet)"
+                "(default: <track_table_dir>/scale_factors.parquet)"
             ),
         ),
     ] = None,
@@ -647,10 +634,14 @@ def calculate_tmm_scaling(
         str,
         typer.Option("--format", "-f", help="Output format: csv or parquet"),
     ] = "parquet",
-    split: Annotated[
-        str,
-        typer.Option("--split", help="Dataset split to use for TMM estimation"),
-    ] = "train",
+    bin_size: Annotated[int, typer.Option("--bin-size", help="build.bin_size")] = 32,
+    n_pred_bins: Annotated[int, typer.Option("--n-pred-bins", help="build.n_pred_bins")] = 6_144,
+    shift_max_bp: Annotated[int, typer.Option("--shift-max-bp", help="build.shift_max_bp")] = 0,
+    sample_n: Annotated[
+        Optional[int],
+        typer.Option("--sample-n", help="Sample this many BED rows instead of scanning all"),
+    ] = None,
+    max_workers: Annotated[int, typer.Option("--workers", "-w", help="Thread pool size")] = 16,
     trim_m: Annotated[
         float,
         typer.Option(
@@ -673,44 +664,36 @@ def calculate_tmm_scaling(
         ),
     ] = 1.0,
 ) -> None:
-    """Compute edgeR-style TMM normalisation factors from the Arrow dataset.
+    """Compute edgeR-style TMM normalisation factors directly from the BigWigs.
 
-    Reads per-sample mean RPKM from the Arrow shards under <metadata_dir>/<split>/,
-    converts to pseudo-counts using library sizes from the scale-factors parquet,
-    and runs TMM estimation over the full set of genomic regions.
+    Scans ``--intervals`` once per track (:func:`regulonado.qc.track_interval_means`,
+    the same scan the ``interval_signal``/``replicate_concordance`` QC checks
+    share), converts to pseudo-counts using library sizes from the scale-factors
+    parquet, and runs TMM estimation over the sampled regions.
 
     The output parquet gains a ``tmm_factor`` column and the ``scale_factor``
     column is updated to ``old_scale_factor / tmm_factor`` so that multiplying
     any raw RPKM BigWig value by the new scale_factor yields TMM-normalised
     approximate raw counts.
 
-    Run ``regulonado enrich-metadata`` afterwards to write the updated values
-    into ``final_track_records`` in the metadata JSON.
-
     \b
     Typical workflow::
 
-    regulonado normalization original metadata.json
-    regulonado normalization tmm metadata.json
-    regulonado enrich-metadata metadata.json scale_factors.parquet --output enriched.json
+    regulonado normalization original tracks/discovered.parquet
+    regulonado normalization tmm tracks/discovered.parquet --intervals intervals.bed
     """
-    import json
+    from regulonado.normalization import compute_tmm_factors, save_scale_factors
+    from regulonado.qc import intervals_from_bed, load_interval_means, track_interval_means
 
-    import pandas as pd
-    from regulonado.normalization import compute_tmm_factors, read_dataset_means, save_scale_factors
-
-    if not metadata.exists():
-        typer.echo(f"Metadata file not found: {metadata}", err=True)
+    included = _included_tracks(track_table)
+    if interval_means is None and intervals is None:
+        typer.echo("Provide --intervals or --interval-means.", err=True)
         raise typer.Exit(1)
 
-    with metadata.open() as fh:
-        meta = json.load(fh)
-
-    dataset_dir = metadata.parent
-    bin_size: int = int(meta.get("bin_size", 32))
-
     ext = "parquet" if fmt == "parquet" else "csv"
-    sf_path = scale_factors if scale_factors is not None else dataset_dir / f"scale_factors.{ext}"
+    sf_path = (
+        scale_factors if scale_factors is not None else track_table.parent / f"scale_factors.{ext}"
+    )
     out_path = output if output is not None else sf_path
 
     if not sf_path.exists():
@@ -736,27 +719,34 @@ def calculate_tmm_scaling(
         )
         raise typer.Exit(1)
 
-    library_sizes = sf_df.sort_values("track_index")["library_size"].to_numpy(dtype=float)
-
-    typer.echo(f"Dataset  : {dataset_dir}")
-    typer.echo(f"Split    : {split}")
-    typer.echo(f"Tracks   : {len(library_sizes)}")
-    typer.echo(f"Bin size : {bin_size} bp")
-    typer.echo("")
-
-    means, n_tracks, n_bins = read_dataset_means(dataset_dir, split=split)
-
-    if n_tracks != len(library_sizes):
+    sf_df = sf_df.sort_values("track_index").reset_index(drop=True)
+    library_sizes = sf_df["library_size"].to_numpy(dtype=float)
+    if len(library_sizes) != len(included):
         typer.echo(
-            f"Track count mismatch: dataset has {n_tracks} tracks, "
+            f"Track count mismatch: track table has {len(included)} tracks, "
             f"scale-factors file has {len(library_sizes)}.",
             err=True,
         )
         raise typer.Exit(1)
 
-    region_length_kb = n_bins * bin_size / 1000.0
-    typer.echo(f"Samples  : {means.shape[0]}")
-    typer.echo(f"Bins/sample: {n_bins}  ({region_length_kb:.1f} kb)")
+    typer.echo(f"Track table : {track_table}")
+    typer.echo(f"Tracks      : {len(library_sizes)}")
+    typer.echo(f"Bin size    : {bin_size} bp")
+    typer.echo("")
+
+    if interval_means is not None:
+        means = load_interval_means(interval_means, included["track_name"].tolist())
+    else:
+        windows = intervals_from_bed(
+            intervals, n_pred_bins=n_pred_bins, bin_size=bin_size, shift_max_bp=shift_max_bp,
+            sample_n=sample_n,
+        )
+        means = track_interval_means(
+            included["resolved_path"].tolist(), windows, max_workers=max_workers
+        )
+    shift_bins = shift_max_bp // bin_size
+    region_length_kb = (n_pred_bins + 2 * shift_bins) * bin_size / 1000.0
+    typer.echo(f"Regions     : {means.shape[0]}  ({region_length_kb:.1f} kb each)")
     typer.echo("")
 
     tmm = compute_tmm_factors(
@@ -769,36 +759,37 @@ def calculate_tmm_scaling(
     )
 
     # Report
-    sf_sorted = sf_df.sort_values("track_index").reset_index(drop=True)
     typer.echo(
-        f"{'Track':>5}  {'samplename':<30}  {'tmm_factor':>12}  {'old_sf':>12}  {'new_sf':>12}"
+        f"{'Track':>5}  {'track_name':<30}  {'tmm_factor':>12}  {'old_sf':>12}  {'new_sf':>12}"
     )
-    for i, (_, row) in enumerate(sf_sorted.iterrows()):
+    for i, (_, row) in enumerate(sf_df.iterrows()):
         old_sf = float(row["scale_factor"])
         new_sf = old_sf / tmm[i]
-        name = str(row.get("samplename", i))[:30]
+        name = str(included.loc[i, "track_name"])[:30]
         typer.echo(
             f"{int(row['track_index']):>5}  {name:<30}  {tmm[i]:>12.6f}  "
             f"{old_sf:>12.6f}  {new_sf:>12.6f}"
         )
 
     # Write updated parquet: add tmm_factor, overwrite scale_factor
-    sf_df = sf_df.sort_values("track_index").reset_index(drop=True)
     sf_df["tmm_factor"] = tmm
     sf_df["scale_factor"] = sf_df["scale_factor"] / sf_df["tmm_factor"]
+    if "track_name" not in sf_df.columns:
+        sf_df["track_name"] = included["track_name"].to_numpy()
 
-    priority = ["track_index", "scale_factor", "tmm_factor", "clip_soft", "clip_hard"]
+    priority = ["track_index", "track_name", "scale_factor", "tmm_factor", "clip_soft", "clip_hard"]
     rest = [c for c in sf_df.columns if c not in priority]
     sf_df = sf_df[priority + rest]
 
     save_scale_factors(sf_df, out_path, fmt=fmt)  # type: ignore[arg-type]
     typer.echo(f"\nSaved updated scale factors to {out_path}")
-    typer.echo("Run 'regulonado enrich-metadata' to write these values into final_track_records.")
 
 
 @normalization_app.command("seqnado")
 def calculate_seqnado_scaling(
-    metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json")],
+    track_table: Annotated[
+        Path, typer.Argument(help="tracks/_stages/discovered.parquet (or any tracks.parquet)")
+    ],
     project: Annotated[
         Path,
         typer.Option("--project", help="SeqNado output directory (seqnado_output/)."),
@@ -836,19 +827,14 @@ def calculate_seqnado_scaling(
     Only valid within a single SeqNado project — its factors are not comparable
     across projects. Use 'tmm' when aggregating several.
     """
-    import json
-
     import numpy as np
-    import pandas as pd
     from regulonado.normalization import save_scale_factors
 
-    if not metadata.exists():
-        typer.echo(f"Metadata file not found: {metadata}", err=True)
-        raise typer.Exit(1)
+    included = _included_tracks(track_table)
 
     ext = "parquet" if fmt == "parquet" else "csv"
     sf_path = (
-        scale_factors if scale_factors is not None else metadata.parent / f"scale_factors.{ext}"
+        scale_factors if scale_factors is not None else track_table.parent / f"scale_factors.{ext}"
     )
     if not sf_path.exists():
         typer.echo(
@@ -907,18 +893,10 @@ def calculate_seqnado_scaling(
         .astype(float)
     )
 
-    with metadata.open() as fh:
-        meta = json.load(fh)
-    records = sorted(meta.get("final_track_records", []), key=lambda r: r["track_index"])
-    if not records:
-        typer.echo("No 'final_track_records' found in metadata.", err=True)
-        raise typer.Exit(1)
-
     # Tracks carry both names; SeqNado keys its table on the sample name, which
     # for IP assays is '<sample>_<ip>' — the same string as the bigwig stem.
     names = [
-        record.get("sample_id") or record.get("track_name") or Path(record["path"]).stem
-        for record in records
+        row.get("sample_id") or row["track_name"] for _, row in included.iterrows()
     ]
     missing = [name for name in names if name not in lookup.index]
     if missing:
@@ -939,24 +917,27 @@ def calculate_seqnado_scaling(
 
     df = pd.read_parquet(sf_path) if fmt == "parquet" else pd.read_csv(sf_path)
     df = df.sort_values("track_index").reset_index(drop=True)
-    if len(df) != len(records):
+    if len(df) != len(included):
         typer.echo(
-            f"Scale factors have {len(df)} row(s) but metadata has {len(records)} track(s).",
+            f"Scale factors have {len(df)} row(s) but track table has {len(included)} track(s).",
             err=True,
         )
         raise typer.Exit(1)
 
     df["seqnado_norm_factor"] = values
     df["scale_factor"] = df["scale_factor"] / values
+    if "track_name" not in df.columns:
+        df["track_name"] = included["track_name"].to_numpy()
 
     save_scale_factors(df, out_path, fmt=fmt)  # type: ignore[arg-type]
     typer.echo(f"Applied {len(values)} SeqNado normalisation factor(s) -> {out_path}")
-    typer.echo("Run 'regulonado enrich-metadata' to write these values into final_track_records.")
 
 
 @normalization_app.command("bamnado")
 def calculate_bamnado_scaling(
-    metadata: Annotated[Path, typer.Argument(help="Path to regulonado_metadata.json")],
+    track_table: Annotated[
+        Path, typer.Argument(help="tracks/_stages/discovered.parquet (or any tracks.parquet)")
+    ],
     bam_dir: Annotated[
         Path,
         typer.Option(
@@ -1040,32 +1021,19 @@ def calculate_bamnado_scaling(
     BAM files are matched to tracks by filename stem: track N's bigwig
     'sample1.bw' must have a matching 'sample1.bam' in --bam-dir.
 
-    Run ``regulonado enrich-metadata`` afterwards to write the updated values
-    into ``final_track_records`` in the metadata JSON.
     """
-    import json
-
-    import pandas as pd
     from regulonado.normalization import compute_bamnado_norm_factors, save_scale_factors
 
-    if not metadata.exists():
-        typer.echo(f"Metadata file not found: {metadata}", err=True)
-        raise typer.Exit(1)
     if not bam_dir.is_dir():
         typer.echo(f"BAM directory not found: {bam_dir}", err=True)
         raise typer.Exit(1)
 
-    with metadata.open() as fh:
-        meta = json.load(fh)
-
-    dataset_dir = metadata.parent
-    track_records = sorted(meta.get("final_track_records", []), key=lambda r: r["track_index"])
-    if not track_records:
-        typer.echo("No 'final_track_records' found in metadata.", err=True)
-        raise typer.Exit(1)
+    included = _included_tracks(track_table)
 
     ext = "parquet" if fmt == "parquet" else "csv"
-    sf_path = scale_factors if scale_factors is not None else dataset_dir / f"scale_factors.{ext}"
+    sf_path = (
+        scale_factors if scale_factors is not None else track_table.parent / f"scale_factors.{ext}"
+    )
     out_path = output if output is not None else sf_path
 
     if not sf_path.exists():
@@ -1078,8 +1046,8 @@ def calculate_bamnado_scaling(
 
     bam_paths = []
     missing = []
-    for record in track_records:
-        stem = Path(record["resolved_path"]).stem
+    for resolved_path in included["resolved_path"]:
+        stem = Path(resolved_path).stem
         bam_path = bam_dir / f"{stem}.bam"
         if not bam_path.exists():
             missing.append(str(bam_path))
@@ -1092,10 +1060,10 @@ def calculate_bamnado_scaling(
         )
         raise typer.Exit(1)
 
-    typer.echo(f"Metadata : {metadata}")
-    typer.echo(f"BAM dir  : {bam_dir}")
-    typer.echo(f"Method   : {method}")
-    typer.echo(f"Tracks   : {len(bam_paths)}")
+    typer.echo(f"Track table : {track_table}")
+    typer.echo(f"BAM dir     : {bam_dir}")
+    typer.echo(f"Method      : {method}")
+    typer.echo(f"Tracks      : {len(bam_paths)}")
     typer.echo("")
 
     norm_factors = compute_bamnado_norm_factors(
@@ -1131,25 +1099,27 @@ def calculate_bamnado_scaling(
     sf_df["bamnado_method"] = method
     sf_df["bamnado_norm_factor"] = norm_factors
     sf_df["scale_factor"] = sf_df["scale_factor"] / sf_df["bamnado_norm_factor"]
+    if "track_name" not in sf_df.columns:
+        sf_df["track_name"] = included["track_name"].to_numpy()
 
     typer.echo(
-        f"{'Track':>5}  {'samplename':<30}  {'norm_factor':>12}  {'old_sf':>12}  {'new_sf':>12}"
+        f"{'Track':>5}  {'track_name':<30}  {'norm_factor':>12}  {'old_sf':>12}  {'new_sf':>12}"
     )
     for i, row in sf_df.iterrows():
         old_sf = float(row["scale_factor"]) * float(row["bamnado_norm_factor"])
-        name = str(row.get("samplename", i))[:30]
+        name = str(row["track_name"])[:30]
         typer.echo(
             f"{int(row['track_index']):>5}  {name:<30}  {norm_factors[i]:>12.6f}  "
             f"{old_sf:>12.6f}  {float(row['scale_factor']):>12.6f}"
         )
 
-    priority = ["track_index", "scale_factor", "bamnado_norm_factor", "clip_soft", "clip_hard"]
+    priority = ["track_index", "track_name", "scale_factor", "bamnado_norm_factor", "clip_soft",
+                "clip_hard"]
     rest = [c for c in sf_df.columns if c not in priority]
     sf_df = sf_df[priority + rest]
 
     save_scale_factors(sf_df, out_path, fmt=fmt)  # type: ignore[arg-type]
     typer.echo(f"\nSaved updated scale factors to {out_path}")
-    typer.echo("Run 'regulonado enrich-metadata' to write these values into final_track_records.")
 
 
 @app.command()
@@ -1193,153 +1163,23 @@ def recompress_dataset(
 
 
 @app.command()
-def enrich_metadata(
-    metadata: Annotated[
-        Path, typer.Argument(help="Source regulonado_metadata.json")
-    ],
-    scale_factors: Annotated[
-        Path,
-        typer.Argument(help="Parquet or CSV produced by a normalization command"),
-    ],
-    output: Annotated[
-        Path,
-        typer.Option("--output", "-o", help="Output path for the enriched metadata JSON"),
-    ],
-    fields: Annotated[
-        Optional[list[str]],
-        typer.Option(
-            "--field",
-            "-f",
-            help=(
-                "Field to copy into final_track_records "
-                "(repeat; default: all of scale_factor clip_soft clip_hard)"
-            ),
-        ),
-    ] = None,
-) -> None:
-    """Create training metadata containing scale and clipping values."""
-    import json
-
-    import pandas as pd
-
-    fields_to_copy = list(fields) if fields else ["scale_factor", "clip_soft", "clip_hard"]
-
-    if not metadata.exists():
-        typer.echo(f"Metadata file not found: {metadata}", err=True)
-        raise typer.Exit(1)
-    if not scale_factors.exists():
-        typer.echo(f"Scale-factors file not found: {scale_factors}", err=True)
-        raise typer.Exit(1)
-    if output.resolve() == metadata.resolve():
-        raise typer.BadParameter(
-            "Output must differ from the source metadata file", param_hint="OUTPUT"
-        )
-
-    sf_df = (
-        pd.read_parquet(scale_factors)
-        if str(scale_factors).endswith(".parquet")
-        else pd.read_csv(scale_factors)
-    )
-
-    missing = [f for f in fields_to_copy if f not in sf_df.columns]
-    if missing:
-        typer.echo(f"Fields missing from scale-factors file: {missing}", err=True)
-        raise typer.Exit(1)
-    if "track_index" not in sf_df.columns:
-        typer.echo("Scale-factors file has no track_index column", err=True)
-        raise typer.Exit(1)
-    if sf_df["track_index"].duplicated().any():
-        typer.echo("Scale-factors file contains duplicate track_index values", err=True)
-        raise typer.Exit(1)
-
-    sf_by_idx: dict[int, dict] = {
-        int(row["track_index"]): {f: row[f] for f in fields_to_copy} for _, row in sf_df.iterrows()
-    }
-
-    with metadata.open() as fh:
-        meta = json.load(fh)
-
-    records = meta.get("final_track_records", [])
-    unmatched = [
-        int(record["track_index"])
-        for record in records
-        if int(record["track_index"]) not in sf_by_idx
-    ]
-    if unmatched:
-        typer.echo(
-            f"No scale factors found for track_index values: {unmatched[:10]}", err=True
-        )
-        raise typer.Exit(1)
-    updated = 0
-    for record in records:
-        idx = int(record["track_index"])
-        if idx in sf_by_idx:
-            record.update({k: float(v) for k, v in sf_by_idx[idx].items()})
-            updated += 1
-
-    meta["final_track_records"] = records
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w") as fh:
-        json.dump(meta, fh, indent=2)
-
-    typer.echo(f"Wrote {output} with {updated}/{len(records)} updated track records")
-    typer.echo(f"Fields written: {fields_to_copy}")
-
-
-@app.command()
 def build(
     bed_file: Annotated[Path, typer.Argument(help="BED file; column 4 used as fold label")],
     fasta_file: Annotated[
         Path, typer.Argument(help="Reference genome FASTA (.fai index required)")
     ],
     output_dir: Annotated[Path, typer.Argument(help="Output directory for the Arrow DatasetDict")],
-    bigwig: Annotated[
-        Optional[list[Path]],
+    track_table: Annotated[
+        Path,
         typer.Option(
-            "--bigwig",
-            "-b",
-            help="BigWig file (repeat for each track, order is preserved)",
-        ),
-    ] = None,
-    bigwig_dir: Annotated[
-        Optional[Path],
-        typer.Option(
-            "--bigwig-dir",
-            help="Directory of BigWig files (sorted by name, alternative to --bigwig)",
-        ),
-    ] = None,
-    bigwig_glob: Annotated[
-        Optional[list[str]],
-        typer.Option(
-            "--bigwig-glob",
+            "--track-table",
             help=(
-                "Glob when using --bigwig-dir (repeatable). "
-                "Default: '*.bw' and '*.bigWig', so SeqNado output is matched too."
+                "tracks.parquet from 'regulonado tracks assemble' — the sole source of "
+                "track identity, order and per-track annotation. Discovery, dedupe and "
+                "QC all happen upstream of this command; see 'regulonado tracks'."
             ),
         ),
-    ] = None,
-    track_sheet: Annotated[
-        Optional[Path],
-        typer.Option(
-            "--track-sheet",
-            help=(
-                "CSV mapping tracks to annotation (condition, cell_line, ip, …). "
-                "Supplies the ordered track list and populates the categorical "
-                "ids the training code reads. Overrides --bigwig/--bigwig-dir."
-            ),
-        ),
-    ] = None,
-    seqnado_project: Annotated[
-        Optional[list[str]],
-        typer.Option(
-            "--seqnado-project",
-            help=(
-                "SeqNado output directory as PATH or NAME=PATH (repeatable). "
-                "Resolves track sheet rows that give only a sample_id, and with "
-                "no --track-sheet builds the sheet from the project(s) directly."
-            ),
-        ),
-    ] = None,
+    ],
     split: Annotated[
         Optional[list[str]],
         typer.Option(
@@ -1395,20 +1235,6 @@ def build(
     overwrite: Annotated[
         bool, typer.Option("--overwrite", help="Regenerate splits that already exist")
     ] = False,
-    drop_missing: Annotated[
-        bool,
-        typer.Option(
-            "--drop-missing",
-            help="Drop missing BigWig paths instead of raising an error",
-        ),
-    ] = False,
-    dedupe_tracks: Annotated[
-        str,
-        typer.Option(
-            "--dedupe-tracks",
-            help="Track deduplication mode: none, identity, or content",
-        ),
-    ] = "none",
     profile: Annotated[
         bool,
         typer.Option(
@@ -1505,64 +1331,22 @@ def build(
         ),
     ] = None,
 ) -> None:
-    """Build an Arrow DatasetDict from BED / FASTA / BigWig sources.
+    """Build an Arrow DatasetDict from BED / FASTA / a pre-assembled track table.
+
+    Track discovery, dedupe and QC happen before this command, via
+    'regulonado tracks discover/qc/assemble' — this is intentionally the only
+    place a track list can be named, so there is one way to name tracks, not
+    two.
 
     \b
     Examples
     --------
-    # Two splits, 16 workers, shift aug, staged from Ceph scratch:
     regulonado build intervals.bed genome.fa out/ \\
-        --bigwig-dir bw/ \\
+        --track-table results/tracks/tracks.parquet \\
         --split train:train --split validation:valid \\
         --shift-max-bp 128 --num-proc 16 --stage
-
-    # Explicit ordered BigWig list, no fold filtering:
-    regulonado build intervals.bed genome.fa out/ \\
-        --bigwig plus.bw --bigwig minus.bw
     """
     from regulonado.dataset import DEFAULT_SPLITS, build_dataset_fast
-
-    projects = _parse_seqnado_projects(seqnado_project)
-
-    # --- resolve BigWig paths and annotation ---------------------------------
-    annotations: Optional[dict] = None
-    vocab: Optional[dict] = None
-
-    if track_sheet is not None or projects:
-        from regulonado.tracks import TrackSheet
-
-        try:
-            if track_sheet is not None:
-                sheet = TrackSheet.from_csv(track_sheet, projects=projects or None)
-            else:
-                sheet = TrackSheet.from_seqnado_projects(
-                    [{"name": name, "path": path} for name, path in projects.items()]
-                )
-        except Exception as exc:
-            typer.echo(str(exc), err=True)
-            raise typer.Exit(1) from exc
-
-        bw_paths: list[str] = [str(p) for p in sheet.bigwig_paths]
-        annotations = sheet.annotations_by_path()
-        _, vocab = sheet.to_track_records()
-    elif bigwig_dir is not None:
-        # Default covers both extensions: ReguloNado writes '.bw', SeqNado '.bigWig'.
-        globs = list(bigwig_glob) if bigwig_glob else ["*.bw", "*.bigWig"]
-        matched = {p for pattern in globs for p in bigwig_dir.glob(pattern)}
-        bw_paths = [str(p) for p in sorted(matched)]
-        if not bw_paths:
-            typer.echo(f"No files matching {globs} in {bigwig_dir}", err=True)
-            raise typer.Exit(1)
-    elif bigwig:
-        bw_paths = [str(p) for p in bigwig]
-    else:
-        typer.echo(
-            "Provide --bigwig files, --bigwig-dir, --track-sheet or --seqnado-project.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    typer.echo(f"Tracks : {len(bw_paths)}")
 
     # --- parse --split NAME:FOLD1,FOLD2 --------------------------------------
     splits: dict[str, list[str]] = {}
@@ -1576,13 +1360,14 @@ def build(
     if not splits:
         splits = DEFAULT_SPLITS
 
-    typer.echo(f"Splits : {list(splits)}")
-    typer.echo(f"Output : {output_dir}")
+    typer.echo(f"Track table : {track_table}")
+    typer.echo(f"Splits      : {list(splits)}")
+    typer.echo(f"Output      : {output_dir}")
 
     build_dataset_fast(
         bed_file=bed_file,
         fasta_file=fasta_file,
-        bigwig_paths=bw_paths,
+        track_table=track_table,
         output_dir=output_dir,
         splits=splits,
         context_length=context_length,
@@ -1602,10 +1387,6 @@ def build(
         writer_batch_size=writer_batch_size,
         stage_to_scratch=stage,
         overwrite=overwrite,
-        drop_missing=drop_missing,
-        dedupe_tracks=dedupe_tracks,
-        annotations=annotations,
-        track_metadata_vocab=vocab,
         profile=profile,
         strategy=strategy,
         chrom_filter=list(chrom) if chrom else None,
@@ -1634,7 +1415,7 @@ def predict(
         typer.Option(
             "--dataset",
             "-d",
-            help="Dataset dir with regulonado_metadata.json; required only for legacy checkpoints",
+            help="Dataset dir with tracks.parquet; required only for legacy checkpoints",
         ),
     ] = None,
     bed_file: Annotated[
@@ -1771,7 +1552,7 @@ def design(
         typer.Option(
             "--intervals",
             help="Build-time interval BED the folds were trained on; default: the 'bed_file' "
-            "recorded in --dataset-dir's regulonado_metadata.json.",
+            "recorded in --dataset-dir's tracks.parquet.",
         ),
     ] = None,
     holdout_checkpoint: Annotated[
@@ -1782,7 +1563,7 @@ def design(
     ] = None,
     dataset_dir: Annotated[
         Optional[Path],
-        typer.Option("--dataset-dir", help="Dataset dir with regulonado_metadata.json."),
+        typer.Option("--dataset-dir", help="Dataset dir with tracks.parquet."),
     ] = None,
     group_by: Annotated[
         str, typer.Option("--group-by", help="Track annotation column defining cell-type groups.")
@@ -1925,7 +1706,6 @@ def design(
     (from --intervals) that contains it. Provide 3 --checkpoint folds to optimise against and,
     ideally, a 4th --holdout-checkpoint to confirm the design isn't fold-specific overfitting.
     """
-    import json
     import logging
 
     logging.basicConfig(
@@ -1977,15 +1757,17 @@ def design(
     if intervals is None:
         if dataset_dir is None:
             raise typer.BadParameter(
-                "Provide --intervals, or --dataset-dir with a regulonado_metadata.json "
-                "recording 'bed_file'",
+                "Provide --intervals, or --dataset-dir with a tracks.parquet recording "
+                "'bed_file'",
                 param_hint="--intervals",
             )
-        metadata = json.loads((dataset_dir / "regulonado_metadata.json").read_text())
-        bed_file = metadata.get("bed_file")
+        from regulonado.tracks_table import read_track_table
+
+        table = read_track_table(dataset_dir / "tracks.parquet")
+        bed_file = table.attrs.get("bed_file")
         if not bed_file:
             raise typer.BadParameter(
-                f"No 'bed_file' recorded in {dataset_dir / 'regulonado_metadata.json'}",
+                f"No 'bed_file' recorded in {dataset_dir / 'tracks.parquet'}",
                 param_hint="--intervals",
             )
         intervals = Path(bed_file)
@@ -2325,12 +2107,12 @@ def attribute(
         typer.Option(
             "--intervals",
             help="Build-time interval BED the folds were trained on; default: the 'bed_file' "
-            "recorded in --dataset-dir's regulonado_metadata.json.",
+            "recorded in --dataset-dir's tracks.parquet.",
         ),
     ] = None,
     dataset_dir: Annotated[
         Optional[Path],
-        typer.Option("--dataset-dir", help="Dataset dir with regulonado_metadata.json."),
+        typer.Option("--dataset-dir", help="Dataset dir with tracks.parquet."),
     ] = None,
     bin_reduction: Annotated[
         str, typer.Option("--bin-reduction", help="Bin statistic: 'mean', 'topk' or 'max'.")
@@ -2408,7 +2190,6 @@ def attribute(
     core_regions.bed is designed to be fed straight back in as `regulonado design --candidates`,
     so that design and synthesis target only the span that matters.
     """
-    import json
     import logging
 
     logging.basicConfig(
@@ -2457,15 +2238,17 @@ def attribute(
     if intervals is None:
         if dataset_dir is None:
             raise typer.BadParameter(
-                "Provide --intervals, or --dataset-dir with a regulonado_metadata.json "
-                "recording 'bed_file'",
+                "Provide --intervals, or --dataset-dir with a tracks.parquet recording "
+                "'bed_file'",
                 param_hint="--intervals",
             )
-        metadata = json.loads((dataset_dir / "regulonado_metadata.json").read_text())
-        bed_file = metadata.get("bed_file")
+        from regulonado.tracks_table import read_track_table
+
+        table = read_track_table(dataset_dir / "tracks.parquet")
+        bed_file = table.attrs.get("bed_file")
         if not bed_file:
             raise typer.BadParameter(
-                f"No 'bed_file' recorded in {dataset_dir / 'regulonado_metadata.json'}",
+                f"No 'bed_file' recorded in {dataset_dir / 'tracks.parquet'}",
                 param_hint="--intervals",
             )
         intervals = Path(bed_file)
@@ -2631,6 +2414,7 @@ def main() -> None:
 
 
 app.add_typer(normalization_app, name="normalization")
+app.add_typer(tracks_app, name="tracks")
 app.command("pipeline")(_pipeline)
 
 

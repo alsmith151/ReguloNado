@@ -17,11 +17,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: astral-sh/setup-uv@v6
+
       - name: Install ruff
         run: pip install ruff
 
       - name: ruff check
         run: ruff check python/ tests/
+
+      - name: uv lock check
+        run: uv lock --check
 
   clippy:
     name: Clippy
@@ -43,6 +48,12 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo fmt check
+        run: cargo fmt --check
+
+      - name: cargo test
+        run: cargo test --all-targets
 
   test:
     name: "Data tests — Python ${{ matrix.python-version }}"
@@ -72,11 +83,21 @@ jobs:
             ${{ runner.os }}-cargo-${{ matrix.python-version }}-
             ${{ runner.os }}-cargo-
 
-      - name: Install with test dependencies
-        run: pip install ".[test]"
+      - name: Core install imports without the data/train extras
+        run: |
+          pip install .
+          python -c "import regulonado.config.models, regulonado.config.schema_gen, regulonado.tracks_table, regulonado.normalization"
 
-      - name: Run data and chrom-pass tests
-        run: pytest tests/test_chrom_pass.py tests/test_dataset_staging.py -v
+      - name: Install with test dependencies
+        run: pip install ".[test,workflow]"
+
+      - name: Run full Python test suite
+        run: pytest tests/ -q
+
+      - name: Check config.schema.yaml matches the pydantic models
+        run: |
+          python -m regulonado.config.schema_gen
+          git diff --exit-code -- python/regulonado/workflow/schemas/config.schema.yaml
 
   test-model:
     # The model/loss/metric tests import torch, which the [test] extra deliberately
@@ -125,4 +146,5 @@ jobs:
             tests/test_train_metrics.py \
             tests/test_design.py \
             tests/test_attribution.py \
-            tests/test_normalization_anchor.py -v
+            tests/test_normalization_anchor.py \
+            tests/test_cli.py -v

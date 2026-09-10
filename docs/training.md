@@ -28,11 +28,12 @@ Repeat `--set KEY=VALUE` for small changes. Unknown keys and invalid value types
 are errors. Put repeated, shared settings in YAML rather than building a long
 command line.
 
-If normalization produced separate metadata, select it with `--metadata`:
+To use a `tracks.parquet` other than the dataset's own copy — e.g. one with different
+scale factors after re-running `tracks assemble` — select it with `--metadata`:
 
 ```bash
 regulonado train dataset/ --preset head_only \
-  --metadata results/scaling/regulonado_metadata.enriched.json
+  --metadata results/tracks/tracks.parquet
 ```
 
 ## Configure several runs

@@ -7,6 +7,7 @@ import os
 import platform
 import subprocess
 import sys
+import warnings
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -118,11 +119,8 @@ def _write_provenance(
         return
 
     repo = Path.cwd()
-    metadata_candidates = [
-        data_path / "regulonado_metadata.json",
-        data_path / "track_metadata.json",
-    ]
-    metadata_path = next((path for path in metadata_candidates if path.exists()), None)
+    metadata_path = data_path / "tracks.parquet"
+    metadata_path = metadata_path if metadata_path.exists() else None
     git_status = _run_git(repo, "status", "--short")
     provenance = {
         "config": cfg,
@@ -154,4 +152,14 @@ def _write_provenance(
     if trainer_cfg.provenance.save_git_diff:
         diff = _run_git(repo, "diff", "--no-ext-diff")
         if diff:
+            max_bytes = max(0, trainer_cfg.provenance.save_git_diff_max_bytes)
+            encoded_diff = diff.encode()
+            if len(encoded_diff) > max_bytes:
+                warnings.warn(
+                    "Git diff exceeds provenance.save_git_diff_max_bytes; truncating it",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                diff = encoded_diff[:max_bytes].decode(errors="replace")
+                diff += "\n\n[git diff truncated]\n"
             (output_dir / "git_diff.patch").write_text(diff)

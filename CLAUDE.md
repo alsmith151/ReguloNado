@@ -14,7 +14,8 @@ Build Arrow datasets from BigWig/FASTA and fine-tune sequence-to-function genomi
 
 Single Typer app, entry point `regulonado = "regulonado.cli.app:main"`. Commands live in
 [cli/app.py](python/regulonado/cli/app.py); `pipeline` is registered from
-[cli/pipeline.py](python/regulonado/cli/pipeline.py).
+[cli/pipeline.py](python/regulonado/cli/pipeline.py); the `tracks` sub-app (discover/qc/assemble/
+show/targets/interval-means) lives in [cli/tracks.py](python/regulonado/cli/tracks.py).
 
 ## Model
 
@@ -36,9 +37,31 @@ does.
 
 ## Tracks
 
-`TrackSheet`/`TrackRecord` ([tracks.py](python/regulonado/tracks.py)), `CATEGORICAL_FIELDS` maps
-sheet columns → id fields; persisted as `final_track_records` in `regulonado_metadata.json`.
-Nothing hardcodes the track count.
+`TrackSheet`/`TrackRecord` ([tracks.py](python/regulonado/tracks.py)) is the sheet format; its
+`CATEGORICAL_FIELDS` label→id mapping is mirrored in
+[tracks_table.py](python/regulonado/tracks_table.py) as the canonical version. Track state is
+persisted as `tracks.parquet`, not `regulonado_metadata.json` — see **Track table** below.
+Categorical ids (`condition_id`, `source_id`, `assay_type_id`, `target_id`) are never stored;
+they are *derived* at load time by sorted factorisation over the label columns
+(`to_track_records()`), so an id always means the same thing regardless of which stage populated
+the label. Nothing hardcodes the track count.
+
+## Track table
+
+`tracks.parquet` is the single artifact naming which tracks exist, in what order, and why —
+produced by `regulonado tracks assemble` and read by everything downstream (build, train,
+inference, design, attribution). It is a **strict superset of every stage output**: discovery,
+scaling and QC each write to `tracks/_stages/*.parquet` (`discovered.parquet`,
+`interval_means.parquet`, `scale_factors.parquet`, `qc_report.parquet`), but those are rule
+plumbing only — kept so re-running assembly doesn't re-scan every BigWig — and should never be
+read directly. The pandera schema in
+[tracks_table.py](python/regulonado/tracks_table.py) (`TrackTableSchema`) is the contract:
+`status` ∈ `included/dropped_duplicate/missing/qc_failed/excluded`, `track_index` contiguous
+`0..n-1` over `included` rows and null elsewhere, `track_name` unique and non-null. Column prefixes
+namespace a wide table: `fp_*` fingerprint (verified against disk, never joined on), `scale_*`
+scaling diagnostics, `qc_*` QC metrics and verdict; identity/annotation/dedupe columns keep bare
+names. `track_name` is the join key everywhere; `track_index` is positional and renumbers under
+filtering, so never persist it across a re-assemble.
 
 ## Flashzoi caveat
 
@@ -48,30 +71,40 @@ flash_attn's rotary cache goes NaN under autocast
 
 ## Dependencies
 
-Deps are split by extra: `core` has no torch; `train` has torch; `data` has polars/tqdm/tangermeme;
-`test` has pyfaidx. **Torch imports must be lazy or inside torch-only modules** so `pip install
-regulonado` (core) still imports the package and runs the CLI.
+Deps are split by extra: `core` has no torch — but **does** have pandas/polars/pyarrow/tqdm/pandera,
+since [tracks_table.py](python/regulonado/tracks_table.py) and
+[normalization.py](python/regulonado/normalization.py) need them at module scope; `train` has
+torch; `data` adds the genuinely heavy set (datasets/pybigtools/pysam/scipy/tangermeme/psutil/
+bioframe); `test` has pyfaidx. **Torch imports must be lazy or inside torch-only modules** so `pip
+install regulonado` (core) still imports the package and runs the CLI.
 
 ## Workflow
 
 `regulonado pipeline` drives Snakemake through its **Python API** (not the CLI), so profile keys
 like `use-conda`/`use-apptainer` must be translated explicitly
-([cli/pipeline.py](python/regulonado/cli/pipeline.py)). Adding a stage means four things:
+([cli/pipeline.py](python/regulonado/cli/pipeline.py)). Scaling and QC now run **before** the
+Arrow build, directly from BigWigs, not from Arrow shards afterward — this inverts the pipeline's
+old shape and is the single most likely thing to assume backwards. Adding a stage means three
+things (down from four — `config.schema.yaml` is generated, not hand-mirrored, see below):
 
 1. a pydantic model in [config/models.py](python/regulonado/config/models.py)
-2. a mirrored block in
-   [workflow/schemas/config.schema.yaml](python/regulonado/workflow/schemas/config.schema.yaml)
-3. a `rules/*.smk`
-4. an `include:` plus a `rule all` entry in the [Snakefile](python/regulonado/workflow/Snakefile)
+2. a `rules/*.smk`
+3. an `include:` plus a `rule all` entry in the [Snakefile](python/regulonado/workflow/Snakefile)
 
 Settings dicts are rendered to CLI flags (`_override_flags` in
 [rules/train.smk](python/regulonado/workflow/rules/train.smk)); checkpoints are resolved with
 [scripts/resolve_checkpoint.py](python/regulonado/workflow/scripts/resolve_checkpoint.py).
 
+`workflow/schemas/config.schema.yaml` is **generated** from `RegulonadoConfig.model_json_schema()`
+by [config/schema_gen.py](python/regulonado/config/schema_gen.py) — run
+`python -m regulonado.config.schema_gen` after changing `config/models.py`; CI fails if
+regenerating produces a diff. Hand-editing the schema file is wrong.
+
 ## Normalisation
 
-`scaling.method: anchor` uses PyRanges BED/parquet biological reference windows; set
-`data.apply_squash: false` when training anchor-scaled targets.
+`scaling.method: anchor` uses bioframe-read BED/parquet biological reference windows;
+`data.apply_squash` is *forced* to `false` by the `_anchor_disables_squash` validator when anchor
+scaling is selected — it is enforced, not merely documented.
 
 ## Attribution module
 

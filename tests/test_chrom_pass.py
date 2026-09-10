@@ -479,3 +479,37 @@ def test_chrom_pass_shared_scan_writes_multiple_splits(synth_dataset, tmp_path):
         assert len(ds) == len(expected_indices)
         assert sorted(ds["index"]) == expected_indices
         assert sorted(ds["local_index"]) == list(range(len(expected_indices)))
+
+
+def test_chrom_pass_rejects_truncated_bigwig(tmp_path):
+    from regulonado._rs import write_arrow_splits_chrom_pass  # type: ignore[import-not-found]
+
+    fasta = tmp_path / "ref.fa"
+    fasta.write_text(">chrA\n" + "ACGT" * 256 + "\n")
+    import pyfaidx
+
+    pyfaidx.Fasta(str(fasta))
+    bw = tmp_path / "track.bw"
+    writer = pybigtools.open(str(bw), "w")
+    writer.write({"chrA": 1024}, iter([("chrA", 0, 10, 5.0)]))
+    bw.write_bytes(bw.read_bytes()[:100])
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    with pytest.raises(RuntimeError, match="failed|error|invalid|unexpected"):
+        write_arrow_splits_chrom_pass(
+            [str(bw)],
+            [False],
+            [("chrA", 0, 512)],
+            ["split"],
+            [str(output_dir)],
+            [[0]],
+            [("chrA", 0, 512, "fold0")],
+            str(fasta),
+            64,
+            512,
+            8,
+            batch_size=1,
+            n_threads=1,
+            compression="none",
+        )

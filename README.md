@@ -56,12 +56,16 @@ what aggregation guarantees, and what is shared rather than duplicated.
 
 ## A small end-to-end run
 
-Build an Arrow dataset from a BED file, an indexed FASTA, and a directory of
-BigWigs:
+Discover tracks from a directory of BigWigs, assemble them into a track table, then build an
+Arrow dataset from a BED file, an indexed FASTA, and that table:
 
 ```bash
+regulonado tracks discover results/tracks/_stages/discovered.parquet --bigwig-dir bigwigs/
+regulonado tracks assemble results/tracks/_stages/discovered.parquet \
+  --output results/tracks/tracks.parquet
+
 regulonado build intervals.bed genome.fa dataset/ \
-  --bigwig-dir bigwigs/ \
+  --track-table results/tracks/tracks.parquet \
   --split train:fold0,fold1,fold2 \
   --split validation:fold4 \
   --split test:fold3 \
@@ -112,16 +116,20 @@ regulonado pipeline config.yaml --preset sg --cores 4
 The workflow contains these stages:
 
 ```text
-build_dataset
-    └─ recompress_dataset (when recompress.enabled: true)
-        └─ scale_factors → enrich_metadata
-            └─ train_phase for each run and phase
+track_discovery
+    ├─ scale_factors ─┐
+    └─ track_qc ───────┴─ track_assemble
+                            └─ build_dataset
+                                └─ recompress_dataset (when recompress.enabled: true)
+                                    └─ train_phase for each run and phase
 ```
 
-`build_dataset` reads the FASTA, BED, and track source, bins signal, and writes
-the Arrow dataset and metadata. `recompress_dataset` is optional. The scaling
-stage writes per-track factors and enriched metadata; its method is selected by
-`scaling.method` (`original`, `tmm`, `bamnado`, or `seqnado`). Each
+Track discovery, scaling, and QC all run **before** the Arrow build, directly from BigWigs —
+`track_assemble` merges them into `tracks.parquet`, the one file `build_dataset` and every later
+stage reads. `build_dataset` reads the FASTA, BED, and that table, and writes the Arrow dataset.
+`recompress_dataset` is optional. The scaling stage writes per-track factors; its method is
+selected by `scaling.method` (`original`, `tmm`, `bamnado`, `seqnado`, or `anchor`). QC is opt-in
+(`qc.checks`) and can drop tracks at assembly rather than training on them. Each
 `train_phase` runs one training preset. Phases are sequential within a run
 (later phases warm-start from the previous checkpoint), while separate runs
 can execute concurrently.
@@ -176,6 +184,8 @@ regulonado predict results/train/flashzoi_0/peak_finetune/checkpoint-N \
 ## Guides
 
 - [Build a dataset](docs/building-datasets.md)
+- [The track table](docs/track-table.md)
+- [Track QC](docs/qc.md)
 - [Work alongside SeqNado](docs/seqnado-interop.md)
 - [Calculate and apply normalization](docs/normalization.md)
 - [Train and change configuration](docs/training.md)

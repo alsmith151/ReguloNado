@@ -1,0 +1,121 @@
+# HL-60 enhancer design workflow translated from scripts/design_hl60_slurm.sh.
+# The workflow expects the four trained fold directories under results_dir/train.
+# Set train.runs.*.pretrained_model to the base Borzoi/flashzoi model used by
+# those runs if Snakemake needs to (re)build training outputs.
+
+results_dir: /ceph/project/milne_group/asmith/Projects/2026-08-04-aml-bm-atlas/data/regulonado_models
+
+inputs:
+  intervals: /project/milne_group/asmith/Projects/2025-07-19-myeloid-specific-enhancer-identification/sequences_human.bed.gz
+  fasta: /project/milne_group/shared/seqnado_reference/hg38/UCSC/sequence/hg38.fa
+  bigwig_dir: /project/milne_group/asmith/Projects/2026-08-04-aml-bm-atlas/seqnado_output/atac/bigwigs/bamnado/unscaled
+
+build:
+  context_length: 524288
+  bin_size: 32
+  n_pred_bins: 6144
+  shift_max_bp: 64
+  extract_threads: 32
+  arrow_write_threads: 4
+  arrow_batch_size: 512
+  compression: lz4
+  stage_to_scratch: true
+  drop_missing: true
+  dedupe_tracks: content
+
+recompress:
+  # Reuse the existing Arrow dataset directly.
+  enabled: false
+  zstd_level: 3
+  max_batch_size: 4
+  workers: 8
+
+scaling:
+  method: anchor
+  anchor_regions: /ceph/project/milne_group/asmith/Projects/2026-08-19-unique-enhancer-finding/resources/common_essential_windows.bed
+  background_regions: /ceph/project/milne_group/asmith/Projects/2026-08-19-unique-enhancer-finding/data/interim/01-track-qc/null-windows.parquet
+  heldout_regions: /ceph/project/milne_group/asmith/Projects/2026-08-19-unique-enhancer-finding/resources/common_essential_windows_heldout.bed
+  window_stat_bp: 1000
+  background_sample: 5000
+
+qc:
+  # Keep degenerate tracks in tracks.parquet — quality=failed stays visible in
+  # scale_quality, but nothing is dropped (qc.drop_degenerate defaults false).
+  checks: [anchor]
+  drop_degenerate: false
+
+train:
+  nproc_per_node: 1
+  phases:
+    - name: peak_finetune
+      preset: peak_finetune
+  common:
+    data.apply_squash: false
+    trainer:
+      num_workers: 8
+      report_to: [wandb]
+  runs:
+    - name: fold_0
+      seed: 0
+      pretrained_model: /path/to/pretrained/model
+    - name: fold_1
+      seed: 1
+      pretrained_model: /path/to/pretrained/model
+    - name: fold_2
+      seed: 2
+      pretrained_model: /path/to/pretrained/model
+    - name: fold_3
+      seed: 3
+      pretrained_model: /path/to/pretrained/model
+
+attribution:
+  # Pre-select the signal-driving core of each candidate before design.
+  candidates: hl60_specific_shortlist.bed
+  shards: 8
+  runs: [fold_0, fold_1, fold_2]
+  common:
+    stride: 1
+    smooth_bp: 25
+    min_zscore: 1.5
+    fix_width: 250
+    anchor: centroid
+    bigwig: true
+  targets:
+    - name: hl60
+      track: atac_hl60
+      settings:
+        quantile: 0.92
+
+design:
+  # Automatically consumes attribution/hl60/core_regions.bed.
+  candidates: /ceph/project/milne_group/asmith/Projects/2026-08-04-aml-bm-atlas/data/regulonado_models/attribution/hl60/core_regions.bed
+  shards: 8
+  design_runs: [fold_0, fold_1, fold_2]
+  holdout_run: fold_3
+  # To reuse existing checkpoints and skip the training DAG, replace the two
+  # run-based settings above with explicit checkpoint directories:
+  # checkpoint_dirs:
+  #   - /path/to/fold_0/checkpoint
+  #   - /path/to/fold_1/checkpoint
+  #   - /path/to/fold_2/checkpoint
+  # holdout_checkpoint: /path/to/fold_3/checkpoint
+  common:
+    fold_mode: sequential
+    on_missing: skip
+    batch_size: 8
+    wandb: true
+    # Defaults to the shared regulonado-design project with a unique
+    # hl60-<UTC timestamp>-<id> group per pipeline invocation.
+    # wandb_project: regulonado-design
+    # Exact model track names to omit from target/off-target aggregation.
+    # Add one name per list item, for example: [sample_with_high_background].
+    exclude_track: []
+  targets:
+    - name: hl60
+      target: HL-60
+      group_by: source
+      method: ism
+      settings:
+        rounds: 20
+        top_k: 1
+        ism_stride: 1

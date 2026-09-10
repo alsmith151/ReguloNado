@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pandas as pd
 from regulonado.cli.app import app
 from typer.testing import CliRunner
@@ -83,53 +81,39 @@ def test_train_print_config_rejects_wrong_parameter_types(tmp_path):
     assert "batch_size" in result.output
 
 
-def test_enrich_metadata_writes_a_new_file(tmp_path):
-    source = tmp_path / "regulonado_metadata.json"
-    source.write_text(
-        json.dumps(
-            {
-                "final_track_records": [
-                    {"track_index": 0, "bigwig_path": "a.bw"},
-                    {"track_index": 1, "bigwig_path": "b.bw"},
-                ]
-            }
-        )
+def test_tracks_assemble_joins_scale_factors_by_track_name(tmp_path):
+    """'tracks assemble' replaces the deleted 'enrich-metadata' hand-rolled join."""
+    from regulonado.tracks_table import read_track_table, write_track_table
+
+    discovered = tmp_path / "discovered.parquet"
+    write_track_table(
+        pd.DataFrame(
+            [
+                {"track_name": "a", "status": "included", "track_index": 0},
+                {"track_name": "b", "status": "included", "track_index": 1},
+            ]
+        ),
+        discovered,
     )
-    factors = tmp_path / "scale_factors.csv"
+    factors = tmp_path / "scale_factors.parquet"
     pd.DataFrame(
         {
             "track_index": [0, 1],
+            "track_name": ["a", "b"],
             "scale_factor": [2.0, 3.0],
             "clip_soft": [4.0, 5.0],
             "clip_hard": [6.0, 7.0],
         }
-    ).to_csv(factors, index=False)
-    output = tmp_path / "enriched.json"
+    ).to_parquet(factors, index=False)
+    output = tmp_path / "tracks.parquet"
 
     result = runner.invoke(
         app,
-        ["enrich-metadata", str(source), str(factors), "--output", str(output)],
+        ["tracks", "assemble", str(discovered), "-o", str(output), "--scale-factors", str(factors)],
     )
 
     assert result.exit_code == 0, result.output
-    assert "scale_factor" not in json.loads(source.read_text())["final_track_records"][0]
-    records = json.loads(output.read_text())["final_track_records"]
-    assert records[0]["scale_factor"] == 2.0
-    assert records[1]["clip_hard"] == 7.0
-
-
-def test_enrich_metadata_refuses_in_place_output(tmp_path):
-    source = tmp_path / "regulonado_metadata.json"
-    source.write_text(json.dumps({"final_track_records": []}))
-    factors = tmp_path / "scale_factors.csv"
-    pd.DataFrame(
-        columns=["track_index", "scale_factor", "clip_soft", "clip_hard"]
-    ).to_csv(factors, index=False)
-
-    result = runner.invoke(
-        app,
-        ["enrich-metadata", str(source), str(factors), "--output", str(source)],
-    )
-
-    assert result.exit_code != 0
-    assert "must differ" in result.output
+    table = read_track_table(output)
+    row_b = table.set_index("track_name").loc["b"]
+    assert table.set_index("track_name").loc["a", "scale_factor"] == 2.0
+    assert row_b["scale_clip_hard"] == 7.0
