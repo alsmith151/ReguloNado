@@ -21,6 +21,7 @@ def _inverse_signal_transform(
     scale_factors: np.ndarray | None,
     apply_squash: bool,
     apply_scale: bool,
+    background: np.ndarray | None = None,
 ) -> np.ndarray:
     """Reverse the squash and/or scale applied by make_transform.
 
@@ -37,6 +38,8 @@ def _inverse_signal_transform(
     if apply_scale and scale_factors is not None:
         sf = np.asarray(scale_factors, dtype=np.float32).reshape(-1, 1)
         y = y / np.maximum(sf, 1e-8)
+        if background is not None:
+            y = y + np.asarray(background, dtype=np.float32).reshape(-1, 1)
     return y
 
 
@@ -187,6 +190,7 @@ class _EvalPlotCallback(TrainerCallback):
         output_dir: Path,
         track_names: list[str] | None,
         scale_factors: np.ndarray | None = None,
+        background: np.ndarray | None = None,
         apply_squash: bool = True,
         apply_scale: bool = True,
     ) -> None:
@@ -196,6 +200,7 @@ class _EvalPlotCallback(TrainerCallback):
         self._output_dir = output_dir
         self._track_names = track_names
         self._scale_factors = scale_factors
+        self._background = background
         self._apply_squash = apply_squash
         self._apply_scale = apply_scale
 
@@ -237,7 +242,7 @@ class _EvalPlotCallback(TrainerCallback):
         # so the y-axis shows interpretable per-track signal magnitudes.
         def _inv(x: np.ndarray) -> np.ndarray:
             return _inverse_signal_transform(
-                x, self._scale_factors, self._apply_squash, self._apply_scale
+                x, self._scale_factors, self._apply_squash, self._apply_scale, self._background
             )
         preds_plot  = np.stack([_inv(preds_raw[i])  for i in range(preds_raw.shape[0])])
         labels_plot = np.stack([_inv(labels_raw[i]) for i in range(labels_raw.shape[0])])

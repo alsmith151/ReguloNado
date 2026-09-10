@@ -1083,6 +1083,7 @@ def transform_signal(
     scale_factors: np.ndarray,
     clip_soft: np.ndarray | float,
     clip_hard: np.ndarray | float,
+    background: np.ndarray | float | None = None,
     *,
     apply_scale: bool = True,
     apply_squash: bool = True,
@@ -1112,6 +1113,10 @@ def transform_signal(
     np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
     np.maximum(out, 0.0, out=out)
     if apply_scale:
+        if background is not None:
+            bg = np.asarray(background, dtype=np.float32).reshape(-1, 1)
+            out -= bg
+            np.maximum(out, 0.0, out=out)
         out *= sf
     if apply_clip:
         np.minimum(out, ch, out=out)
@@ -1132,6 +1137,7 @@ def transform_signal(
 def inverse_transform_signal(
     signal: np.ndarray,
     scale_factors: np.ndarray | None = None,
+    background: np.ndarray | float | None = None,
     *,
     apply_squash: bool = True,
     apply_scale: bool = True,
@@ -1160,6 +1166,10 @@ def inverse_transform_signal(
         # Reshape to broadcast over last two dims regardless of batch dim.
         sf = sf.reshape(*([1] * (out.ndim - 2)), -1, 1)
         out = out / np.maximum(sf, 1e-8)
+        if background is not None:
+            bg = np.asarray(background, dtype=np.float32)
+            bg = bg.reshape(*([1] * (out.ndim - 2)), -1, 1)
+            out = out + bg
     return out
 
 
@@ -1167,6 +1177,7 @@ def make_transform(
     scale_factors: np.ndarray,
     clip_soft: np.ndarray | float,
     clip_hard: np.ndarray | float,
+    background: np.ndarray | float | None = None,
     *,
     apply_scale: bool = True,
     apply_squash: bool = True,
@@ -1204,15 +1215,25 @@ def make_transform(
     n_tracks = sf.size
     cs = np.broadcast_to(np.asarray(clip_soft, dtype=np.float32), (n_tracks,)).copy()
     ch = np.broadcast_to(np.asarray(clip_hard, dtype=np.float32), (n_tracks,)).copy()
+    bg = (
+        None
+        if background is None
+        else np.broadcast_to(np.asarray(background, dtype=np.float32), (n_tracks,)).copy()
+    )
 
     def _transform_signal(
-        labels: np.ndarray, _sf: np.ndarray, _cs: np.ndarray, _ch: np.ndarray
+        labels: np.ndarray,
+        _sf: np.ndarray,
+        _cs: np.ndarray,
+        _ch: np.ndarray,
+        _bg: np.ndarray | None,
     ) -> np.ndarray:
         return transform_signal(
             labels,
             _sf,
             _cs,
             _ch,
+            background=_bg,
             apply_scale=apply_scale,
             apply_squash=apply_squash,
             apply_clip=apply_clip,
@@ -1238,7 +1259,7 @@ def make_transform(
         out_ids: list[np.ndarray] = []
         out_lbl: list[np.ndarray] = []
         for seq, sig in zip(ids_list, lbl_list):
-            _sf, _cs, _ch = sf, cs, ch
+            _sf, _cs, _ch, _bg = sf, cs, ch, bg
 
             # --- shift crop (always applied when shift buffer was stored)
             if shift_max_bins > 0:
@@ -1263,12 +1284,13 @@ def make_transform(
                         _sf = sf[rc_permutation]
                         _cs = cs[rc_permutation]
                         _ch = ch[rc_permutation]
+                        _bg = None if bg is None else bg[rc_permutation]
                     sig = sig.copy()
 
             if seq is not None:
                 out_ids.append(seq)
             if sig is not None:
-                out_lbl.append(_transform_signal(sig, _sf, _cs, _ch))
+                out_lbl.append(_transform_signal(sig, _sf, _cs, _ch, _bg))
 
         if out_ids:
             batch["input_ids"] = np.stack(out_ids) if batched else out_ids[0]

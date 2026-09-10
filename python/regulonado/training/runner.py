@@ -308,7 +308,7 @@ def constant_track_metadata(records: Sequence[Mapping[str, Any]]) -> dict[str, t
 
 def resolve_scale_and_clip(
     records: Sequence[Mapping[str, Any]],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Extract scale factors and clipping thresholds from track records.
 
     Retrieves per-track normalization and clipping parameters from dataset
@@ -331,7 +331,8 @@ def resolve_scale_and_clip(
     scale_factors = _track_array(records, "scale_factor", dtype=np.float32, fill_value=1.0)
     clip_soft = _track_array(records, "clip_soft", dtype=np.float32, fill_value=348.0)
     clip_hard = _track_array(records, "clip_hard", dtype=np.float32, fill_value=796.0)
-    return scale_factors, clip_soft, clip_hard
+    background = _track_array(records, "background", dtype=np.float32, fill_value=0.0)
+    return scale_factors, clip_soft, clip_hard, background
 
 
 def _build_collate_fn(
@@ -444,7 +445,7 @@ def _apply_dataset_transforms(
     records: Sequence[Mapping[str, Any]],
     data_cfg: Mapping[str, Any],
 ) -> DatasetDict | dict[str, Any]:
-    scale_factors, clip_soft, clip_hard = resolve_scale_and_clip(records)
+    scale_factors, clip_soft, clip_hard, background = resolve_scale_and_clip(records)
     bin_size = int(metadata.get("bin_size", 32))
     shift_max_bp = int(metadata.get("shift_max_bp", 0))
     context_length = int(metadata.get("context_length", data_cfg.get("context_length", 524_288)))
@@ -458,6 +459,7 @@ def _apply_dataset_transforms(
         scale_factors,
         clip_soft,
         clip_hard,
+        background,
         apply_scale=bool(data_cfg.get("apply_scale", True)),
         apply_squash=bool(data_cfg.get("apply_squash", True)),
         apply_clip=bool(data_cfg.get("apply_clip", True)),
@@ -472,6 +474,7 @@ def _apply_dataset_transforms(
         scale_factors,
         clip_soft,
         clip_hard,
+        background,
         apply_scale=bool(data_cfg.get("apply_scale", True)),
         apply_squash=bool(data_cfg.get("apply_squash", True)),
         apply_clip=bool(data_cfg.get("apply_clip", True)),
@@ -1060,7 +1063,7 @@ def run_training(
     )
     collate_fn = _build_collate_fn(track_metadata_tensors)
 
-    scale_factors, _, clip_hard = resolve_scale_and_clip(records)
+    scale_factors, _, clip_hard, background = resolve_scale_and_clip(records)
     labels_already_scaled = bool(
         cfg["data"].get("apply_scale", True)
         or cfg["data"].get("apply_squash", True)
@@ -1163,6 +1166,7 @@ def run_training(
                 output_dir=output_dir,
                 track_names=track_names or None,
                 scale_factors=scale_factors,
+                background=background,
                 apply_squash=bool(cfg["data"].get("apply_squash", True)),
                 apply_scale=bool(cfg["data"].get("apply_scale", True)),
             )
