@@ -63,3 +63,25 @@ def test_trainer_schema_rejects_unknown_keys() -> None:
 
     with pytest.raises(omegaconf.errors.ConfigKeyError):
         omegaconf.OmegaConf.merge(schema, {"not_a_trainer_setting": 1})
+
+
+def test_run_training_rejects_missing_sections_before_dataset_io() -> None:
+    from regulonado.training.runner import run_training
+
+    with pytest.raises(ValueError, match="required section"):
+        run_training({})
+
+
+def test_run_training_rejects_unknown_trainer_setting_before_dataset_io() -> None:
+    from regulonado.training.runner import run_training
+
+    config = {
+        "data": {},
+        "backbone": {},
+        "head": {},
+        "model": {},
+        "loss": {},
+        "trainer": {"not_a_trainer_setting": 1},
+    }
+    with pytest.raises(ValueError, match="Invalid trainer configuration"):
+        run_training(config)
