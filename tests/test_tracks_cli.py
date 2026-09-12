@@ -6,17 +6,13 @@ import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
-pybigtools = pytest.importorskip("pybigtools")
+pytest.importorskip("pybigtools")
 
+from conftest import write_bigwig as _make_bigwig  # noqa: E402
 from regulonado.cli.tracks import tracks_app  # noqa: E402
 from regulonado.tracks_table import read_track_table  # noqa: E402
 
 runner = CliRunner()
-
-
-def _make_bigwig(path, values, size=2000):
-    writer = pybigtools.open(str(path), "w")
-    writer.write({"chr1": size}, iter(values))
 
 
 @pytest.fixture
