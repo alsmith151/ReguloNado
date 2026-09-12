@@ -48,7 +48,7 @@ rule build_dataset:
         str(RESULTS / "logs" / "build_dataset.log"),
     shell:
         r"""
-        regulonado build \
+        regulonado dataset \
             {input.intervals} \
             {input.fasta} \
             {params.out_dir} \

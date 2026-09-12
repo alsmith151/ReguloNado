@@ -9,7 +9,7 @@ seed: 42
 output_dir: ${hydra:runtime.output_dir}
 
 data:
-  # Dataset directory created by `regulonado build`.
+  # Dataset directory created by `regulonado dataset`.
   path: ???
   # Optional enriched metadata file. null uses metadata stored with the dataset.
   metadata_path: null
