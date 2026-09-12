@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 import torch
+from conftest import write_bed as _write_bed
 from regulonado.config.models import AttributionConfig
 from regulonado.design.attribution import (
     AttributionRecord,
@@ -16,8 +15,8 @@ from regulonado.design.attribution import (
     ism_scan,
     write_attributions,
 )
-from regulonado.design.sequence import DatasetWindowIndex, Seed, one_hot, resolve_seeds
-from regulonado.inference import Window
+from regulonado.design.sequence import DatasetWindowIndex, Seed, resolve_seeds
+from regulonado.genomics import Window, one_hot
 
 # Tiny geometry for fast tests, matching tests/test_design.py's convention.
 N_PRED_BINS = 8
@@ -25,11 +24,6 @@ BIN_SIZE = 10
 PRED_BP = N_PRED_BINS * BIN_SIZE  # 80
 CONTEXT = 400
 MOTIF = slice(200, 240)
-
-
-def _write_bed(path: Path, rows: list[tuple]) -> Path:
-    path.write_text("\n".join("\t".join(str(f) for f in row) for row in rows) + "\n")
-    return path
 
 
 def _window() -> Window:
@@ -508,3 +502,39 @@ def test_attribution_config_forbids_unknown_keys():
         AttributionConfig(
             candidates="c.bed", made_up=1, targets=[{"name": "a", "track": "t"}]
         )
+
+
+def test_attribution_config_rejects_topk_bins_without_topk_reduction():
+    """topk_bins is silently ignored by TrackReadout unless reduction='topk' (F03/S5): setting
+    it alongside another reduction is almost certainly a mistake, so the config rejects it."""
+    with pytest.raises(ValueError, match="topk_bins only applies"):
+        AttributionConfig(
+            candidates="c.bed", topk_bins=5, targets=[{"name": "a", "track": "t"}]
+        )
+
+
+def test_attribution_config_allows_default_topk_bins_with_other_reductions():
+    # model_fields_set guards the validator above against false positives: topk_bins left at
+    # its default (never explicitly set) must never trigger it.
+    config = AttributionConfig(
+        candidates="c.bed", bin_reduction="mean", targets=[{"name": "a", "track": "t"}]
+    )
+    assert config.topk_bins == 10
+
+
+def test_attribution_config_rejects_stride_with_positions():
+    """ism_scan ignores stride entirely once positions is given (attribution.py:ism_scan)."""
+    with pytest.raises(ValueError, match="stride is ignored"):
+        AttributionConfig(
+            candidates="c.bed",
+            stride=2,
+            positions="motifs.bed",
+            targets=[{"name": "a", "track": "t"}],
+        )
+
+
+def test_attribution_config_allows_positions_with_default_stride():
+    config = AttributionConfig(
+        candidates="c.bed", positions="motifs.bed", targets=[{"name": "a", "track": "t"}]
+    )
+    assert config.stride == 1

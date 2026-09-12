@@ -7,18 +7,21 @@ import pandas as pd
 import pytest
 import torch
 import torch.nn as nn
+from conftest import TinyBackbone
+from regulonado.genomics import (
+    Window,
+    collapse_bins,
+    one_hot_context,
+    read_chrom_sizes,
+    safe_track_filename,
+)
 from regulonado.inference import (
     RegionPredictionConfig,
     RegionPredictor,
-    Window,
-    _model_track_metadata,
-    _resolve_tracks,
-    _safe_track_filename,
     _unique_track_names,
-    collapse_bins,
     iter_windows,
-    one_hot_context,
-    read_chrom_sizes,
+    model_track_metadata,
+    resolve_tracks,
 )
 from regulonado.model import RegulonadoConfig, RegulonadoModel, TransferMLPPerturbHead
 
@@ -28,19 +31,6 @@ N_PRED_BINS = 4
 BIN_SIZE = 10
 PRED_BP = N_PRED_BINS * BIN_SIZE
 CONTEXT = 100
-
-
-class TinyBackbone(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.proj = nn.Conv1d(4, 8, 1)
-        self.feature_dim = 8
-
-    def forward_features(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.proj(input_ids)
-
-    def iter_named_blocks(self):
-        yield "proj", self.proj
 
 
 class DummyPredictModel(nn.Module):
@@ -107,12 +97,12 @@ def test_collapse_clamps_to_chromosome_length():
 @pytest.mark.parametrize("name", ["../escape", "nested/track", r"nested\track", "track\x00bad"])
 def test_track_filename_rejects_path_components_and_controls(name):
     with pytest.raises(ValueError, match="Track name"):
-        _safe_track_filename(name)
+        safe_track_filename(name)
 
 
 def test_track_filename_rejects_length_overflow():
     with pytest.raises(ValueError, match="too long"):
-        _safe_track_filename("x" * 201)
+        safe_track_filename("x" * 201)
 
 
 # --------------------------------------------------------------------------- #
@@ -140,7 +130,9 @@ def test_iter_windows_targeted_centers_on_bed(tmp_path):
 
 def test_iter_windows_targeted_rejects_overlap(tmp_path):
     bed = tmp_path / "regions.bed"
-    bed.write_text("chr1\t500\t500\nchr1\t510\t510\n")  # centers 20 bp apart < 40 bp window
+    # 1 bp-wide intervals (read_intervals rejects end<=start) whose midpoints match the
+    # original 500/510 zero-width fixture: centers 10 bp apart < 40 bp window.
+    bed.write_text("chr1\t500\t501\nchr1\t510\t511\n")
     with pytest.raises(ValueError, match="Overlapping"):
         iter_windows(
             chrom_sizes=_chrom_sizes(),
@@ -231,10 +223,10 @@ def test_unique_track_names_strips_extensions_and_dedupes():
 
 def test_resolve_tracks_by_name_and_index():
     names = ["alpha", "beta", "gamma"]
-    assert _resolve_tracks(None, names) == [0, 1, 2]
-    assert _resolve_tracks(["beta", "0"], names) == [1, 0]
+    assert resolve_tracks(None, names) == [0, 1, 2]
+    assert resolve_tracks(["beta", "0"], names) == [1, 0]
     with pytest.raises(ValueError, match="Unknown track"):
-        _resolve_tracks(["missing"], names)
+        resolve_tracks(["missing"], names)
 
 
 def test_load_model_for_inference_prefers_hf_model_dir(tmp_path, monkeypatch):
@@ -347,7 +339,7 @@ def test_model_track_metadata_from_config_uses_prediction_tensors():
         head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
     )
 
-    metadata = _model_track_metadata(model, "cpu")
+    metadata = model_track_metadata(model, "cpu")
 
     assert metadata["track_condition_ids"].dtype == torch.long
     assert metadata["track_condition_ids"].tolist() == [0, 1]
@@ -511,12 +503,12 @@ def test_find_weights_falls_back_to_latest_when_no_trainer_state(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_write_and_read_bigwig_roundtrip(tmp_path):
     pybigtools = pytest.importorskip("pybigtools")
-    from regulonado.inference import _write_bigwigs
+    from regulonado.genomics import write_bigwigs
 
     chrom_sizes = {"chr1": 1000}
     values = np.concatenate([np.zeros(50), np.full(50, 3.0)])  # flat then raised
     intervals = collapse_bins(values, "chr1", 0, BIN_SIZE, rtol=0.0, chrom_length=1000)
-    written = _write_bigwigs(tmp_path, ["track0"], [0], {0: intervals}, chrom_sizes)
+    written = write_bigwigs(tmp_path, ["track0"], [0], {0: intervals}, chrom_sizes)
 
     assert len(written) == 1 and written[0].exists()
     bw = pybigtools.open(str(written[0]))

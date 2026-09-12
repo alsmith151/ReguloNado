@@ -11,7 +11,8 @@ from typing import Any
 import numpy as np
 
 from regulonado.design.search import DesignState
-from regulonado.design.sequence import Seed, decode
+from regulonado.design.sequence import Seed
+from regulonado.genomics import decode
 
 __all__ = ["DesignRecord", "write_designs", "hamming_distance"]
 

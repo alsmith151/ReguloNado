@@ -1,62 +1,37 @@
-"""Sequence plumbing for the design module: one-hot arrays and seed resolution.
+"""Sequence plumbing for the design module: seed resolution against dataset windows.
 
 The search operates on ``(4, context_length)`` one-hot arrays taken from the *dataset window*
 that contains each candidate enhancer — the same context the folds were trained and evaluated
 on — rather than re-centring on the candidate. :func:`resolve_seeds` is the entry point: it
 turns a user-supplied candidate BED into :class:`Seed` objects that carry that context plus the
 candidate's editable span in both context and predicted-bin coordinates.
+
+One-hot encode/decode helpers (``one_hot``, ``decode``, ``reverse_complement``) live in
+:mod:`regulonado.genomics`.
 """
 
 from __future__ import annotations
 
 import bisect
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 
-from regulonado.inference import _BASE_LUT, Window, one_hot_context
+from regulonado.genomics import Window, one_hot_context, window_for_interval
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DatasetWindowIndex",
     "Seed",
     "context_bp_to_pred_bins",
-    "decode",
     "fetch_context",
-    "one_hot",
     "resolve_seeds",
-    "reverse_complement",
     "splice",
 ]
-
-
-# --------------------------------------------------------------------------- #
-# One-hot arrays                                                             #
-# --------------------------------------------------------------------------- #
-def one_hot(seq: str) -> np.ndarray:
-    """Encode a DNA string as ``(4, L)`` int8. Unknown bases (incl. N) -> all-zero column."""
-    codes = _BASE_LUT[np.frombuffer(seq.encode("ascii", "replace"), dtype=np.uint8)]
-    out = np.zeros((4, len(seq)), dtype=np.int8)
-    valid = codes >= 0
-    out[codes[valid], np.nonzero(valid)[0]] = 1
-    return out
-
-
-_DECODE_LUT = np.array(list("ACGT"))
-
-
-def decode(one_hot_array: np.ndarray) -> str:
-    """Decode a ``(4, L)`` one-hot array back to a DNA string; all-zero columns -> 'N'."""
-    has_base = one_hot_array.any(axis=0)
-    indices = one_hot_array.argmax(axis=0)
-    chars = np.where(has_base, _DECODE_LUT[indices], "N")
-    return "".join(chars.tolist())
-
-
-def reverse_complement(one_hot_array: np.ndarray) -> np.ndarray:
-    """Reverse-complement a ``(4, L)`` one-hot array (matches ``dataset/build.py``'s convention)."""
-    return np.flip(one_hot_array, axis=(0, 1)).copy()
 
 
 def splice(context: np.ndarray, insert: np.ndarray, start: int) -> np.ndarray:
@@ -71,7 +46,7 @@ def fetch_context(
 ) -> np.ndarray:
     """One-hot encode ``context_length`` bp of context centred on ``center``.
 
-    Thin wrapper over ``inference.Window`` + ``inference.one_hot_context``, which already
+    Thin wrapper over ``genomics.Window`` + ``genomics.one_hot_context``, which already
     zero-pads off chromosome ends.
     """
     ctx_start = center - context_length // 2
@@ -137,8 +112,8 @@ class DatasetWindowIndex:
 
     Dataset windows are reconstructed exactly as the builder does it: centre on the interval
     midpoint, predicted region = centre ± ``n_pred_bins*bin_size/2``, context = centre ±
-    ``context_length/2`` (the same rule as ``dataset/build.py:_signal_intervals`` and
-    ``inference.py:iter_windows``).
+    ``context_length/2`` — see ``genomics.window_for_interval``, the rule shared with
+    ``inference.py:iter_windows``.
     """
 
     def __init__(
@@ -153,6 +128,16 @@ class DatasetWindowIndex:
         self.context_length = context_length
         self.n_pred_bins = n_pred_bins
         self.bin_size = bin_size
+        # Windows are not assumed to share a width (see `containing`) — track the widest one
+        # actually present so the bisect bound stays correct if that ever stops being true.
+        self._max_width = max(
+            (
+                iw.window.pred_end - iw.window.pred_start
+                for windows in by_chrom.values()
+                for iw in windows
+            ),
+            default=n_pred_bins * bin_size,
+        )
 
     @classmethod
     def from_bed(
@@ -163,20 +148,29 @@ class DatasetWindowIndex:
         n_pred_bins: int,
         bin_size: int,
     ) -> "DatasetWindowIndex":
-        from regulonado.dataset.build import _load_bed_rows
+        from regulonado.genomics import read_intervals
 
-        pred_bp = n_pred_bins * bin_size
+        frame = read_intervals(intervals_bed)
+        if "name" in frame.columns:
+            rows = frame[["chrom", "start", "end", "name"]].itertuples(index=False, name=None)
+        else:
+            rows = (
+                (chrom, start, end, "")
+                for chrom, start, end in frame[["chrom", "start", "end"]].itertuples(
+                    index=False, name=None
+                )
+            )
+
         by_chrom: dict[str, list[_IndexedWindow]] = {}
-        for row_index, (chrom, start, end, fold) in enumerate(_load_bed_rows(intervals_bed)):
-            center = (start + end) // 2
-            pred_start = center - pred_bp // 2
-            ctx_start = center - context_length // 2
-            window = Window(
-                chrom=chrom,
-                pred_start=pred_start,
-                pred_end=pred_start + pred_bp,
-                ctx_start=ctx_start,
-                ctx_end=ctx_start + context_length,
+        for row_index, (chrom, start, end, fold) in enumerate(rows):
+            chrom, start, end, fold = str(chrom), int(start), int(end), str(fold)
+            window = window_for_interval(
+                chrom,
+                start,
+                end,
+                context_length=context_length,
+                n_pred_bins=n_pred_bins,
+                bin_size=bin_size,
             )
             by_chrom.setdefault(chrom, []).append(_IndexedWindow(window, fold, row_index))
 
@@ -188,14 +182,24 @@ class DatasetWindowIndex:
         )
 
     def containing(self, chrom: str, start: int, end: int) -> list[_IndexedWindow]:
-        """Windows whose predicted region entirely contains ``[start, end)``."""
+        """Windows whose predicted region entirely contains ``[start, end)``.
+
+        Coordinates are 0-based, half-open (BED convention): a window with predicted region
+        ``[pred_start, pred_end)`` contains ``[start, end)`` iff ``pred_start <= start`` and
+        ``end <= pred_end``. Windows are not assumed to share a width. The candidate bracket is
+        found by bisecting on ``pred_start`` alone using ``self._max_width`` (the widest window
+        actually in the index): any containing window must have ``pred_start <= start`` (or it
+        starts after the candidate), and since its width is at most ``self._max_width``, it must
+        also have ``pred_start >= end - self._max_width`` (or even at its widest it would end
+        before ``end``). Every window in that bracket is then exactly filtered on its own
+        ``pred_end``, so this is correct regardless of per-window width — the bisect only narrows
+        the scan, it never substitutes for the real containment check.
+        """
         windows = self._by_chrom.get(chrom)
         if not windows:
             return []
-        pred_bp = self.n_pred_bins * self.bin_size
         starts = [iw.window.pred_start for iw in windows]
-        # Any window containing `start` has pred_start in [start - pred_bp, start].
-        lo = bisect.bisect_left(starts, start - pred_bp)
+        lo = bisect.bisect_left(starts, end - self._max_width)
         hi = bisect.bisect_right(starts, start)
         return [
             iw
@@ -231,11 +235,23 @@ def resolve_seeds(
     (default) raises listing every offending candidate; ``"center"`` falls back to a synthetic
     window centred on the candidate; ``"skip"`` drops it.
     """
-    from loguru import logger
+    from regulonado.genomics import read_intervals
 
-    from regulonado.dataset.build import _load_bed_rows
-
-    rows = _load_bed_rows(candidates_bed)
+    _frame = read_intervals(candidates_bed)
+    if "name" in _frame.columns:
+        rows = [
+            (str(chrom), int(start), int(end), str(name))
+            for chrom, start, end, name in _frame[
+                ["chrom", "start", "end", "name"]
+            ].itertuples(index=False, name=None)
+        ]
+    else:
+        rows = [
+            (str(chrom), int(start), int(end), "")
+            for chrom, start, end in _frame[["chrom", "start", "end"]].itertuples(
+                index=False, name=None
+            )
+        ]
     seeds: list[Seed] = []
     missing: list[tuple[str, str, int, int]] = []
 
@@ -271,16 +287,13 @@ def resolve_seeds(
             pass
         elif on_missing == "center":
             for name, chrom, start, end in missing:
-                center = (start + end) // 2
-                pred_bp = index.n_pred_bins * index.bin_size
-                pred_start = center - pred_bp // 2
-                ctx_start = center - index.context_length // 2
-                window = Window(
-                    chrom=chrom,
-                    pred_start=pred_start,
-                    pred_end=pred_start + pred_bp,
-                    ctx_start=ctx_start,
-                    ctx_end=ctx_start + index.context_length,
+                window = window_for_interval(
+                    chrom,
+                    start,
+                    end,
+                    context_length=index.context_length,
+                    n_pred_bins=index.n_pred_bins,
+                    bin_size=index.bin_size,
                 )
                 seeds.append(_build_seed(name, chrom, start, end, window, None, index, pad))
         else:

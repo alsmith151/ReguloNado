@@ -5,14 +5,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from conftest import write_bigwig as _make_bigwig
 from regulonado import qc
 
-pybigtools = pytest.importorskip("pybigtools")
-
-
-def _make_bigwig(path, values, size=2000):
-    writer = pybigtools.open(str(path), "w")
-    writer.write({"chr1": size}, iter(values))
+pytest.importorskip("pybigtools")
 
 
 def test_header_stats_flags_constant_tracks(tmp_path):

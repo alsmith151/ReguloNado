@@ -12,7 +12,8 @@ from typing import Callable, Sequence
 
 import numpy as np
 
-from regulonado.design.sequence import Seed, decode, splice
+from regulonado.design.sequence import Seed, splice
+from regulonado.genomics import decode
 
 RoundCallback = Callable[[dict], None]
 

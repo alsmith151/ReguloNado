@@ -33,7 +33,7 @@ class SequencePredictor:
         device: str | None = None,
         batch_size: int = 1,
     ) -> None:
-        from regulonado.inference import _model_track_metadata, load_model_for_inference
+        from regulonado.inference import load_model_for_inference, model_track_metadata
 
         self.model = load_model_for_inference(checkpoint_dir, dataset_dir, device)
         self.model.eval()
@@ -48,7 +48,7 @@ class SequencePredictor:
         first_param = next(self.model.parameters())
         self.device = str(first_param.device)
         self.dtype = first_param.dtype
-        self.track_metadata = _model_track_metadata(self.model, self.device)
+        self.track_metadata = model_track_metadata(self.model, self.device)
         self.batch_size = batch_size
 
     def __call__(self, one_hot_batch):

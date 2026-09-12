@@ -18,6 +18,7 @@ candidate's worth of bins, which is why ``reduction`` is exposed.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
@@ -26,6 +27,8 @@ import numpy as np
 
 from regulonado.design.search import _to_numpy
 from regulonado.design.sequence import Seed
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "AttributionRecord",
@@ -605,10 +608,10 @@ def _write_attribution_bigwig(
     chrom_sizes: dict[str, int],
     rtol: float,
 ) -> None:
-    """Per-base importance track, reusing inference's collapse + pybigtools writer."""
+    """Per-base importance track, reusing genomics' collapse + pybigtools writer."""
     import pandas as pd
 
-    from regulonado.inference import _write_bigwigs, collapse_bins
+    from regulonado.genomics import collapse_bins, drop_overlaps, write_bigwigs
 
     intervals: list[tuple[str, int, int, float]] = []
     for record in records:
@@ -631,24 +634,15 @@ def _write_attribution_bigwig(
 
     # Candidates sharing a dataset window can overlap; pybigtools rejects overlapping intervals.
     frame = pd.DataFrame(intervals, columns=["chrom", "start", "end", "value"])
-    rank = {name: i for i, name in enumerate(chrom_sizes)}
-    frame = frame.sort_values(
-        by=["chrom", "start"], key=lambda col: col.map(rank) if col.name == "chrom" else col
-    ).reset_index(drop=True)
-    prior_end = frame.groupby("chrom")["end"].cummax().shift(fill_value=-1)
-    same_chrom = frame["chrom"].eq(frame["chrom"].shift())
-    overlapping = same_chrom & (frame["start"] < prior_end)
-    if overlapping.any():
-        from loguru import logger
-
+    frame, n_dropped = drop_overlaps(frame, chrom_sizes)
+    if n_dropped:
         logger.warning(
-            f"{int(overlapping.sum())} overlapping interval(s) dropped from attributions.bw — "
-            f"candidates whose scanned spans overlap keep only the first one's profile in the "
-            f"overlap. The per-candidate values in attributions.tsv are unaffected."
+            f"{n_dropped} overlapping interval(s) dropped from attributions.bw — "
+            f"overlapping spans keep only the first one's profile in the overlap. "
+            f"The per-candidate values in attributions.tsv are unaffected."
         )
-    frame = frame[~overlapping]
 
-    _write_bigwigs(
+    write_bigwigs(
         out_dir,
         ["attributions"],
         [0],
@@ -668,7 +662,7 @@ def merge_attribution_bigwig(
     """
     import pandas as pd
 
-    from regulonado.inference import _write_bigwigs, collapse_bins, read_chrom_sizes
+    from regulonado.genomics import collapse_bins, drop_overlaps, read_chrom_sizes, write_bigwigs
 
     out_path = Path(out_path)
     chrom_sizes = read_chrom_sizes(Path(f"{fasta_path}.fai"))
@@ -700,15 +694,15 @@ def merge_attribution_bigwig(
         return out_path
 
     frame = pd.DataFrame(intervals, columns=["chrom", "start", "end", "value"])
-    rank = {chrom: i for i, chrom in enumerate(chrom_sizes)}
-    frame = frame.sort_values(
-        by=["chrom", "start"], key=lambda col: col.map(rank) if col.name == "chrom" else col
-    ).reset_index(drop=True)
-    prior_end = frame.groupby("chrom")["end"].cummax().shift(fill_value=-1)
-    same_chrom = frame["chrom"].eq(frame["chrom"].shift())
-    frame = frame[~(same_chrom & (frame["start"] < prior_end))]
+    frame, n_dropped = drop_overlaps(frame, chrom_sizes)
+    if n_dropped:
+        logger.warning(
+            f"{n_dropped} overlapping interval(s) dropped from {out_path.name} — "
+            f"overlapping spans keep only the first one's profile in the overlap. "
+            f"The per-candidate values in attributions.tsv are unaffected."
+        )
 
-    written = _write_bigwigs(
+    written = write_bigwigs(
         out_path.parent,
         [out_path.stem],
         [0],

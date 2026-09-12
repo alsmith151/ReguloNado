@@ -39,10 +39,25 @@ def intervals_from_bed(
     seed: int = 0,
 ) -> list[tuple[str, int, int]]:
     """Signal windows for QC/scaling, reusing the build's own region geometry."""
-    from regulonado.dataset.build import _load_bed_rows, _signal_intervals  # noqa: PLC0415
+    from regulonado.dataset.build import signal_intervals  # noqa: PLC0415
+    from regulonado.genomics import read_intervals  # noqa: PLC0415
 
-    bed_rows = _load_bed_rows(bed_file)
-    intervals = _signal_intervals(bed_rows, n_pred_bins, bin_size, shift_max_bp)
+    frame = read_intervals(bed_file)
+    if "name" in frame.columns:
+        bed_rows = [
+            (str(chrom), int(start), int(end), str(name))
+            for chrom, start, end, name in frame[["chrom", "start", "end", "name"]].itertuples(
+                index=False, name=None
+            )
+        ]
+    else:
+        bed_rows = [
+            (str(chrom), int(start), int(end), "")
+            for chrom, start, end in frame[["chrom", "start", "end"]].itertuples(
+                index=False, name=None
+            )
+        ]
+    intervals = signal_intervals(bed_rows, n_pred_bins, bin_size, shift_max_bp)
     if sample_n is not None and len(intervals) > sample_n:
         rng = np.random.default_rng(seed)
         intervals = [intervals[i] for i in rng.choice(len(intervals), sample_n, replace=False)]

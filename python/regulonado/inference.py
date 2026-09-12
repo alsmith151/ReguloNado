@@ -14,8 +14,9 @@ Two prediction modes are supported:
 Because only the central region is predicted and windows are stepped by the prediction width,
 windows never overlap on the genome ("center crop only").
 
-Pure Python; ``torch``/``pyfaidx``/``pybigtools`` are imported lazily so the lightweight helpers
-(``iter_windows``, ``collapse_bins``) import without a GPU stack.
+Pure Python; ``torch``/``pyfaidx``/``pybigtools`` are imported lazily so the lightweight helper
+(``iter_windows``) imports without a GPU stack. Sequence/window primitives (``Window``,
+``one_hot_context``, ``collapse_bins``, ``write_bigwigs``) live in :mod:`regulonado.genomics`.
 """
 
 from __future__ import annotations
@@ -29,24 +30,18 @@ from typing import Iterator, Sequence
 
 import numpy as np
 
+from regulonado.genomics import (
+    Window,
+    collapse_bins,
+    one_hot_context,
+    read_chrom_sizes,
+    read_intervals,
+    safe_track_filename,
+    window_for_interval,
+    write_bigwigs,
+)
+
 log = logging.getLogger(__name__)
-
-# Base -> one-hot row. Unknown bases (incl. N) map to an all-zero column.
-_BASE_LUT = np.full(256, -1, dtype=np.int8)
-for _base, _row in {"A": 0, "C": 1, "G": 2, "T": 3}.items():
-    _BASE_LUT[ord(_base)] = _row
-    _BASE_LUT[ord(_base.lower())] = _row
-
-
-@dataclass(slots=True)
-class Window:
-    """A single prediction window: predicted region + surrounding model context."""
-
-    chrom: str
-    pred_start: int  # start of the predicted (central) region, bp
-    pred_end: int  # end of the predicted region, bp (== pred_start + n_pred_bins*bin_size)
-    ctx_start: int  # start of the model input context, bp (may be < 0 near chrom start)
-    ctx_end: int  # end of the model input context, bp (may be > chrom length near chrom end)
 
 
 @dataclass(slots=True)
@@ -258,7 +253,7 @@ def load_model_for_inference(
     return model.to(device)
 
 
-def _model_track_metadata(model: object, device: str) -> dict[str, object]:
+def model_track_metadata(model: object, device: str) -> dict[str, object]:
     """Convert config-stored constant track metadata to tensors for metadata-conditioned heads."""
     import torch
 
@@ -277,35 +272,6 @@ def _model_track_metadata(model: object, device: str) -> dict[str, object]:
 # --------------------------------------------------------------------------- #
 # Window enumeration                                                          #
 # --------------------------------------------------------------------------- #
-def _parse_bed(bed_path: Path) -> list[tuple[str, int, int]]:
-    rows: list[tuple[str, int, int]] = []
-    for line in bed_path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith(("#", "track", "browser")):
-            continue
-        fields = line.split("\t") if "\t" in line else line.split()
-        if len(fields) < 3:
-            continue
-        rows.append((fields[0], int(fields[1]), int(fields[2])))
-    return rows
-
-
-def read_chrom_sizes(path: str | Path) -> dict[str, int]:
-    """Parse a two-column ``chrom<TAB>size`` chrom.sizes file, preserving order."""
-    sizes: dict[str, int] = {}
-    for line in Path(path).read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        fields = line.split("\t") if "\t" in line else line.split()
-        if len(fields) < 2:
-            continue
-        sizes[fields[0]] = int(fields[1])
-    if not sizes:
-        raise ValueError(f"No chromosome sizes parsed from {path}")
-    return sizes
-
-
 def iter_windows(
     *,
     chrom_sizes: dict[str, int],
@@ -330,19 +296,22 @@ def iter_windows(
     windows: list[Window] = []
 
     if bed_path is not None:
-        for chrom, start, end in _parse_bed(Path(bed_path)):
+        _bed_frame = read_intervals(Path(bed_path))
+        for chrom, start, end in _bed_frame[["chrom", "start", "end"]].itertuples(
+            index=False, name=None
+        ):
+            chrom = str(chrom)
+            start, end = int(start), int(end)
             if chrom not in chrom_sizes:
                 raise ValueError(f"BED chromosome {chrom!r} not present in chrom sizes")
-            center = (start + end) // 2
-            pred_start = center - pred_bp // 2
-            ctx_start = center - context_length // 2
             windows.append(
-                Window(
+                window_for_interval(
                     chrom,
-                    pred_start,
-                    pred_start + pred_bp,
-                    ctx_start,
-                    ctx_start + context_length,
+                    start,
+                    end,
+                    context_length=context_length,
+                    n_pred_bins=n_pred_bins,
+                    bin_size=bin_size,
                 )
             )
     else:
@@ -374,80 +343,9 @@ def iter_windows(
 
 
 # --------------------------------------------------------------------------- #
-# Sequence one-hot                                                            #
-# --------------------------------------------------------------------------- #
-def one_hot_context(fasta, window: Window, context_length: int, chrom_length: int) -> np.ndarray:
-    """One-hot encode the model context for ``window`` as an ``int8`` ``(4, context_length)`` array.
-
-    Positions running off either chromosome end are zero-padded (treated as N).
-    """
-    out = np.zeros((4, context_length), dtype=np.int8)
-    fetch_start = max(0, window.ctx_start)
-    fetch_end = min(chrom_length, window.ctx_end)
-    if fetch_end <= fetch_start:
-        return out
-
-    seq = str(fasta[window.chrom][fetch_start:fetch_end])
-    codes = _BASE_LUT[np.frombuffer(seq.encode("ascii", "replace"), dtype=np.uint8)]
-    valid = codes >= 0
-    offset = fetch_start - window.ctx_start
-    cols = np.arange(offset, offset + codes.shape[0])[valid]
-    out[codes[valid], cols] = 1
-    return out
-
-
-# --------------------------------------------------------------------------- #
-# Bin collapsing                                                              #
-# --------------------------------------------------------------------------- #
-def collapse_bins(
-    values: np.ndarray,
-    chrom: str,
-    pred_start: int,
-    bin_size: int,
-    rtol: float,
-    chrom_length: int,
-) -> list[tuple[str, int, int, float]]:
-    """Run-length collapse per-bin values into ``(chrom, start, end, value)`` intervals.
-
-    Adjacent bins are merged while the next bin is within a relative tolerance of the current
-    run's mean: ``abs(v - mean) <= rtol * max(abs(v), abs(mean))`` (so flat zero regions, where
-    both are 0, always merge). Bins are clamped to ``[0, chrom_length)``; empty after clamping
-    are skipped.
-    """
-    intervals: list[tuple[str, int, int, float]] = []
-    run_start = run_end = -1
-    run_sum = 0.0
-    run_count = 0
-
-    def flush() -> None:
-        if run_count:
-            intervals.append((chrom, run_start, run_end, run_sum / run_count))
-
-    for bin_index, raw in enumerate(values):
-        start = pred_start + bin_index * bin_size
-        end = start + bin_size
-        start = max(start, 0)
-        end = min(end, chrom_length)
-        if end <= start:
-            continue
-        v = float(raw)
-        if run_count and start == run_end:
-            mean = run_sum / run_count
-            if abs(v - mean) <= rtol * max(abs(v), abs(mean)):
-                run_end = end
-                run_sum += v
-                run_count += 1
-                continue
-        flush()
-        run_start, run_end, run_sum, run_count = start, end, v, 1
-    flush()
-    return intervals
-
-
-# --------------------------------------------------------------------------- #
 # Orchestration                                                               #
 # --------------------------------------------------------------------------- #
-def _resolve_tracks(tracks: Sequence[str] | None, track_names: Sequence[str]) -> list[int]:
+def resolve_tracks(tracks: Sequence[str] | None, track_names: Sequence[str]) -> list[int]:
     if not tracks:
         return list(range(len(track_names)))
     name_to_index = {name: i for i, name in enumerate(track_names)}
@@ -496,11 +394,11 @@ class RegionPredictor:
         self.track_names = list(
             model_config.track_names or [f"track{i}" for i in range(int(model_config.n_tracks))]
         )
-        self.selected_tracks = _resolve_tracks(config.tracks, self.track_names)
+        self.selected_tracks = resolve_tracks(config.tracks, self.track_names)
         first_param = next(self.model.parameters())
         self.model_device = str(first_param.device)
         self.model_dtype = first_param.dtype
-        self.track_metadata = _model_track_metadata(self.model, self.model_device)
+        self.track_metadata = model_track_metadata(self.model, self.model_device)
         self.fasta = pyfaidx.Fasta(
             str(config.fasta_path),
             as_raw=True,
@@ -552,15 +450,13 @@ class RegionPredictor:
         if start < 0 or end < start:
             raise ValueError("Coordinates must satisfy 0 <= start <= end")
 
-        center = (start + end) // 2
-        pred_bp = self.n_pred_bins * self.bin_size
-        pred_start = center - pred_bp // 2
-        window = Window(
-            chrom=chrom,
-            pred_start=pred_start,
-            pred_end=pred_start + pred_bp,
-            ctx_start=center - self.context_length // 2,
-            ctx_end=center - self.context_length // 2 + self.context_length,
+        window = window_for_interval(
+            chrom,
+            start,
+            end,
+            context_length=self.context_length,
+            n_pred_bins=self.n_pred_bins,
+            bin_size=self.bin_size,
         )
         seq = one_hot_context(
             self.fasta,
@@ -578,20 +474,20 @@ class RegionPredictor:
             values = inverse_transform_signal(values, apply_squash=True, apply_scale=False)
 
         selected = (
-            _resolve_tracks(tracks, self.track_names)
+            resolve_tracks(tracks, self.track_names)
             if tracks is not None
             else self.selected_tracks
         )
         selected_values = values[selected]
         selected_names = [self.track_names[index] for index in selected]
-        pred_end = pred_start + selected_values.shape[-1] * self.bin_size
+        pred_end = window.pred_start + selected_values.shape[-1] * self.bin_size
         return RegionPrediction(
             chrom=chrom,
             query_start=start,
             query_end=end,
             input_start=window.ctx_start,
             input_end=window.ctx_end,
-            pred_start=pred_start,
+            pred_start=window.pred_start,
             pred_end=pred_end,
             bin_size=self.bin_size,
             track_names=selected_names,
@@ -612,13 +508,12 @@ class RegionPredictor:
         if batch_size < 1:
             raise ValueError("batch_size must be >= 1")
         selected = (
-            _resolve_tracks(tracks, self.track_names)
+            resolve_tracks(tracks, self.track_names)
             if tracks is not None
             else self.selected_tracks
         )
         selected_names = [self.track_names[index] for index in selected]
         predictions: list[RegionPrediction] = []
-        pred_bp = self.n_pred_bins * self.bin_size
 
         for coordinate_batch in _chunks(list(coordinates), batch_size):
             windows: list[Window] = []
@@ -630,14 +525,13 @@ class RegionPredictor:
                     )
                 if start < 0 or end < start:
                     raise ValueError("Coordinates must satisfy 0 <= start <= end")
-                center = (start + end) // 2
-                pred_start = center - pred_bp // 2
-                window = Window(
-                    chrom=chrom,
-                    pred_start=pred_start,
-                    pred_end=pred_start + pred_bp,
-                    ctx_start=center - self.context_length // 2,
-                    ctx_end=center - self.context_length // 2 + self.context_length,
+                window = window_for_interval(
+                    chrom,
+                    start,
+                    end,
+                    context_length=self.context_length,
+                    n_pred_bins=self.n_pred_bins,
+                    bin_size=self.bin_size,
                 )
                 windows.append(window)
                 sequences.append(
@@ -712,7 +606,7 @@ def predict_to_bigwig(
     first_param = next(model.parameters())
     model_device = str(first_param.device)
     model_dtype = first_param.dtype
-    track_metadata = _model_track_metadata(model, model_device)
+    track_metadata = model_track_metadata(model, model_device)
     log.info(
         "Model ready — %d tracks, %d bins × %d bp, device=%s",
         len(track_names),
@@ -738,7 +632,7 @@ def predict_to_bigwig(
     if not windows:
         raise ValueError("No prediction windows were produced (empty BED or chromosome list)")
 
-    selected = _resolve_tracks(tracks, track_names)
+    selected = resolve_tracks(tracks, track_names)
     n_batches = (len(windows) + batch_size - 1) // batch_size
     log.info(
         "%d windows across %d chromosome(s), %d selected track(s), %d batch(es)",
@@ -817,7 +711,7 @@ def predict_to_bigwig(
 
     log.info("Writing %d BigWig(s) to %s", len(selected), out_dir)
     if spool_root is None:
-        written = _write_bigwigs(out_dir, track_names, selected, accum, chrom_sizes)
+        written = write_bigwigs(out_dir, track_names, selected, accum, chrom_sizes)
     else:
         written = _write_spooled_bigwigs(
             out_dir, track_names, selected, spool_root, chrom_sizes
@@ -844,7 +738,7 @@ def _write_spooled_bigwigs(
     output_names: set[str] = set()
     chrom_names = list(chrom_sizes)
     for track in selected:
-        track_name = _safe_track_filename(track_names[track])
+        track_name = safe_track_filename(track_names[track])
         if track_name in output_names:
             raise ValueError(f"Track names produce duplicate output filename: {track_name!r}")
         output_names.add(track_name)
@@ -872,53 +766,11 @@ def _write_spooled_bigwigs(
     return written
 
 
-def _write_bigwigs(
-    out_dir: str | Path,
-    track_names: Sequence[str],
-    selected: Sequence[int],
-    accum: dict[int, list[tuple[str, int, int, float]]],
-    chrom_sizes: dict[str, int],
-) -> list[Path]:
-    import pybigtools
-
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    chrom_rank = {name: i for i, name in enumerate(chrom_sizes)}
-    written: list[Path] = []
-    output_names: set[str] = set()
-    for track in selected:
-        intervals = sorted(accum[track], key=lambda r: (chrom_rank[r[0]], r[1]))
-        track_name = _safe_track_filename(track_names[track])
-        if track_name in output_names:
-            raise ValueError(f"Track names produce duplicate output filename: {track_name!r}")
-        output_names.add(track_name)
-        path = out_dir / f"{track_name}.bw"
-        writer = pybigtools.open(str(path), "w")
-        writer.write(chrom_sizes, iter(intervals))
-        written.append(path)
-    return written
-
-
-def _safe_track_filename(name: str) -> str:
-    """Validate a track name before using it as a filesystem component."""
-    if not name or name in {".", ".."} or "/" in name or "\\" in name:
-        raise ValueError(f"Track name is not a safe filename: {name!r}")
-    if any(character in name for character in "\x00\r\n"):
-        raise ValueError(f"Track name contains a control character: {name!r}")
-    if len(name.encode("utf-8")) > 200:
-        raise ValueError("Track name is too long to use as a filename")
-    return name
-
-
 __all__ = [
     "RegionPrediction",
     "RegionPredictionConfig",
     "RegionPredictor",
-    "Window",
-    "collapse_bins",
     "iter_windows",
     "load_model_for_inference",
-    "one_hot_context",
     "predict_to_bigwig",
-    "read_chrom_sizes",
 ]
