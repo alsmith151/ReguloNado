@@ -142,6 +142,6 @@ regulonado tracks assemble results/tracks/_stages/discovered.parquet \
   --output results/tracks/tracks.parquet
 ```
 
-`regulonado build --track-table results/tracks/tracks.parquet ...` then reads scale factors
+`regulonado dataset --track-table results/tracks/tracks.parquet ...` then reads scale factors
 straight from the table it already needs for track identity — there is no separate metadata-
 enrichment step. See [track-table.md](track-table.md) for the full column reference.

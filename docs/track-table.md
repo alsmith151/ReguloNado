@@ -14,7 +14,7 @@ list was passed to `build`, and again by whatever survived dedupe inside the bui
 
 Now: `regulonado tracks discover` resolves raw BigWig sources into one row per track exactly once,
 `regulonado tracks assemble` is the only place a track's final status is decided, and
-`regulonado build --track-table` is the only way to name a track list.
+`regulonado dataset --track-table` is the only way to name a track list.
 
 ## The five statuses
 

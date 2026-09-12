@@ -48,7 +48,7 @@ def recompress_dataset(
         raise typer.Exit(code=1)
 
 
-def build(
+def dataset(
     bed_file: Annotated[Path, typer.Argument(help="BED file; column 4 used as fold label")],
     fasta_file: Annotated[
         Path, typer.Argument(help="Reference genome FASTA (.fai index required)")
@@ -194,7 +194,7 @@ def build(
     \b
     Examples
     --------
-    regulonado build intervals.bed genome.fa out/ \\
+    regulonado dataset intervals.bed genome.fa out/ \\
         --track-table results/tracks/tracks.parquet \\
         --split train:train --split validation:valid \\
         --shift-max-bp 128 --n-extract-threads 16 --stage

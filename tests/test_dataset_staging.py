@@ -218,7 +218,7 @@ def test_same_filesystem_true_within_one_tmp_dir(tmp_path):
     assert _same_filesystem(a, b) is True
 
 
-def test_build_cli_skips_final_reload_for_fast_path(tmp_path, monkeypatch):
+def test_dataset_cli_skips_final_reload_for_fast_path(tmp_path, monkeypatch):
     from regulonado.__main__ import app
 
     runner = CliRunner()
@@ -241,7 +241,7 @@ def test_build_cli_skips_final_reload_for_fast_path(tmp_path, monkeypatch):
     result = runner.invoke(
         app,
         [
-            "build",
+            "dataset",
             str(bed),
             str(fasta),
             str(output_dir),

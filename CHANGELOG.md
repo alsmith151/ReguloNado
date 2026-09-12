@@ -14,6 +14,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Renamed the `regulonado build` CLI command to `regulonado dataset` — the
+  name now matches what it produces.
 - Split monolithic dependency list into focused extras: `data`, `train`, `gpu`,
   `viz`, `dev`, `jupyter`, `test`, `all`.
 - Widened Python version range to `>=3.12,<3.14` for compatibility with the

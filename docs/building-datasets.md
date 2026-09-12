@@ -1,6 +1,6 @@
 # Build a dataset
 
-`regulonado build` combines genomic intervals, reference sequence, and a pre-assembled track table
+`regulonado dataset` combines genomic intervals, reference sequence, and a pre-assembled track table
 into a Hugging Face `DatasetDict`. Track discovery, dedupe, scaling, and QC all happen *before*
 this command, via `regulonado tracks` â€” see [track-table.md](track-table.md) and
 [normalization.md](normalization.md).
@@ -31,7 +31,7 @@ the five `status` values.
 ## Build
 
 ```bash
-regulonado build intervals.bed genome.fa dataset/ \
+regulonado dataset intervals.bed genome.fa dataset/ \
   --track-table results/tracks/tracks.parquet \
   --split train:fold0,fold1,fold2 \
   --split validation:fold4 \
@@ -68,5 +68,5 @@ workflow can perform this step automatically when `recompress.enabled` is true â
 raw `dataset/` build output is a pure intermediate and Snakemake removes it once recompression has
 consumed it.
 
-Use `regulonado build --help` for geometry, compression, shard sizing, and chromosome filtering
+Use `regulonado dataset --help` for geometry, compression, shard sizing, and chromosome filtering
 options; use `regulonado tracks --help` for discovery, dedupe, and QC options.

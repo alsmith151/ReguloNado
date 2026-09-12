@@ -6,8 +6,8 @@ from importlib.metadata import PackageNotFoundError, version
 
 import typer
 from regulonado.cli.attribute import attribute
-from regulonado.cli.build import build, recompress_dataset
 from regulonado.cli.config import config, init
+from regulonado.cli.dataset import dataset, recompress_dataset
 from regulonado.cli.design import design
 from regulonado.cli.normalization import normalization_app
 from regulonado.cli.pipeline import pipeline as _pipeline
@@ -109,7 +109,7 @@ app.command()(config)
 app.command()(init)
 app.command()(train)
 app.command()(recompress_dataset)
-app.command()(build)
+app.command()(dataset)
 app.command()(predict)
 app.command()(design)
 app.command()(attribute)

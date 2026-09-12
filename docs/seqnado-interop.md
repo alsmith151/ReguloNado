@@ -198,7 +198,7 @@ Two commands take SeqNado projects, with different flag names:
 regulonado config --from-seqnado expA=/data/expA/seqnado_output
 
 # Build a dataset directly.
-regulonado build intervals.bed genome.fa dataset/ \
+regulonado dataset intervals.bed genome.fa dataset/ \
   --seqnado-project expA=/data/expA/seqnado_output
 ```
 
@@ -212,7 +212,7 @@ sheet is a normal CSV: edit it to add `source` and `timepoint_minutes`, then run
 the pipeline. A sheet you wrote by hand and named in the config yourself is
 never overwritten.
 
-`regulonado build` accepts a sheet and projects together: `--track-sheet` plus
+`regulonado dataset` accepts a sheet and projects together: `--track-sheet` plus
 `--seqnado-project` resolves the sheet's `sample_id`-only rows against the named
 projects. With projects and no sheet, the sheet is built from the projects
 directly.
@@ -285,7 +285,7 @@ source batch unless the design gave a `group`, or the sheet says otherwise.
 copied between projects. Setting `build.dedupe_tracks: content` hashes track
 contents and keeps one copy of each. `regulonado config` chooses `content`
 automatically when more than one project is configured, and `none` for a single
-project. On the command line, `regulonado build --dedupe-tracks` defaults to
+project. On the command line, `regulonado dataset --dedupe-tracks` defaults to
 `none`.
 
 ## Scaling with SeqNado's factors

@@ -76,7 +76,7 @@ regulonado tracks discover results/tracks/_stages/discovered.parquet --bigwig-di
 regulonado tracks assemble results/tracks/_stages/discovered.parquet \
   --output results/tracks/tracks.parquet
 
-regulonado build intervals.bed genome.fa dataset/ \
+regulonado dataset intervals.bed genome.fa dataset/ \
   --track-table results/tracks/tracks.parquet \
   --split train:fold0,fold1,fold2 \
   --split validation:fold4 \
@@ -148,7 +148,7 @@ can execute concurrently.
 
 The pipeline does not run prediction, create BigWigs, align reads, call peaks,
 or perform QC. Those are separate commands or upstream SeqNado work. It also
-does not replace the standalone commands: use `regulonado build`,
+does not replace the standalone commands: use `regulonado dataset`,
 `regulonado normalization ...`, or `regulonado train` when you need to run one
 stage manually. Snakemake records outputs under `results_dir` and skips stages
 whose declared outputs already exist, so rerunning the same command resumes
