@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import write_bigwig
 from regulonado.dataset.build import inverse_transform_signal, transform_signal
 from regulonado.normalization import anchor_scale_factors, track_window_stat
 
@@ -42,10 +44,9 @@ def test_anchor_background_transform_round_trip():
     np.testing.assert_allclose(recovered, signal)
 
 
-def _write_bigwig(path: Path, values: list[tuple[str, int, int, float]], size: int = 3000) -> None:
-    pybigtools = pytest.importorskip("pybigtools")
-    writer = pybigtools.open(str(path), "w")
-    writer.write({"chr1": size}, iter(sorted(values, key=lambda v: v[1])))
+# This file's tracks are longer than the shared default (2000 bp), so pin the
+# larger size used throughout while reusing the shared writer/sort behaviour.
+_write_bigwig = partial(write_bigwig, size=3000)
 
 
 def _write_bed(path: Path, rows: list[tuple[int, int]]) -> None:

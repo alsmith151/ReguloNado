@@ -10,6 +10,7 @@ from typing import Literal, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
+from scipy.stats import rankdata
 from tqdm import tqdm
 
 BAMNADO = os.environ.get("BAMNADO", "bamnado")
@@ -32,9 +33,9 @@ def read_regions(path: Path) -> list[tuple[str, int, int]]:
             (str(chrom), int(start), int(end))
             for chrom, start, end in frame[cols].itertuples(index=False, name=None)
         ]
-    import bioframe as bf
+    from regulonado.genomics import read_intervals
 
-    frame = bf.read_table(str(path), schema="bed")
+    frame = read_intervals(path)
     return [
         (str(chrom), int(start), int(end))
         for chrom, start, end in frame[["chrom", "start", "end"]].itertuples(
@@ -153,6 +154,15 @@ def _check_bamnado() -> None:
 
 
 def infer_scale_factor(bw: Path) -> pd.Series:
+    """Infer one BigWig's raw-count scale factor and library size via bamnado.
+
+    Runs ``bamnado bigwig-infer-scale`` on ``bw`` and returns its JSON result
+    (``scale_factor``, ``library_size``, ...) as a ``pd.Series``, augmented
+    with ``samplename`` (the file stem) and the resolved ``path``. If bamnado
+    fails, logs a warning and falls back to ``scale_factor=1.0,
+    library_size=0`` rather than raising, so a single bad track does not
+    abort a batch run via :func:`infer_scale_factors`.
+    """
     path = bw.resolve()
     cmd = [BAMNADO, "bigwig-infer-scale", "--bigwig", str(path), "--format", "json"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -181,6 +191,16 @@ def infer_scale_factors(
     bw_files: list[Path],
     max_workers: int = 16,
 ) -> pd.DataFrame:
+    """Infer raw-count scale factors and library sizes for many BigWigs.
+
+    Runs :func:`infer_scale_factor` over ``bw_files`` concurrently (bamnado
+    is invoked once per file as a subprocess) and collects the results into
+    one DataFrame, in completion order rather than input order.
+
+    Raises:
+        RuntimeError: if the ``bamnado`` binary is not on PATH (see
+            :func:`_check_bamnado`).
+    """
     _check_bamnado()
     rows: list[pd.Series] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -220,6 +240,124 @@ def compute_clip_thresholds(
     return df
 
 
+def _tmm_reference_index(counts: np.ndarray, lib: np.ndarray) -> int:
+    """Pick the edgeR TMM reference column.
+
+    edgeR's ``.calcFactorQuantile`` computes the 75th-percentile of
+    *count / library_size* (not of the raw counts) for every track, then
+    picks the track whose value is closest to the cross-track mean. Using
+    raw-count quantiles instead (as an earlier version of this function did)
+    can select a different reference track whenever library sizes differ
+    across tracks, silently changing every downstream M/A comparison.
+    """
+    rate = counts / lib[np.newaxis, :]
+    uq75 = np.quantile(rate, 0.75, axis=0)
+    return int(np.argmin(np.abs(uq75 - uq75.mean())))
+
+
+def _tmm_pair_factor(
+    obs_counts: np.ndarray,
+    ref_counts: np.ndarray,
+    lib_obs: float,
+    lib_ref: float,
+    *,
+    trim_m: float,
+    trim_a: float,
+    min_count: float,
+) -> float:
+    """Compute one track's raw (pre-renormalisation) TMM factor vs the reference.
+
+    Mirrors edgeR's ``.calcFactorTMM`` exactly:
+
+    - M = log2((obs/lib_obs) / (ref/lib_ref)), A = 0.5*log2((obs/lib_obs)*(ref/lib_ref)).
+    - Regions are kept by *rank* position (edgeR's ``rank()``-based cutoffs),
+      not by interpolated quantile boundaries — the two disagree whenever M or A
+      contain ties, which is common with integer-like pseudo-counts.
+    - The weighted mean of M uses precision weights ``1/v`` (inverse of the
+      binomial-approximation variance ``v``); weighting by ``v`` directly (as an
+      earlier version of this function did) inverts the intended effect, giving
+      the *least* reliable (highest-variance) regions the most influence.
+    """
+    mask = (obs_counts >= min_count) & (ref_counts >= min_count)
+    if mask.sum() < 10:
+        return 1.0
+
+    obs_m, ref_m = obs_counts[mask], ref_counts[mask]
+    M = np.log2(obs_m / lib_obs) - np.log2(ref_m / lib_ref)
+    A = 0.5 * (np.log2(obs_m / lib_obs) + np.log2(ref_m / lib_ref))
+
+    valid = np.isfinite(M) & np.isfinite(A)
+    M, A = M[valid], A[valid]
+    obs_m, ref_m = obs_m[valid], ref_m[valid]
+    n = len(M)
+    if n < 10:
+        return 1.0
+
+    lo_m = np.floor(n * trim_m) + 1
+    hi_m = n + 1 - lo_m
+    lo_a = np.floor(n * trim_a) + 1
+    hi_a = n + 1 - lo_a
+    rank_m = rankdata(M)
+    rank_a = rankdata(A)
+    keep = (rank_m >= lo_m) & (rank_m <= hi_m) & (rank_a >= lo_a) & (rank_a <= hi_a)
+    if keep.sum() < 5:
+        return 1.0
+
+    M_k, obs_k, ref_k = M[keep], obs_m[keep], ref_m[keep]
+
+    # Binomial-approximation variance of M; precision weight is its inverse.
+    variance = (lib_obs - obs_k) / (lib_obs * obs_k) + (lib_ref - ref_k) / (lib_ref * ref_k)
+    variance = np.maximum(variance, 1e-10)
+    weight = 1.0 / variance
+
+    return float(2.0 ** (np.sum(weight * M_k) / np.sum(weight)))
+
+
+def _tmm_from_counts(
+    counts: np.ndarray,
+    lib: np.ndarray,
+    *,
+    trim_m: float = 0.3,
+    trim_a: float = 0.05,
+    min_count: float = 1.0,
+) -> np.ndarray:
+    """Compute edgeR-equivalent TMM factors from a pseudo-count matrix.
+
+    Pure counts -> factors kernel, factored out of :func:`compute_tmm_factors`
+    so it can be golden-tested directly against edgeR::calcNormFactors output
+    without going through the RPKM->pseudo-count conversion.
+
+    Args:
+        counts: (n_samples, n_tracks) non-negative pseudo-counts.
+        lib:    (n_tracks,) library sizes used to normalise counts to rates.
+
+    Returns:
+        (n_tracks,) TMM factors normalised to geometric mean = 1.
+    """
+    n_tracks = counts.shape[1]
+    ref_idx = _tmm_reference_index(counts, lib)
+    ref_counts = counts[:, ref_idx]
+    lib_ref = lib[ref_idx]
+
+    tmm = np.ones(n_tracks, dtype=np.float64)
+    for k in range(n_tracks):
+        if k == ref_idx:
+            continue
+        tmm[k] = _tmm_pair_factor(
+            counts[:, k],
+            ref_counts,
+            lib[k],
+            lib_ref,
+            trim_m=trim_m,
+            trim_a=trim_a,
+            min_count=min_count,
+        )
+
+    # Normalise to geometric mean = 1 so no track is arbitrarily chosen as baseline
+    tmm /= np.exp(np.mean(np.log(tmm)))
+    return tmm
+
+
 def compute_tmm_factors(
     means: np.ndarray,
     library_sizes: np.ndarray,
@@ -231,20 +369,31 @@ def compute_tmm_factors(
 ) -> np.ndarray:
     """Compute edgeR-style TMM normalisation factors from per-region mean RPKM.
 
-    Each row of ``means`` is one genomic region (~200 kb).  The algorithm is
-    identical to edgeR::calcNormFactors(method="TMM"):
+    Each row of ``means`` is one genomic region (~200 kb).  The algorithm
+    matches edgeR::calcNormFactors(method="TMM") called with an explicit
+    ``lib.size`` (verified against edgeR 4.8.2 to machine precision — see
+    ``tests/test_normalization_tmm.py`` and ``tests/data/tmm/``):
 
     1. Convert mean RPKM to pseudo-counts using library sizes.
-    2. Pick the reference track whose 75th-percentile pseudo-count is closest
-       to the cross-track mean (edgeR default).
-    3. For each track k vs reference r:
+    2. Pick the reference track whose 75th-percentile *count/library_size*
+       rate is closest to the cross-track mean (edgeR default; see
+       :func:`_tmm_reference_index`).
+    3. For each track k vs reference r (see :func:`_tmm_pair_factor`):
        - Compute M = log2(y_k / y_r) and A = 0.5*(log2 y_k + log2 y_r)
          where y = count / library_size.
-       - Trim the top/bottom ``trim_m`` of M and ``trim_a`` of A.
-       - Weighted mean of remaining M values (precision weights from a
-         binomial model).
+       - Trim the top/bottom ``trim_m`` of M and ``trim_a`` of A by rank.
+       - Weighted mean of remaining M values, weighted by inverse variance
+         under a binomial count model.
        - TMM_k = 2 ^ weighted_mean_M.
     4. Normalise so the geometric mean of all factors equals 1.
+
+    Note that ``library_sizes`` here is deliberately independent of
+    ``means``: ``means`` covers only the curated normalisation regions,
+    while ``library_sizes`` is each track's true whole-library mapped-read
+    count. This mirrors calling edgeR with an explicit ``lib.size`` that
+    differs from ``colSums`` of the input matrix, and is why this kernel is
+    hand-rolled rather than delegated to a library (e.g. rnanorm) whose TMM
+    implementation always derives library size from the input matrix itself.
 
     Args:
         means:             (n_samples, n_tracks) mean RPKM per region.
@@ -263,62 +412,11 @@ def compute_tmm_factors(
     """
     means = np.asarray(means, dtype=np.float64)
     lib = np.asarray(library_sizes, dtype=np.float64)
-    n_samples, n_tracks = means.shape
 
     # Pseudo-counts: mean_RPKM * region_kb * (lib / 1e6)
     counts = means * (region_length_kb * lib[np.newaxis, :] / 1e6)  # (n_samples, n_tracks)
 
-    # Reference: track with 75th-percentile pseudo-count closest to cross-track mean
-    uq75 = np.nanquantile(counts, 0.75, axis=0)
-    ref_idx = int(np.argmin(np.abs(uq75 - uq75.mean())))
-
-    ref_counts = counts[:, ref_idx]
-    L_r = lib[ref_idx]
-
-    tmm = np.ones(n_tracks, dtype=np.float64)
-
-    for k in range(n_tracks):
-        if k == ref_idx:
-            continue
-
-        N_k = counts[:, k]
-        L_k = lib[k]
-
-        mask = (N_k >= min_count) & (ref_counts >= min_count)
-        if mask.sum() < 10:
-            continue
-
-        N_k_m, N_r_m = N_k[mask], ref_counts[mask]
-
-        M = np.log2(N_k_m / L_k) - np.log2(N_r_m / L_r)
-        A = 0.5 * (np.log2(N_k_m / L_k) + np.log2(N_r_m / L_r))
-
-        valid = np.isfinite(M) & np.isfinite(A)
-        M, A = M[valid], A[valid]
-        N_k_m, N_r_m = N_k_m[valid], N_r_m[valid]
-
-        if len(M) < 10:
-            continue
-
-        m_lo, m_hi = np.quantile(M, [trim_m, 1.0 - trim_m])
-        a_lo, a_hi = np.quantile(A, [trim_a, 1.0 - trim_a])
-        keep = (M >= m_lo) & (M <= m_hi) & (A >= a_lo) & (A <= a_hi)
-
-        if keep.sum() < 5:
-            continue
-
-        M_k = M[keep]
-        N_k_f, N_r_f = N_k_m[keep], N_r_m[keep]
-
-        # Precision weights: inverse variance under a binomial count model
-        w = (L_k - N_k_f) / (L_k * N_k_f) + (L_r - N_r_f) / (L_r * N_r_f)
-        w = np.maximum(w, 1e-10)
-
-        tmm[k] = 2.0 ** (np.sum(w * M_k) / np.sum(w))
-
-    # Normalise to geometric mean = 1 so no track is arbitrarily chosen as baseline
-    tmm /= np.exp(np.mean(np.log(tmm)))
-    return tmm
+    return _tmm_from_counts(counts, lib, trim_m=trim_m, trim_a=trim_a, min_count=min_count)
 
 
 def compute_bamnado_norm_factors(
@@ -380,6 +478,12 @@ def save_scale_factors(
     output: Path,
     fmt: Literal["csv", "parquet"] = "parquet",
 ) -> None:
+    """Write a scale-factors DataFrame to ``output``, creating parent dirs.
+
+    ``fmt`` selects the on-disk format independently of ``output``'s
+    extension: ``"parquet"`` (default) writes Parquet, anything else writes
+    CSV.
+    """
     output.parent.mkdir(parents=True, exist_ok=True)
     if fmt == "parquet":
         df.to_parquet(output, index=False)
