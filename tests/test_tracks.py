@@ -5,10 +5,23 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+import pandas as pd
 import pytest
 import yaml
 from regulonado._seqnado import seqnado_available
-from regulonado.tracks import PROJECT_SEPARATOR, TrackSheet
+from regulonado.tracks import (
+    PROJECT_SEPARATOR,
+    GenomeMismatchError,
+    TrackRecord,
+    TrackSheet,
+    _apply_sample_filters,
+    _check_genome_consistency,
+    _filter_seqnado_index,
+    _resolve_track_record,
+    _track_record_from_csv_row,
+    _track_records_from_seqnado_index,
+    _unique_project_names,
+)
 
 requires_seqnado = pytest.mark.skipif(
     not seqnado_available(),
@@ -282,6 +295,287 @@ def test_require_resolved_names_the_unresolved_sample(tmp_path):
 
     with pytest.raises(ValueError, match="dangling_sample"):
         sheet.require_resolved()
+
+
+# ---------------------------------------------------------------------- #
+#  Extracted helpers (independently testable without a SeqNado install)   #
+# ---------------------------------------------------------------------- #
+
+
+def test_track_record_from_csv_row_derives_sample_id_from_bigwig_stem(tmp_path):
+    record = _track_record_from_csv_row(
+        {"bigwig": "signals/a.bigWig", "condition": "DMSO"},
+        index=0,
+        base=tmp_path,
+        path=tmp_path / "sheet.csv",
+    )
+
+    assert record.sample_id == "a"
+    assert record.track_name == "a"
+    assert record.bigwig == (tmp_path / "signals" / "a.bigWig").resolve()
+    assert record.condition == "DMSO"
+
+
+def test_track_record_from_csv_row_raises_without_any_identifier(tmp_path):
+    with pytest.raises(ValueError, match="row 1 has none of"):
+        _track_record_from_csv_row(
+            {"condition": "DMSO"}, index=0, base=tmp_path, path=tmp_path / "sheet.csv"
+        )
+
+
+def test_track_record_from_csv_row_cleans_na_like_values(tmp_path):
+    record = _track_record_from_csv_row(
+        {"sample_id": "a", "bigwig": "a.bigWig", "condition": "NA"},
+        index=0,
+        base=tmp_path,
+        path=tmp_path / "sheet.csv",
+    )
+
+    assert record.condition is None
+
+
+def test_unique_project_names_defaults_to_the_output_dirs_parent(tmp_path):
+    entries = [
+        {"path": tmp_path / "expA" / "seqnado_output"},
+        {"name": "custom", "path": tmp_path / "expB" / "seqnado_output"},
+    ]
+
+    assert _unique_project_names(entries) == ["expA", "custom"]
+
+
+def test_unique_project_names_raises_on_duplicates():
+    entries = [{"name": "expA", "path": "x"}, {"name": "expA", "path": "y"}]
+
+    with pytest.raises(ValueError, match="Project names must be unique"):
+        _unique_project_names(entries)
+
+
+def test_check_genome_consistency_allows_matching_genomes():
+    _check_genome_consistency(
+        {"a": "hg38", "b": "hg38"}, [], single=False, assume_same_genome=False
+    )
+
+
+def test_check_genome_consistency_raises_on_mismatch():
+    with pytest.raises(GenomeMismatchError, match="different reference genomes"):
+        _check_genome_consistency(
+            {"a": "hg38", "b": "mm10"}, [], single=False, assume_same_genome=False
+        )
+
+
+def test_check_genome_consistency_raises_on_unknown_genome_unless_assumed():
+    with pytest.raises(GenomeMismatchError, match="Could not read the reference genome"):
+        _check_genome_consistency({}, ["a"], single=False, assume_same_genome=False)
+
+    # No raise once the caller opts in.
+    _check_genome_consistency({}, ["a"], single=False, assume_same_genome=True)
+
+
+def test_check_genome_consistency_ignores_unknown_genome_for_a_single_project():
+    _check_genome_consistency({}, ["a"], single=True, assume_same_genome=False)
+
+
+def _catalogue_entry(**overrides):
+    entry = {
+        "bigwig": Path("/data/a.bigWig"),
+        "bam": Path("/data/a.bam"),
+        "assay": "ChIP",
+        "method": "deeptools",
+        "scale": "unscaled",
+        "metadata": {"condition": "DMSO", "antibody": "CTCF", "group": None},
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_resolve_track_record_fills_blanks_from_the_catalogue():
+    record = TrackRecord(sample_id="a")
+    catalogue = {"expA": {"a": _catalogue_entry()}}
+
+    _resolve_track_record(
+        record,
+        catalogue,
+        default_project="expA",
+        namespaced=False,
+        method="deeptools",
+        scale="unscaled",
+    )
+
+    assert record.project == "expA"
+    assert record.bigwig == Path("/data/a.bigWig")
+    assert record.bam == Path("/data/a.bam")
+    assert record.condition == "DMSO"
+    assert record.ip == "CTCF"
+    assert record.track_name == "a"
+
+
+def test_resolve_track_record_keeps_explicit_sheet_values():
+    record = TrackRecord(sample_id="a", condition="corrected")
+    catalogue = {"expA": {"a": _catalogue_entry()}}
+
+    _resolve_track_record(
+        record, catalogue, default_project="expA", namespaced=False, method=None, scale=None
+    )
+
+    assert record.condition == "corrected"
+
+
+def test_resolve_track_record_namespaces_track_name_with_several_projects():
+    record = TrackRecord(sample_id="a", project="expA")
+    catalogue = {"expA": {"a": _catalogue_entry()}, "expB": {}}
+
+    _resolve_track_record(
+        record, catalogue, default_project=None, namespaced=True, method=None, scale=None
+    )
+
+    assert record.track_name == f"expA{PROJECT_SEPARATOR}a"
+
+
+def test_resolve_track_record_raises_without_project_when_several_are_configured():
+    record = TrackRecord(sample_id="a")
+    catalogue = {"expA": {}, "expB": {}}
+
+    with pytest.raises(ValueError, match="has no 'bigwig' path and no 'project'"):
+        _resolve_track_record(
+            record, catalogue, default_project=None, namespaced=True, method=None, scale=None
+        )
+
+
+def test_resolve_track_record_raises_for_an_unconfigured_project():
+    record = TrackRecord(sample_id="a", project="expC")
+    catalogue = {"expA": {}}
+
+    with pytest.raises(ValueError, match="not configured"):
+        _resolve_track_record(
+            record, catalogue, default_project=None, namespaced=False, method=None, scale=None
+        )
+
+
+def test_resolve_track_record_raises_for_a_sample_missing_from_its_project():
+    record = TrackRecord(sample_id="missing", project="expA")
+    catalogue = {"expA": {"a": _catalogue_entry()}}
+
+    with pytest.raises(ValueError, match="not found in project"):
+        _resolve_track_record(
+            record,
+            catalogue,
+            default_project=None,
+            namespaced=False,
+            method="deeptools",
+            scale="unscaled",
+        )
+
+
+def test_filter_seqnado_index_filters_by_method_scale_and_merged():
+    index = pd.DataFrame(
+        {
+            "sample": ["a", "b", "c"],
+            "method": ["deeptools", "deeptools", "bamCoverage"],
+            "scale": ["unscaled", "spikein", "unscaled"],
+            "merged": [False, False, True],
+            "strand": [None, None, None],
+        }
+    )
+
+    filtered = _filter_seqnado_index(
+        index, method="deeptools", scale="unscaled", merged=False, keep_stranded=False
+    )
+
+    assert list(filtered["sample"]) == ["a"]
+
+
+def test_filter_seqnado_index_drops_stranded_tracks_unless_kept():
+    index = pd.DataFrame(
+        {
+            "sample": ["a", "b"],
+            "method": ["deeptools", "deeptools"],
+            "scale": ["unscaled", "unscaled"],
+            "merged": [False, False],
+            "strand": [None, "+"],
+        }
+    )
+
+    dropped = _filter_seqnado_index(
+        index, method=None, scale=None, merged=None, keep_stranded=False
+    )
+    assert list(dropped["sample"]) == ["a"]
+
+    kept = _filter_seqnado_index(index, method=None, scale=None, merged=None, keep_stranded=True)
+    assert list(kept["sample"]) == ["a", "b"]
+
+
+class _FakeSeqNadoProject:
+    """Duck-typed stand-in for SeqNadoProject; enough for the ingestion helpers."""
+
+    def __init__(self, *, allowed_paths=None, metadata=None):
+        self._allowed = allowed_paths or []
+        self._metadata = metadata or {}
+
+    def bigwigs(self, **filters):
+        return self._allowed
+
+    def metadata_for(self, sample):
+        return self._metadata.get(sample)
+
+
+def test_apply_sample_filters_restricts_to_seqnados_own_selection(tmp_path):
+    kept = tmp_path / "kept.bigWig"
+    dropped = tmp_path / "dropped.bigWig"
+    kept.touch()
+    dropped.touch()
+    index = pd.DataFrame({"path": [str(kept), str(dropped)]})
+    project = _FakeSeqNadoProject(allowed_paths=[kept])
+
+    filtered = _apply_sample_filters(index, project, {"condition": "DMSO"})
+
+    assert list(filtered["path"]) == [str(kept)]
+
+
+def test_apply_sample_filters_is_a_no_op_without_filters():
+    index = pd.DataFrame({"path": ["a", "b"]})
+
+    filtered = _apply_sample_filters(index, project=None, filters={})
+
+    assert filtered is index
+
+
+def test_track_records_from_seqnado_index_maps_antibody_back_to_ip():
+    index = pd.DataFrame(
+        {
+            "sample": ["CTCF_DMSO"],
+            "path": ["/out/CTCF_DMSO.bigWig"],
+            "method": ["deeptools"],
+            "scale": ["unscaled"],
+        }
+    )
+    project = _FakeSeqNadoProject(
+        metadata={"CTCF_DMSO": {"antibody": "CTCF", "condition": "DMSO"}}
+    )
+
+    records = _track_records_from_seqnado_index(
+        index, project, bams={}, project_name=None, assay="ChIP"
+    )
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.track_name == "CTCF_DMSO"
+    assert record.ip == "CTCF"
+    assert record.condition == "DMSO"
+    assert record.assay == "ChIP"
+
+
+def test_track_records_from_seqnado_index_namespaces_track_name_with_project():
+    index = pd.DataFrame(
+        {"sample": ["a"], "path": ["/out/a.bigWig"], "method": ["deeptools"], "scale": ["unscaled"]}
+    )
+    project = _FakeSeqNadoProject()
+
+    records = _track_records_from_seqnado_index(
+        index, project, bams={}, project_name="expA", assay="ChIP"
+    )
+
+    assert records[0].track_name == f"expA{PROJECT_SEPARATOR}a"
+    assert records[0].project == "expA"
 
 
 # ---------------------------------------------------------------------- #

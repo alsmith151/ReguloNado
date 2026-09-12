@@ -28,8 +28,9 @@ SCHEMA_VERSION = "1"
 STATUSES = ("included", "dropped_duplicate", "missing", "qc_failed", "excluded")
 
 # Sheet/discovery label columns -> the categorical id field derived at load time.
-# Mirrors regulonado.tracks.CATEGORICAL_FIELDS; ids are never stored, only labels,
-# so they are always recomputed by sorted factorisation (see to_track_records).
+# Canonical definition; regulonado.tracks imports this. Ids are never stored,
+# only labels, so they are always recomputed by sorted factorisation (see
+# TrackSheet.to_track_records).
 CATEGORICAL_FIELDS: dict[str, str] = {
     "condition": "condition_id",
     "source": "source_id",

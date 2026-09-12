@@ -19,13 +19,20 @@ does and does not guarantee.
 from __future__ import annotations
 
 import csv
+import logging
 import re
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from loguru import logger
 from pydantic import BaseModel, Field, field_validator
+
+from regulonado.tracks_table import CATEGORICAL_FIELDS
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # SeqNado constrains label columns to this alphabet because they are interpolated
 # into output paths. We enforce the same rule so a sheet round-trips between the
@@ -35,17 +42,6 @@ LABEL_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 # Separator between the project namespace and the sample name when aggregating.
 # Stays within LABEL_PATTERN so composed names remain valid SeqNado labels.
 PROJECT_SEPARATOR = "__"
-
-# Sheet column -> the integer field the training code reads. Populated by
-# TrackSheet.to_track_records(); see regulonado/training/runner.py.
-CATEGORICAL_FIELDS: dict[str, str] = {
-    "condition": "condition_id",
-    # Biological source: cell line, primary cells, tissue, organoid. Deliberately
-    # broader than SeqNado's vocabulary, which has no equivalent column.
-    "source": "source_id",
-    "assay": "assay_type_id",
-    "ip": "target_id",
-}
 
 _COLUMNS = (
     # Shared with SeqNado's design sheet.
@@ -77,6 +73,278 @@ def _clean(value: Any) -> str | None:
     if not text or text.lower() in {"na", "nan", "none", "null", "-"}:
         return None
     return text
+
+
+def _track_record_from_csv_row(
+    row: dict[str, Any], *, index: int, base: Path, path: Path
+) -> "TrackRecord":
+    """Parse and normalise one raw CSV row into a :class:`TrackRecord`.
+
+    Cleans every recognised column, resolves ``bigwig``/``bam`` paths relative
+    to the sheet's own directory, and derives ``sample_id``/``track_name``
+    from each other when only one of them (or ``bigwig``) is present.
+    """
+    data: dict[str, Any] = {key: _clean(value) for key, value in row.items() if key in _COLUMNS}
+
+    for column in ("bigwig", "bam"):
+        value = data.get(column)
+        if value:
+            resolved = Path(str(value)).expanduser()
+            if not resolved.is_absolute():
+                resolved = (base / resolved).resolve()
+            data[column] = resolved
+        else:
+            data[column] = None
+
+    # sample_id, track_name and bigwig can each stand in for the others;
+    # what we cannot do is proceed with none of them.
+    bigwig = data.get("bigwig")
+    if not data.get("sample_id"):
+        data["sample_id"] = data.get("track_name") or (
+            bigwig.stem if bigwig is not None else None
+        )
+    if not data.get("sample_id"):
+        raise ValueError(
+            f"{path}: row {index + 1} has none of 'sample_id', 'track_name' "
+            f"or 'bigwig'; at least one is needed to identify the track"
+        )
+    if not data.get("track_name") and bigwig is not None:
+        data["track_name"] = data["sample_id"]
+
+    return TrackRecord(**data)
+
+
+def _filter_seqnado_index(
+    index: "pd.DataFrame",
+    *,
+    method: str | None,
+    scale: str | None,
+    merged: bool | None,
+    keep_stranded: bool,
+) -> "pd.DataFrame":
+    """Apply method/scale/merged/stranded filters to a SeqNado bigwig index."""
+    if method is not None:
+        index = index[index["method"] == method]
+    if scale is not None:
+        index = index[index["scale"] == scale]
+    if merged is not None:
+        index = index[index["merged"] == merged]
+
+    if not keep_stranded:
+        stranded = index["strand"].notna()
+        if stranded.any():
+            # A +/- pair is two tracks in our model, which is fine — but
+            # silently doubling the track count is not, so require opt-in.
+            logger.warning(
+                f"Dropping {int(stranded.sum())} stranded BigWigs "
+                f"(pass keep_stranded=True to include them as separate tracks)"
+            )
+            index = index[~stranded]
+
+    return index
+
+
+def _apply_sample_filters(
+    index: "pd.DataFrame", project: Any, filters: dict[str, Any]
+) -> "pd.DataFrame":
+    """Restrict an index to samples selected by SeqNado's own design-file filters."""
+    if not filters:
+        return index
+    # Sample-level filters (condition/antibody/group) are resolved by SeqNado
+    # against its design file, so ask it rather than reimplementing.
+    allowed = {path.resolve() for path in project.bigwigs(**filters)}
+    return index[index["path"].map(lambda p: Path(p).resolve() in allowed)]
+
+
+def _track_records_from_seqnado_index(
+    index: "pd.DataFrame",
+    project: Any,
+    bams: dict[str, Path],
+    *,
+    project_name: str | None,
+    assay: str | None,
+) -> list["TrackRecord"]:
+    """Turn a filtered SeqNado bigwig index into track records."""
+    records: list[TrackRecord] = []
+    for row in index.sort_values(["sample", "method", "scale"]).itertuples():
+        sample = str(row.sample)
+        meta = project.metadata_for(sample) or {}
+
+        track_name = sample
+        if project_name:
+            track_name = f"{project_name}{PROJECT_SEPARATOR}{sample}"
+
+        records.append(
+            TrackRecord(
+                track_name=track_name,
+                bigwig=Path(row.path),
+                bam=bams.get(sample),
+                sample_id=sample,
+                # SeqNado renames design's `ip` to `antibody` internally;
+                # map it back so the sheet uses the design-sheet name.
+                ip=_clean(meta.get("antibody")),
+                condition=_clean(meta.get("condition")),
+                scaling_group=_clean(meta.get("group")),
+                assay=_clean(assay),
+                project=project_name,
+                method=_clean(row.method),
+                scale=_clean(row.scale),
+            )
+        )
+    return records
+
+
+def _unique_project_names(entries: Sequence[dict[str, Any]]) -> list[str]:
+    """Return each entry's project name, in order, raising if any repeat."""
+    names = [str(entry.get("name") or Path(entry["path"]).parent.name) for entry in entries]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"Project names must be unique; repeated: {', '.join(duplicates)}")
+    return names
+
+
+def _check_genome_consistency(
+    genomes: dict[str, str | None],
+    unknown_genome: list[str],
+    *,
+    single: bool,
+    assume_same_genome: bool,
+) -> None:
+    """Raise (or warn) when aggregated SeqNado projects disagree on reference genome."""
+    distinct = {genome for genome in genomes.values() if genome}
+    if len(distinct) > 1:
+        listing = ", ".join(f"{name}={genome}" for name, genome in sorted(genomes.items()))
+        raise GenomeMismatchError(
+            f"SeqNado projects use different reference genomes ({listing}). "
+            f"Signal bins only correspond across projects built on the same "
+            f"reference; rebuild them on one genome before aggregating."
+        )
+
+    # With one project there is nothing to be inconsistent with, so an
+    # unreadable config is not a problem worth blocking on.
+    if unknown_genome and not single:
+        listing = ", ".join(sorted(unknown_genome))
+        if not assume_same_genome:
+            raise GenomeMismatchError(
+                f"Could not read the reference genome for: {listing}. "
+                f"Pass assume_same_genome=True (CLI: --assume-same-genome) if "
+                f"you are certain every project used the same reference."
+            )
+        logger.warning(
+            f"Assuming a shared reference genome for projects with no readable "
+            f"config: {listing}"
+        )
+
+
+def _build_seqnado_catalogue(
+    projects: dict[str, str | Path],
+    *,
+    method: str | None,
+    scale: str | None,
+    merged: bool | None,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Index every configured SeqNado project by sample id.
+
+    Returns, per project name, ``sample_id -> {bigwig, bam, assay, method,
+    scale, metadata}`` for the first-seen sub-project entry of each sample.
+    """
+    from regulonado._seqnado import is_multi_project, open_project
+
+    catalogue: dict[str, dict[str, dict[str, Any]]] = {}
+    for name, project_dir in projects.items():
+        opened = open_project(project_dir)
+        subs = list(opened.items()) if is_multi_project(opened) else [(opened.assay, opened)]
+        entries: dict[str, dict[str, Any]] = {}
+        for assay, sub in subs:
+            index = sub.bigwig_dataframe()
+            if index.empty:
+                continue
+            if method is not None:
+                index = index[index["method"] == method]
+            if scale is not None:
+                index = index[index["scale"] == scale]
+            if merged is not None:
+                index = index[index["merged"] == merged]
+            bams = {path.stem: path for path in sub.bams()}
+            for row in index.itertuples():
+                sample = str(row.sample)
+                if sample in entries:
+                    continue
+                entries[sample] = {
+                    "bigwig": Path(row.path),
+                    "bam": bams.get(sample),
+                    "assay": _clean(assay),
+                    "method": _clean(row.method),
+                    "scale": _clean(row.scale),
+                    "metadata": sub.metadata_for(sample) or {},
+                }
+        catalogue[name] = entries
+    return catalogue
+
+
+def _resolve_track_record(
+    record: "TrackRecord",
+    catalogue: dict[str, dict[str, dict[str, Any]]],
+    *,
+    default_project: str | None,
+    namespaced: bool,
+    method: str | None,
+    scale: str | None,
+) -> None:
+    """Fill one unresolved record's bigwig/bam/annotation from the catalogue, in place.
+
+    Sheet values already present always win; the catalogue only fills blanks.
+    """
+    project_name = record.project or default_project
+    if project_name is None:
+        raise ValueError(
+            f"Track '{record.sample_id}' has no 'bigwig' path and no "
+            f"'project' column value; with several projects configured "
+            f"({', '.join(sorted(catalogue))}) the row must say which one."
+        )
+    if project_name not in catalogue:
+        raise ValueError(
+            f"Track '{record.sample_id}' names project {project_name!r}, "
+            f"which is not configured. Known: {', '.join(sorted(catalogue)) or 'none'}"
+        )
+
+    entry = catalogue[project_name].get(record.sample_id)
+    if entry is None:
+        available = sorted(catalogue[project_name])
+        hint = ", ".join(available[:5]) + (" …" if len(available) > 5 else "")
+        raise ValueError(
+            f"Sample {record.sample_id!r} not found in project "
+            f"{project_name!r} for method={method!r}, scale={scale!r}. "
+            f"Samples present: {hint or 'none'}"
+        )
+
+    record.project = project_name
+    record.bigwig = entry["bigwig"]
+    if record.bam is None:
+        record.bam = entry["bam"]
+    if record.track_name is None:
+        record.track_name = (
+            f"{project_name}{PROJECT_SEPARATOR}{record.sample_id}"
+            if namespaced
+            else record.sample_id
+        )
+
+    metadata = entry["metadata"]
+    if record.condition is None:
+        record.condition = _clean(metadata.get("condition"))
+    if record.ip is None:
+        # SeqNado renames the design sheet's `ip` to `antibody` internally.
+        record.ip = _clean(metadata.get("antibody"))
+    if record.scaling_group is None:
+        record.scaling_group = _clean(metadata.get("group")) or (
+            project_name if namespaced else None
+        )
+    if record.assay is None:
+        record.assay = entry["assay"]
+    if record.method is None:
+        record.method = entry["method"]
+    if record.scale is None:
+        record.scale = entry["scale"]
 
 
 class TrackRecord(BaseModel):
@@ -222,38 +490,10 @@ class TrackSheet(BaseModel):
             logger.warning(f"{path}: ignoring unrecognised column(s): {', '.join(sorted(unknown))}")
 
         base = path.parent
-        records: list[TrackRecord] = []
-        for index, row in enumerate(rows):
-            data: dict[str, Any] = {
-                key: _clean(value) for key, value in row.items() if key in _COLUMNS
-            }
-
-            for column in ("bigwig", "bam"):
-                value = data.get(column)
-                if value:
-                    resolved = Path(str(value)).expanduser()
-                    if not resolved.is_absolute():
-                        resolved = (base / resolved).resolve()
-                    data[column] = resolved
-                else:
-                    data[column] = None
-
-            # sample_id, track_name and bigwig can each stand in for the others;
-            # what we cannot do is proceed with none of them.
-            bigwig = data.get("bigwig")
-            if not data.get("sample_id"):
-                data["sample_id"] = data.get("track_name") or (
-                    bigwig.stem if bigwig is not None else None
-                )
-            if not data.get("sample_id"):
-                raise ValueError(
-                    f"{path}: row {index + 1} has none of 'sample_id', 'track_name' "
-                    f"or 'bigwig'; at least one is needed to identify the track"
-                )
-            if not data.get("track_name") and bigwig is not None:
-                data["track_name"] = data["sample_id"]
-
-            records.append(TrackRecord(**data))
+        records = [
+            _track_record_from_csv_row(row, index=index, base=base, path=path)
+            for index, row in enumerate(rows)
+        ]
 
         sheet = cls(records=records)
         if projects:
@@ -369,62 +609,17 @@ class TrackSheet(BaseModel):
         if index.empty:
             return []
 
-        if method is not None:
-            index = index[index["method"] == method]
-        if scale is not None:
-            index = index[index["scale"] == scale]
-        if merged is not None:
-            index = index[index["merged"] == merged]
-
-        if not keep_stranded:
-            stranded = index["strand"].notna()
-            if stranded.any():
-                # A +/- pair is two tracks in our model, which is fine — but
-                # silently doubling the track count is not, so require opt-in.
-                logger.warning(
-                    f"Dropping {int(stranded.sum())} stranded BigWigs "
-                    f"(pass keep_stranded=True to include them as separate tracks)"
-                )
-                index = index[~stranded]
-
-        # Sample-level filters (condition/antibody/group) are resolved by SeqNado
-        # against its design file, so ask it rather than reimplementing.
-        if filters:
-            allowed = {path.resolve() for path in project.bigwigs(**filters)}
-            index = index[index["path"].map(lambda p: Path(p).resolve() in allowed)]
-
+        index = _filter_seqnado_index(
+            index, method=method, scale=scale, merged=merged, keep_stranded=keep_stranded
+        )
+        index = _apply_sample_filters(index, project, filters)
         if index.empty:
             return []
 
         bams = {path.stem: path for path in project.bams()}
-
-        records: list[TrackRecord] = []
-        for row in index.sort_values(["sample", "method", "scale"]).itertuples():
-            sample = str(row.sample)
-            meta = project.metadata_for(sample) or {}
-
-            track_name = sample
-            if project_name:
-                track_name = f"{project_name}{PROJECT_SEPARATOR}{sample}"
-
-            records.append(
-                TrackRecord(
-                    track_name=track_name,
-                    bigwig=Path(row.path),
-                    bam=bams.get(sample),
-                    sample_id=sample,
-                    # SeqNado renames design's `ip` to `antibody` internally;
-                    # map it back so the sheet uses the design-sheet name.
-                    ip=_clean(meta.get("antibody")),
-                    condition=_clean(meta.get("condition")),
-                    scaling_group=_clean(meta.get("group")),
-                    assay=_clean(assay),
-                    project=project_name,
-                    method=_clean(row.method),
-                    scale=_clean(row.scale),
-                )
-            )
-        return records
+        return _track_records_from_seqnado_index(
+            index, project, bams, project_name=project_name, assay=assay
+        )
 
     @classmethod
     def from_seqnado_projects(
@@ -456,13 +651,7 @@ class TrackSheet(BaseModel):
         if not entries:
             raise ValueError("No SeqNado projects given")
 
-        names = [str(entry.get("name") or Path(entry["path"]).parent.name) for entry in entries]
-        duplicates = sorted({name for name in names if names.count(name) > 1})
-        if duplicates:
-            raise ValueError(
-                f"Project names must be unique; repeated: {', '.join(duplicates)}"
-            )
-
+        names = _unique_project_names(entries)
         single = len(entries) == 1
         genomes: dict[str, str | None] = {}
         unknown_genome: list[str] = []
@@ -490,29 +679,9 @@ class TrackSheet(BaseModel):
                     record.scaling_group = name
                 records.append(record)
 
-        distinct = {genome for genome in genomes.values() if genome}
-        if len(distinct) > 1:
-            listing = ", ".join(f"{name}={genome}" for name, genome in sorted(genomes.items()))
-            raise GenomeMismatchError(
-                f"SeqNado projects use different reference genomes ({listing}). "
-                f"Signal bins only correspond across projects built on the same "
-                f"reference; rebuild them on one genome before aggregating."
-            )
-
-        # With one project there is nothing to be inconsistent with, so an
-        # unreadable config is not a problem worth blocking on.
-        if unknown_genome and not single:
-            listing = ", ".join(sorted(unknown_genome))
-            if not assume_same_genome:
-                raise GenomeMismatchError(
-                    f"Could not read the reference genome for: {listing}. "
-                    f"Pass assume_same_genome=True (CLI: --assume-same-genome) if "
-                    f"you are certain every project used the same reference."
-                )
-            logger.warning(
-                f"Assuming a shared reference genome for projects with no readable "
-                f"config: {listing}"
-            )
+        _check_genome_consistency(
+            genomes, unknown_genome, single=single, assume_same_genome=assume_same_genome
+        )
 
         sheet = cls(records=records)
         sheet._require_unique_track_names()
@@ -536,44 +705,10 @@ class TrackSheet(BaseModel):
 
         Modifies the sheet in place and returns it.
         """
-        from regulonado._seqnado import is_multi_project, open_project
-
         if not projects:
             return self
 
-        # sample -> (path, bam, metadata, assay), per project.
-        catalogue: dict[str, dict[str, dict[str, Any]]] = {}
-        for name, project_dir in projects.items():
-            opened = open_project(project_dir)
-            subs = (
-                list(opened.items()) if is_multi_project(opened) else [(opened.assay, opened)]
-            )
-            entries: dict[str, dict[str, Any]] = {}
-            for assay, sub in subs:
-                index = sub.bigwig_dataframe()
-                if index.empty:
-                    continue
-                if method is not None:
-                    index = index[index["method"] == method]
-                if scale is not None:
-                    index = index[index["scale"] == scale]
-                if merged is not None:
-                    index = index[index["merged"] == merged]
-                bams = {path.stem: path for path in sub.bams()}
-                for row in index.itertuples():
-                    sample = str(row.sample)
-                    if sample in entries:
-                        continue
-                    entries[sample] = {
-                        "bigwig": Path(row.path),
-                        "bam": bams.get(sample),
-                        "assay": _clean(assay),
-                        "method": _clean(row.method),
-                        "scale": _clean(row.scale),
-                        "metadata": sub.metadata_for(sample) or {},
-                    }
-            catalogue[name] = entries
-
+        catalogue = _build_seqnado_catalogue(projects, method=method, scale=scale, merged=merged)
         default_project = next(iter(catalogue)) if len(catalogue) == 1 else None
         namespaced = len(catalogue) > 1
 
@@ -582,58 +717,14 @@ class TrackSheet(BaseModel):
                 if record.track_name is None:
                     record.track_name = record.sample_id
                 continue
-
-            project_name = record.project or default_project
-            if project_name is None:
-                raise ValueError(
-                    f"Track '{record.sample_id}' has no 'bigwig' path and no "
-                    f"'project' column value; with several projects configured "
-                    f"({', '.join(sorted(catalogue))}) the row must say which one."
-                )
-            if project_name not in catalogue:
-                raise ValueError(
-                    f"Track '{record.sample_id}' names project {project_name!r}, "
-                    f"which is not configured. Known: {', '.join(sorted(catalogue)) or 'none'}"
-                )
-
-            entry = catalogue[project_name].get(record.sample_id)
-            if entry is None:
-                available = sorted(catalogue[project_name])
-                hint = ", ".join(available[:5]) + (" …" if len(available) > 5 else "")
-                raise ValueError(
-                    f"Sample {record.sample_id!r} not found in project "
-                    f"{project_name!r} for method={method!r}, scale={scale!r}. "
-                    f"Samples present: {hint or 'none'}"
-                )
-
-            record.project = project_name
-            record.bigwig = entry["bigwig"]
-            if record.bam is None:
-                record.bam = entry["bam"]
-            if record.track_name is None:
-                record.track_name = (
-                    f"{project_name}{PROJECT_SEPARATOR}{record.sample_id}"
-                    if namespaced
-                    else record.sample_id
-                )
-
-            # Sheet values win; SeqNado only fills the blanks.
-            metadata = entry["metadata"]
-            if record.condition is None:
-                record.condition = _clean(metadata.get("condition"))
-            if record.ip is None:
-                # SeqNado renames the design sheet's `ip` to `antibody` internally.
-                record.ip = _clean(metadata.get("antibody"))
-            if record.scaling_group is None:
-                record.scaling_group = _clean(metadata.get("group")) or (
-                    project_name if namespaced else None
-                )
-            if record.assay is None:
-                record.assay = entry["assay"]
-            if record.method is None:
-                record.method = entry["method"]
-            if record.scale is None:
-                record.scale = entry["scale"]
+            _resolve_track_record(
+                record,
+                catalogue,
+                default_project=default_project,
+                namespaced=namespaced,
+                method=method,
+                scale=scale,
+            )
 
         self._fill_track_names()
         return self
