@@ -41,7 +41,7 @@ regulonado build intervals.bed genome.fa dataset/ \
   --stage
 ```
 
-The default chromosome-pass strategy is normally the best choice. `--stage`
+The default `in_memory` strategy is normally the best choice. `--stage`
 copies source files to node-local scratch before reading them, which is useful
 on network storage but requires enough scratch space for the FASTA and tracks.
 

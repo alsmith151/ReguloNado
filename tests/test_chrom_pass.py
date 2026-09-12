@@ -272,7 +272,7 @@ def test_chrom_pass_matches_direct_bigwig_segmented_intervals(segmented_synth_da
 def test_chrom_pass_loads_via_datasets(synth_dataset, tmp_path):
     """The chrom_pass output dir should load via datasets.load_from_disk."""
     from datasets import Array2D, Features, Value, load_from_disk
-    from regulonado.dataset import _write_hf_split_metadata
+    from regulonado.dataset.build import _write_hf_split_metadata
 
     bw_paths = synth_dataset["bw_paths"]
     bed_rows_tuples = [
@@ -322,7 +322,7 @@ def test_chrom_pass_loads_via_datasets(synth_dataset, tmp_path):
 def test_chrom_pass_arrow_write_threads_are_equivalent(synth_dataset, tmp_path):
     """Parallel Arrow writers should not change rows or loadability."""
     from datasets import Array2D, Features, Value, load_from_disk
-    from regulonado.dataset import _write_hf_split_metadata
+    from regulonado.dataset.build import _write_hf_split_metadata
 
     bw_paths = synth_dataset["bw_paths"]
     bed_rows_tuples = [
@@ -431,7 +431,7 @@ def test_chrom_pass_shared_scan_writes_multiple_splits(synth_dataset, tmp_path):
     """The shared chrom pass should write loadable split directories in one call."""
     from datasets import Array2D, Features, Value, load_from_disk
     from regulonado._rs import write_arrow_splits_chrom_pass  # type: ignore[import-not-found]
-    from regulonado.dataset import _write_hf_split_metadata
+    from regulonado.dataset.build import _write_hf_split_metadata
 
     bw_paths = synth_dataset["bw_paths"]
     bed_rows_tuples = [

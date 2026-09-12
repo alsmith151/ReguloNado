@@ -11,9 +11,9 @@ to the HF dataset with ``dataset.set_transform(fn)``.
 
 Example::
 
-    from regulonado.dataset import build_dataset_fast, make_transform
+    from regulonado.dataset import build_dataset, make_transform
 
-    build_dataset_fast(
+    build_dataset(
         "intervals.bed", "genome.fa", ["plus.bw", "minus.bw"],
         output_dir="dataset/hf-v1",
         splits={"train": ["train"], "validation": ["valid"]},
@@ -28,9 +28,9 @@ Example::
 from __future__ import annotations
 
 import concurrent.futures
-import gzip
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -38,25 +38,27 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Iterator, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 
 import numpy as np
 import pandas as pd
 
+from regulonado.genomics import read_intervals
+
 if TYPE_CHECKING:
     from datasets import Features
-from loguru import logger
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_CONTEXT = 524_288
 _DEFAULT_PRED_BINS = 6_144
 _DEFAULT_BIN_SIZE = 32
-_DEFAULT_SIGNAL_SAMPLE_CHUNK = 8
-_DEFAULT_SIGNAL_TRACK_CHUNK = 128
 _DEFAULT_ARROW_BATCH_SIZE = 8
 _DEFAULT_ARROW_COMPRESSION = "lz4"
 
-# Target on-disk size per Arrow shard file. The chrom_pass writer groups whole
+# Target on-disk size per Arrow shard file. The in_memory writer groups whole
 # record batches into shard files to hit roughly this size, decoupling the
 # shard count from the (RAM-bounded) record-batch size. ~256 MB keeps shard
 # counts in the low hundreds while staying comfortably under the ~500 MB the
@@ -120,7 +122,33 @@ DEFAULT_SPLITS: dict[str, list[str]] = {
 # Scratch staging
 # ---------------------------------------------------------------------------
 
-_FASTA_COMPANIONS = (".fai", ".gzi")  # pyfaidx index, bgzf index
+_FASTA_COMPANIONS = (".fai",)  # pyfaidx index; bgzf FASTA is rejected, see _reject_bgzip_fasta
+
+_GZIP_MAGIC = b"\x1f\x8b"
+
+
+def _reject_bgzip_fasta(fasta_file: str | Path) -> None:
+    """Raise if ``fasta_file`` is gzip/bgzf-compressed.
+
+    The Rust FASTA reader (src/fasta.rs) indexes the FASTA using raw,
+    uncompressed byte offsets from the ``.fai`` file. Against a bgzipped
+    FASTA those offsets address compressed blocks, so every position reads
+    back as an unrecognised byte and is written as an all-zero one-hot
+    column — the build succeeds and silently produces blank sequence.
+    Checking the two-byte gzip magic number is cheap and catches this before
+    any staging or Rust extraction happens.
+    """
+    path = Path(fasta_file)
+    try:
+        with path.open("rb") as fh:
+            magic = fh.read(2)
+    except OSError:
+        return  # let the normal file-not-found path surface downstream
+    if magic == _GZIP_MAGIC:
+        raise ValueError(
+            f"bgzf-compressed FASTA is not supported: {path}. Decompress it "
+            "(e.g. `bgzip -d`) and index the plain FASTA with `samtools faidx`."
+        )
 
 
 def _stage_relative_path(src: Path) -> Path:
@@ -144,13 +172,67 @@ def _rsync_one(src: Path, scratch: Path, companion_suffixes: tuple[str, ...]) ->
     return str(dest)
 
 
-def _rsync_tree(src: Path, dest: Path, *, delete: bool) -> None:
-    """Copy one directory tree into another via rsync."""
-    args = ["rsync", "-a"]
-    if delete:
-        args.append("--delete")
-    args.extend([f"{src}/", f"{dest}/"])
-    subprocess.run(args, check=True)
+def _same_filesystem(a: Path, b: Path) -> bool:
+    """True if paths ``a`` and ``b`` resolve to the same filesystem (``st_dev``).
+
+    Neither path needs to exist yet — each walks up to its nearest existing
+    ancestor before comparing devices, so a not-yet-created scratch or output
+    directory can still be classified correctly.
+    """
+
+    def _existing_dev(p: Path) -> int:
+        p = Path(p).resolve()
+        while not p.exists():
+            parent = p.parent
+            if parent == p:
+                raise OSError(f"no existing ancestor found for {p}")
+            p = parent
+        return p.stat().st_dev
+
+    try:
+        return _existing_dev(a) == _existing_dev(b)
+    except OSError:
+        return False
+
+
+def _publish_tree(src: Path, dest: Path) -> None:
+    """Publish a freshly built directory tree from scratch to its final location.
+
+    Replaces an earlier ``rsync -a --delete``-based implementation: rsync is
+    not guaranteed to be present in minimal containers (it is absent from
+    ``python:3.12-slim`` and most Apptainer base images), and its absence used
+    to surface only at the very end of a multi-hour build, after all compute
+    was done and before anything was published.
+
+    Same filesystem as ``dest``: ``src`` is swapped into place with
+    :func:`os.replace` — no bytes are copied. Cross filesystem: ``src`` is
+    first copied into a temporary sibling of ``dest`` (so the final swap is
+    still a same-filesystem :func:`os.replace`), then swapped in the same way.
+
+    Either way the result is *exactly* ``src``'s contents — anything that was
+    only present in a previous ``dest`` is discarded, matching the
+    ``rsync --delete`` semantics this replaces.
+    """
+    src = Path(src)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if _same_filesystem(src, dest.parent):
+        staged = src
+    else:
+        staged = dest.with_name(dest.name + ".staging")
+        if staged.exists():
+            shutil.rmtree(staged)
+        shutil.copytree(src, staged, dirs_exist_ok=True)
+
+    old = dest.with_name(dest.name + ".old")
+    if old.exists():
+        shutil.rmtree(old)
+    if dest.exists():
+        os.replace(dest, old)
+    os.replace(staged, dest)
+    if old.exists():
+        shutil.rmtree(old)
 
 
 def _stage_files(
@@ -201,54 +283,12 @@ def _is_minus_strand(path: str) -> bool:
     return stem.endswith("_minus") or stem.endswith("-minus") or ".minus" in stem
 
 
-def _read_track(reader, chrom: str, start: int, end: int, n_bins: int) -> np.ndarray:
-    return np.asarray(reader.values(chrom, start, end, bins=n_bins, exact=True), dtype=np.float32)
-
-
-def _read_all_tracks(
-    readers: list,
-    paths: list[str],
-    chrom: str,
-    start: int,
-    end: int,
-    n_bins: int,
-    executor: ThreadPoolExecutor,
-) -> np.ndarray:
-    """Read all BigWig tracks in parallel; pybigtools releases the GIL for I/O."""
-    futs = [executor.submit(_read_track, r, chrom, start, end, n_bins) for r in readers]
-    stacked = np.stack([f.result() for f in futs], axis=0)  # (T, n_bins)
-    np.nan_to_num(stacked, nan=0.0, copy=False)
-    for i, path in enumerate(paths):
-        if _is_minus_strand(path):
-            row = stacked[i]
-            nz = row[row != 0.0]
-            if nz.size > 0 and float(np.mean(nz < 0)) >= 0.8 and float(np.median(nz)) < 0:
-                stacked[i] *= -1.0
-    return stacked
-
-
 # ---------------------------------------------------------------------------
 # Fast-path helpers
 # ---------------------------------------------------------------------------
 
 
-def _load_bed_rows(bed_file: str | Path) -> list[tuple[str, int, int, str]]:
-    """Return all (chrom, start, end, fold) tuples from a BED file (gzipped ok)."""
-    rows: list[tuple[str, int, int, str]] = []
-    open_fn = gzip.open if str(bed_file).endswith(".gz") else open
-    with open_fn(str(bed_file), "rt") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            chrom, start, end = parts[0], int(parts[1]), int(parts[2])
-            fold = parts[3] if len(parts) > 3 else ""
-            rows.append((chrom, start, end, fold))
-    return rows
-
-
-def _signal_intervals(
+def signal_intervals(
     bed_rows: list[tuple[str, int, int, str]],
     n_pred_bins: int,
     bin_size: int,
@@ -263,6 +303,39 @@ def _signal_intervals(
         sig_end = sig_start + pred_bp + 2 * shift_max_bp
         out.append((chrom, sig_start, sig_end))
     return out
+
+
+def _edge_unsafe_row_indices(
+    bed_rows: list[tuple[str, int, int, str]],
+    n_pred_bins: int,
+    bin_size: int,
+    shift_max_bp: int,
+) -> list[int]:
+    """BED row positions whose signal window would start before contig position 0.
+
+    ``signal_intervals`` clamps such a row's ``sig_start`` to 0 so the Rust
+    writers never see a negative coordinate. But the clamped value is what
+    both Rust writers then treat as the literal genome coordinate of *label*
+    array position 0 (see ``bin_start`` in src/chromosome_scan_writer.rs and
+    the equivalent BigWig read in src/sample_batch_writer.rs), while the
+    *sequence* side (src/fasta.rs::read_one_hot_sequence) keeps the true,
+    unclamped window start and zero-pads instead of clamping. For a row this
+    close to position 0 the two arrays end up offset relative to each other
+    by up to ``pred_bp // 2 + shift_max_bp`` bins — the fix is to exclude the
+    row from every split rather than write it misaligned.
+
+    The tail of the window needs no equivalent treatment: neither side clamps
+    the *reference* coordinate there, only how much is copied — a window that
+    runs past the contig end is simply zero-padded identically on both sides
+    (``bin_end`` is capped in chromosome_scan_writer.rs and the pre-zeroed
+    ``labels``/``out`` buffers supply the padding on both the label and
+    sequence side).
+    """
+    pred_bp = n_pred_bins * bin_size
+    half_window = pred_bp // 2 + shift_max_bp
+    return [
+        i for i, (_, start, end, _) in enumerate(bed_rows) if (start + end) // 2 - half_window < 0
+    ]
 
 
 # Filesystem types that are network-backed, and therefore slow enough for Arrow I/O
@@ -320,64 +393,6 @@ def _is_remote_fs(path: Path) -> bool:
     return best_is_network
 
 
-def _is_contiguous(indices: Sequence[int]) -> bool:
-    return bool(indices) and indices[-1] - indices[0] + 1 == len(indices)
-
-
-def _sample_major_signal_generator(
-    signal_path: str | Path,
-    n_tracks: int,
-    n_split_samples: int,
-    stored_n_bins: int,
-    sample_indices: list[int],
-    bed_file: Path,
-    bed_rows: list[tuple[str, int, int, str]],
-    fasta_file: str | Path,
-    stored_context: int,
-) -> Iterator[dict]:
-    """Phase 2 generator: read sequences from FASTA and sample-major signals.
-
-    ``sample_indices`` are global row indices into ``bed_rows``. The signal
-    memmap is local to this split and stores rows in the same order.
-    """
-    signal_mm = np.memmap(
-        signal_path,
-        dtype="<f4",
-        mode="r",
-        shape=(n_split_samples, n_tracks, stored_n_bins),
-    )
-
-    # Build a GenomeIntervalDataset over the FULL BED (no fold filter) so we can
-    # index by global row number via sample_indices.
-    from enformer_pytorch.data import GenomeIntervalDataset  # noqa: PLC0415
-
-    gid = GenomeIntervalDataset(
-        str(bed_file),
-        fasta_file=str(fasta_file),
-        context_length=stored_context,
-        rc_aug=False,
-        return_augs=False,
-    )
-
-    chroms = [r[0] for r in bed_rows]
-    starts = [r[1] for r in bed_rows]
-    ends = [r[2] for r in bed_rows]
-
-    for local_idx, global_idx in enumerate(sample_indices):
-        try:
-            seq = gid[global_idx].permute(1, 0).numpy().astype(np.int8)
-            signal = np.array(signal_mm[local_idx], dtype=np.float32, copy=True)
-            yield {
-                "input_ids": seq,
-                "labels": signal,
-                "interval": f"{chroms[global_idx]}:{starts[global_idx]}-{ends[global_idx]}",
-                "index": np.int64(global_idx),
-                "local_index": np.int64(local_idx),
-            }
-        except Exception:
-            logger.exception(f"Skipping global index {global_idx}")
-
-
 def _write_hf_split_metadata(
     split_dir: Path,
     *,
@@ -405,82 +420,96 @@ def _write_hf_split_metadata(
     (split_dir / "state.json").write_text(json.dumps(state, indent=2))
 
 
-def build_dataset_fast(
-    bed_file: str | Path,
-    fasta_file: str | Path,
-    track_table: str | Path,
-    output_dir: str | Path,
-    *,
-    splits: dict[str, list[str]] | None = None,
-    context_length: int = _DEFAULT_CONTEXT,
-    bin_size: int = _DEFAULT_BIN_SIZE,
-    n_pred_bins: int = _DEFAULT_PRED_BINS,
-    shift_max_bp: int = 0,
-    n_extract_threads: int = 32,
-    signal_sample_chunk: int = _DEFAULT_SIGNAL_SAMPLE_CHUNK,
-    signal_track_chunk: int = _DEFAULT_SIGNAL_TRACK_CHUNK,
-    arrow_batch_size: int = _DEFAULT_ARROW_BATCH_SIZE,
-    shard_size: int | None = None,
-    shard_target_mb: int = _DEFAULT_SHARD_TARGET_MB,
-    arrow_compression: str = _DEFAULT_ARROW_COMPRESSION,
-    arrow_write_threads: int | None = None,
-    num_proc: int = 1,
-    cache_dir: str | None = None,
-    writer_batch_size: int = 500,
-    stage_to_scratch: bool = False,
-    overwrite: bool = False,
-    profile: bool = False,
-    strategy: str = "chrom_pass",
-    chrom_filter: list[str] | None = None,
-    return_dataset: bool = True,
-) -> object | None:
-    """Fast low-scratch dataset build using the Rust extension.
+_STRATEGIES = frozenset({"in_memory", "streaming"})
 
-    Each split is written directly from BigWig + FASTA sources into compressed
-    Arrow shards. Peak scratch is the current Arrow output plus one in-memory
-    record batch, not a full dense `(tracks, samples, bins)` signal file.
 
-    Track identity, dedupe and QC are already settled by the time this runs —
-    ``track_table`` is ``tracks.parquet`` from ``regulonado tracks assemble``,
-    the *only* place a track list is named. This function reads it, verifies
-    each included track's fingerprint against disk, and writes the same table
-    (with build-time scalars merged in) to ``output_dir/tracks.parquet``.
+# ---------------------------------------------------------------------------
+# Build planning — pure(ish) functions that produce a frozen BuildPlan.
+#
+# ``build_dataset`` itself (below the plan) is a linear sequence of calls into
+# this section plus the writer/publish steps that follow it. No I/O happens
+# here beyond reading small metadata (tracks.parquet, the BED file, the FASTA
+# .fai, /proc/mounts) and, if requested, staging inputs to scratch — no
+# BigWig/FASTA extraction happens until a strategy runner is invoked.
+# ---------------------------------------------------------------------------
 
-    Parameters
-    ----------
-    strategy : {"chrom_pass", "fast"}
-        - "chrom_pass" (default): one chromosome at a time, decoding all
-          tracks' binned signal once per chromosome and slicing per-sample
-          rows from RAM. Shards are ordered chrom-major (largest chromosome
-          first); each chromosome yields ``ceil(samples / shard_size)`` shard
-          files sized to ~``shard_target_mb`` on disk. Rows within each shard
-          are in original BED order. ~10× fewer BigWig seeks than "fast".
-        - "fast": sample-batched writer; reads each sample's interval from
-          every BigWig per batch. Retained for parity testing.
-    chrom_filter : list[str] | None
-        If given, restrict each split to BED rows on these chromosomes.
-        ``bed_rows`` is *not* renumbered — the ``index`` column on every
-        output row remains the absolute row position in the input BED
-        file. Useful for smoke tests on a single chromosome.
-    return_dataset : bool
-        If False, skip reopening the saved DatasetDict from ``output_dir``.
-        This avoids an expensive post-build reload when the caller only
-        needs the on-disk dataset.
-    """
-    from regulonado.tracks_table import read_track_table, verify_fingerprint
 
-    if splits is None:
-        splits = DEFAULT_SPLITS
+@dataclass(frozen=True)
+class _Geometry:
+    """Derived (possibly shift-padded) sequence/label array shapes."""
+
+    stored_context: int
+    shift_bins: int
+    stored_n_bins: int
+
+
+@dataclass(frozen=True)
+class _WriterSettings:
+    """Arrow writer knobs after i32-overflow capping and shard sizing."""
+
+    effective_arrow_batch: int
+    effective_shard_size: int
+    effective_arrow_write_threads: int
+
+
+@dataclass(frozen=True)
+class BuildPlan:
+    """Everything the writer and publish steps need, computed once up front."""
+
+    output_dir: Path
+    splits: dict[str, list[str]]
+    track_table: pd.DataFrame
+    bed_rows: list[tuple[str, int, int, str]]
+    signal_regions: list[tuple[str, int, int]]
+    active_fasta: str
+    active_bw_paths: list[str]
+    minus_flags: list[bool]
+    n_tracks: int
+    bin_size: int
+    geometry: _Geometry
+    features: Features
+    scratch_out: Path
+    split_indices: dict[str, list[int]]
+    splits_to_build: list[str]
+    effective_arrow_batch: int
+    effective_shard_size: int
+    effective_arrow_write_threads: int
+    edge_dropped_indices: tuple[int, ...]
+    edge_dropped_examples: tuple[str, ...]
+
+
+def _validate_build_args(*, shift_max_bp: int, bin_size: int, strategy: str) -> None:
     if shift_max_bp % bin_size != 0:
         raise ValueError(
             f"shift_max_bp ({shift_max_bp}) must be a multiple of bin_size ({bin_size})"
         )
+    if strategy not in _STRATEGIES:
+        raise ValueError(f"strategy must be 'in_memory' or 'streaming', got {strategy!r}")
 
-    bed_file = Path(bed_file)
-    output_dir = Path(output_dir)
+
+def _compute_geometry(
+    *, context_length: int, bin_size: int, n_pred_bins: int, shift_max_bp: int
+) -> _Geometry:
+    """Pure derivation of the stored (shift-padded) sequence/label shapes."""
+    shift_bins = shift_max_bp // bin_size
+    return _Geometry(
+        stored_context=context_length + 2 * shift_max_bp,
+        shift_bins=shift_bins,
+        stored_n_bins=n_pred_bins + 2 * shift_bins,
+    )
+
+
+def _load_verified_track_table(track_table: str | Path) -> tuple[pd.DataFrame, list[str]]:
+    """Read tracks.parquet and verify each included track's on-disk fingerprint.
+
+    Returns the full table (every status, for round-tripping to the output
+    tracks.parquet) and the resolved BigWig paths for included tracks in
+    ``track_index`` order.
+    """
+    from regulonado.tracks_table import read_track_table, verify_fingerprint  # noqa: PLC0415
+
     table = read_track_table(track_table)
     included = table[table["status"] == "included"].sort_values("track_index")
-    bw_paths = included["resolved_path"].tolist()
     for _, row in included.iterrows():
         expected = {k: row[k] for k in row.index if k.startswith("fp_") and pd.notna(row[k])}
         problems = verify_fingerprint(row["resolved_path"], expected)
@@ -489,33 +518,50 @@ def build_dataset_fast(
                 f"Track {row['track_name']!r} no longer matches its recorded fingerprint "
                 f"({row['resolved_path']}): {'; '.join(problems)}. Re-run discovery/assembly."
             )
-    n_tracks = len(bw_paths)
-    stored_context = context_length + 2 * shift_max_bp
-    shift_bins = shift_max_bp // bin_size
-    stored_n_bins = n_pred_bins + 2 * shift_bins
+    return table, included["resolved_path"].tolist()
 
+
+def _make_scratch_dir() -> Path:
     scratch_root = Path(os.environ.get("SLURM_TMPDIR") or os.environ.get("TMPDIR") or "/tmp")
-    if cache_dir is None:
-        cache_dir = str(scratch_root / "hf_cache")
-    scratch_out = Path(tempfile.mkdtemp(prefix="regulonado-build-", dir=scratch_root))
+    return Path(tempfile.mkdtemp(prefix="regulonado-build-", dir=scratch_root))
 
-    active_fasta = str(fasta_file)
-    active_bw_paths = bw_paths
-    if stage_to_scratch:
-        stage_dir = scratch_out / "stage"
-        logger.info(f"Staging source files to {stage_dir}")
-        active_fasta = _stage_files([fasta_file], stage_dir, _FASTA_COMPANIONS)[0]
-        _stage_files([bed_file], stage_dir)
-        active_bw_paths = _stage_files(bw_paths, stage_dir)
 
-    bed_rows = _load_bed_rows(bed_file)
-    n_all_samples = len(bed_rows)
-    signal_intervals = _signal_intervals(bed_rows, n_pred_bins, bin_size, shift_max_bp)
-    logger.info(
-        f"Resolved inputs: {n_tracks} tracks, {n_all_samples} BED rows, "
-        f"stored_context={stored_context}, stored_n_bins={stored_n_bins}, "
-        f"scratch_root={scratch_root.resolve()}, scratch_out={scratch_out.resolve()}"
-    )
+def _stage_inputs_if_requested(
+    stage_to_scratch: bool,
+    fasta_file: str | Path,
+    bed_file: str | Path,
+    bw_paths: list[str],
+    scratch_out: Path,
+) -> tuple[str, list[str]]:
+    """Optionally copy FASTA/BED/BigWig inputs to scratch; returns active paths."""
+    if not stage_to_scratch:
+        return str(fasta_file), bw_paths
+    stage_dir = scratch_out / "stage"
+    logger.info(f"Staging source files to {stage_dir}")
+    active_fasta = _stage_files([fasta_file], stage_dir, _FASTA_COMPANIONS)[0]
+    _stage_files([bed_file], stage_dir)
+    active_bw_paths = _stage_files(bw_paths, stage_dir)
+    return active_fasta, active_bw_paths
+
+
+def _load_bed_rows(bed_file: str | Path) -> list[tuple[str, int, int, str]]:
+    bed_frame = read_intervals(bed_file)
+    if "name" in bed_frame.columns:
+        return [
+            (str(chrom), int(start), int(end), str(name))
+            for chrom, start, end, name in bed_frame[["chrom", "start", "end", "name"]].itertuples(
+                index=False, name=None
+            )
+        ]
+    return [
+        (str(chrom), int(start), int(end), "")
+        for chrom, start, end in bed_frame[["chrom", "start", "end"]].itertuples(
+            index=False, name=None
+        )
+    ]
+
+
+def _log_remote_fs_warnings(scratch_out: Path, output_dir: Path) -> None:
     if _is_remote_fs(scratch_out):
         logger.warning(
             f"scratch_out resolves to {str(scratch_out.resolve())!r} — "
@@ -524,17 +570,84 @@ def build_dataset_fast(
     if _is_remote_fs(output_dir):
         logger.info(
             f"output_dir resolves to {str(output_dir.resolve())!r}; "
-            f"only the final rsync should hit remote storage"
+            f"only the final publish step should hit remote storage"
         )
+
+
+def _log_ram_estimate(
+    *,
+    n_tracks: int,
+    bin_size: int,
+    geometry: _Geometry,
+    effective_arrow_batch: int,
+    effective_arrow_write_threads: int,
+    n_extract_threads: int,
+    active_fasta: str,
+    bed_rows: list[tuple[str, int, int, str]],
+) -> None:
+    """Log an approximate peak-RAM estimate for the chosen batch/thread settings."""
+    stored_context, stored_n_bins = geometry.stored_context, geometry.stored_n_bins
+    label_batch_gb = effective_arrow_batch * n_tracks * stored_n_bins * 4 / 1e9
+    seq_batch_gb = effective_arrow_batch * 4 * stored_context / 1e9
+    in_memory_writer_peak_gb = effective_arrow_write_threads * (label_batch_gb + seq_batch_gb)
+
+    chrom_lengths: dict[str, int] = {}
+    fai_path = Path(str(active_fasta) + ".fai")
+    if fai_path.exists():
+        for line in fai_path.read_text().splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                chrom_lengths[parts[0]] = int(parts[1])
+    if chrom_lengths:
+        used_chroms = {row[0] for row in bed_rows}
+        largest_chrom_bins = max(
+            (chrom_lengths.get(chrom, 0) // bin_size for chrom in used_chroms), default=0
+        )
+        chrom_matrix_gb = n_tracks * largest_chrom_bins * 4 / 1e9
+        binning_scratch_gb = n_extract_threads * largest_chrom_bins * (8 + 8) / 1e9
+    else:
+        chrom_matrix_gb = 0.0
+        binning_scratch_gb = 0.0
+    in_memory_peak_gb = chrom_matrix_gb + binning_scratch_gb + in_memory_writer_peak_gb
+    logger.info(
+        f"Approx per-batch RAM: labels={label_batch_gb:.1f} GB, "
+        f"direct-extract peak≈{2 * label_batch_gb + seq_batch_gb:.1f} GB, "
+        f"in-memory matrix≈{chrom_matrix_gb:.1f} GB, "
+        f"binning scratch≈{binning_scratch_gb:.1f} GB, "
+        f"writer peak≈{in_memory_writer_peak_gb:.1f} GB, "
+        f"combined in-memory peak≈{in_memory_peak_gb:.1f} GB "
+        f"(batch_size={effective_arrow_batch}, n_extract_threads={n_extract_threads}, "
+        f"arrow_write_threads={effective_arrow_write_threads})"
+    )
+
+
+def _plan_arrow_writer_settings(
+    *,
+    n_tracks: int,
+    bin_size: int,
+    geometry: _Geometry,
+    arrow_batch_size: int,
+    shard_size: int | None,
+    shard_target_mb: int,
+    arrow_compression: str,
+    arrow_write_threads: int | None,
+    n_extract_threads: int,
+    active_fasta: str,
+    bed_rows: list[tuple[str, int, int, str]],
+) -> _WriterSettings:
+    """Cap batch size for the Arrow i32 offset limit, size shards, log a RAM estimate."""
+    stored_context, stored_n_bins = geometry.stored_context, geometry.stored_n_bins
+
     # Arrow ListArray uses i32 offsets; batch * n_tracks * n_bins must fit.
-    _i32_max = 2_147_483_647
-    _max_safe_batch = max(1, _i32_max // max(1, n_tracks * stored_n_bins))
-    effective_arrow_batch = max(1, min(arrow_batch_size, _max_safe_batch))
+    i32_max = 2_147_483_647
+    max_safe_batch = max(1, i32_max // max(1, n_tracks * stored_n_bins))
+    effective_arrow_batch = max(1, min(arrow_batch_size, max_safe_batch))
     if effective_arrow_batch < arrow_batch_size:
         logger.warning(
             f"Capping arrow_batch_size from {arrow_batch_size} to {effective_arrow_batch} "
             f"to avoid Arrow i32 offset overflow ({n_tracks} tracks × {stored_n_bins} bins)"
         )
+
     # Shard files group whole record batches up to a target on-disk size. An
     # explicit shard_size wins; otherwise derive it from shard_target_mb.
     if shard_size is not None:
@@ -554,54 +667,54 @@ def build_dataset_fast(
         f"{effective_arrow_batch}), target≈{shard_target_mb} MB on disk, "
         f"compression={arrow_compression}"
     )
-    label_batch_gb = effective_arrow_batch * n_tracks * stored_n_bins * 4 / 1e9
-    seq_batch_gb = effective_arrow_batch * 4 * stored_context / 1e9
+
     effective_arrow_write_threads = (
         4 if arrow_write_threads is None else max(1, arrow_write_threads)
     )
-    chrom_pass_writer_peak_gb = effective_arrow_write_threads * (label_batch_gb + seq_batch_gb)
-    chrom_lengths: dict[str, int] = {}
-    fai_path = Path(str(active_fasta) + ".fai")
-    if fai_path.exists():
-        for line in fai_path.read_text().splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                chrom_lengths[parts[0]] = int(parts[1])
-    if chrom_lengths:
-        used_chroms = {bed_rows[i][0] for i in range(n_all_samples)}
-        largest_chrom_bins = max(
-            (chrom_lengths.get(chrom, 0) // bin_size for chrom in used_chroms),
-            default=0,
-        )
-        chrom_matrix_gb = n_tracks * largest_chrom_bins * 4 / 1e9
-        binning_scratch_gb = n_extract_threads * largest_chrom_bins * (8 + 8) / 1e9
-    else:
-        chrom_matrix_gb = 0.0
-        binning_scratch_gb = 0.0
-    chrom_pass_peak_gb = chrom_matrix_gb + binning_scratch_gb + chrom_pass_writer_peak_gb
-    logger.info(
-        f"Approx per-batch RAM: labels={label_batch_gb:.1f} GB, "
-        f"direct-extract peak≈{2 * label_batch_gb + seq_batch_gb:.1f} GB, "
-        f"chrom-pass matrix≈{chrom_matrix_gb:.1f} GB, "
-        f"binning scratch≈{binning_scratch_gb:.1f} GB, "
-        f"writer peak≈{chrom_pass_writer_peak_gb:.1f} GB, "
-        f"combined chrom-pass peak≈{chrom_pass_peak_gb:.1f} GB "
-        f"(batch_size={effective_arrow_batch}, n_extract_threads={n_extract_threads}, "
-        f"arrow_write_threads={effective_arrow_write_threads})"
+    _log_ram_estimate(
+        n_tracks=n_tracks,
+        bin_size=bin_size,
+        geometry=geometry,
+        effective_arrow_batch=effective_arrow_batch,
+        effective_arrow_write_threads=effective_arrow_write_threads,
+        n_extract_threads=n_extract_threads,
+        active_fasta=active_fasta,
+        bed_rows=bed_rows,
+    )
+    return _WriterSettings(
+        effective_arrow_batch, effective_shard_size, effective_arrow_write_threads
     )
 
-    from datasets import Array2D, Dataset, DatasetDict, Features, Value  # noqa: PLC0415
 
-    features = Features(
+def _build_features(n_tracks: int, geometry: _Geometry) -> Features:
+    from datasets import Array2D, Features, Value  # noqa: PLC0415
+
+    return Features(
         {
-            "input_ids": Array2D(dtype="int8", shape=(4, stored_context)),
-            "labels": Array2D(dtype="float32", shape=(n_tracks, stored_n_bins)),
+            "input_ids": Array2D(dtype="int8", shape=(4, geometry.stored_context)),
+            "labels": Array2D(dtype="float32", shape=(n_tracks, geometry.stored_n_bins)),
             "interval": Value(dtype="string"),
             "index": Value(dtype="int64"),
             "local_index": Value(dtype="int64"),
         }
     )
 
+
+def _compute_split_indices(
+    bed_rows: list[tuple[str, int, int, str]],
+    splits: dict[str, list[str]],
+    chrom_filter: list[str] | None,
+    output_dir: Path,
+    overwrite: bool,
+    unsafe_indices: set[int],
+) -> tuple[dict[str, list[int]], list[str]]:
+    """Row indices per split, skipping already-built splits and edge-unsafe rows.
+
+    Rows in ``unsafe_indices`` (see ``_edge_unsafe_row_indices``) are dropped
+    from every split's index list — the drop is logged (with a count and
+    examples) by the caller; the build always proceeds with what remains.
+    """
+    n_all_samples = len(bed_rows)
     chrom_filter_set = set(chrom_filter) if chrom_filter else None
 
     split_indices: dict[str, list[int]] = {}
@@ -617,180 +730,474 @@ def build_dataset_fast(
             idx = list(range(n_all_samples))
         if chrom_filter_set is not None:
             idx = [i for i in idx if bed_rows[i][0] in chrom_filter_set]
+
+        requested = len(idx)
+        idx = [i for i in idx if i not in unsafe_indices]
+        dropped = requested - len(idx)
+
         split_indices[split] = idx
         splits_to_build.append(split)
-        if chrom_filter_set is not None:
-            logger.info(
-                f"Split '{split}': {len(idx)} samples "
-                f"(filtered to chroms {sorted(chrom_filter_set)})"
-            )
-        else:
-            logger.info(f"Split '{split}': {len(idx)} samples")
+        chrom_note = f", filtered to chroms {sorted(chrom_filter_set)}" if chrom_filter_set else ""
+        logger.info(f"Split '{split}': {len(idx)} samples ({dropped} edge-dropped{chrom_note})")
+    return split_indices, splits_to_build
 
-    split_datasets: dict[str, Dataset] = {}
-    if not splits_to_build:
-        if not return_dataset:
-            logger.info("All splits already exist; skipping load because return_dataset=False")
-            return None
-        logger.info("All splits already exist; loading from disk")
-        for split in splits:
-            split_datasets[split] = Dataset.load_from_disk(str(output_dir / split))
-        return DatasetDict(split_datasets)
 
-    if strategy not in {"chrom_pass", "fast"}:
-        raise ValueError(f"strategy must be 'chrom_pass' or 'fast', got {strategy!r}")
-    from regulonado._rs import (  # type: ignore[import]
-        write_arrow_split_from_bigwigs,
-        write_arrow_splits_chrom_pass,
+def _plan_build(
+    *,
+    bed_file: Path,
+    fasta_file: str | Path,
+    track_table: str | Path,
+    output_dir: Path,
+    splits: dict[str, list[str]],
+    context_length: int,
+    bin_size: int,
+    n_pred_bins: int,
+    shift_max_bp: int,
+    stage_to_scratch: bool,
+    overwrite: bool,
+    chrom_filter: list[str] | None,
+    arrow_batch_size: int,
+    shard_size: int | None,
+    shard_target_mb: int,
+    arrow_compression: str,
+    arrow_write_threads: int | None,
+    n_extract_threads: int,
+) -> BuildPlan:
+    """Resolve every path, shape and row index the writer/publish steps need."""
+    table, bw_paths = _load_verified_track_table(track_table)
+    n_tracks = len(bw_paths)
+    geometry = _compute_geometry(
+        context_length=context_length,
+        bin_size=bin_size,
+        n_pred_bins=n_pred_bins,
+        shift_max_bp=shift_max_bp,
     )
 
-    scratch_out.mkdir(parents=True, exist_ok=True)
+    scratch_out = _make_scratch_dir()
+    active_fasta, active_bw_paths = _stage_inputs_if_requested(
+        stage_to_scratch, fasta_file, bed_file, bw_paths, scratch_out
+    )
 
-    minus_flags = [_is_minus_strand(p) for p in active_bw_paths]
+    bed_rows = _load_bed_rows(bed_file)
+    edge_dropped = _edge_unsafe_row_indices(bed_rows, n_pred_bins, bin_size, shift_max_bp)
+    edge_dropped_examples = tuple(
+        f"{bed_rows[i][0]}:{bed_rows[i][1]}-{bed_rows[i][2]}" for i in edge_dropped[:5]
+    )
+    if edge_dropped:
+        logger.warning(
+            f"Dropping {len(edge_dropped)} BED row(s) whose signal window starts before "
+            f"contig position 0 (labels would misalign with sequence there); examples: "
+            f"{', '.join(edge_dropped_examples)}"
+        )
+    signal_regions = signal_intervals(bed_rows, n_pred_bins, bin_size, shift_max_bp)
+
+    logger.info(
+        f"Resolved inputs: {n_tracks} tracks, {len(bed_rows)} BED rows "
+        f"({len(edge_dropped)} edge-dropped), stored_context={geometry.stored_context}, "
+        f"stored_n_bins={geometry.stored_n_bins}, scratch_out={scratch_out.resolve()}"
+    )
+    _log_remote_fs_warnings(scratch_out, output_dir)
+
+    writer = _plan_arrow_writer_settings(
+        n_tracks=n_tracks,
+        bin_size=bin_size,
+        geometry=geometry,
+        arrow_batch_size=arrow_batch_size,
+        shard_size=shard_size,
+        shard_target_mb=shard_target_mb,
+        arrow_compression=arrow_compression,
+        arrow_write_threads=arrow_write_threads,
+        n_extract_threads=n_extract_threads,
+        active_fasta=active_fasta,
+        bed_rows=bed_rows,
+    )
+    features = _build_features(n_tracks, geometry)
+
+    split_indices, splits_to_build = _compute_split_indices(
+        bed_rows, splits, chrom_filter, output_dir, overwrite, set(edge_dropped)
+    )
+
+    return BuildPlan(
+        output_dir=output_dir,
+        splits=splits,
+        track_table=table,
+        bed_rows=bed_rows,
+        signal_regions=signal_regions,
+        active_fasta=active_fasta,
+        active_bw_paths=active_bw_paths,
+        minus_flags=[_is_minus_strand(p) for p in active_bw_paths],
+        n_tracks=n_tracks,
+        bin_size=bin_size,
+        geometry=geometry,
+        features=features,
+        scratch_out=scratch_out,
+        split_indices=split_indices,
+        splits_to_build=splits_to_build,
+        effective_arrow_batch=writer.effective_arrow_batch,
+        effective_shard_size=writer.effective_shard_size,
+        effective_arrow_write_threads=writer.effective_arrow_write_threads,
+        edge_dropped_indices=tuple(edge_dropped),
+        edge_dropped_examples=edge_dropped_examples,
+    )
+
+
+def _load_existing_splits(
+    output_dir: Path, splits: dict[str, list[str]], return_dataset: bool
+) -> object | None:
+    from datasets import Dataset, DatasetDict  # noqa: PLC0415
+
+    if not return_dataset:
+        logger.info("All splits already exist; skipping load because return_dataset=False")
+        return None
+    logger.info("All splits already exist; loading from disk")
+    return DatasetDict({split: Dataset.load_from_disk(str(output_dir / split)) for split in splits})
+
+
+# ---------------------------------------------------------------------------
+# Strategy runners — extract from BigWig/FASTA and write Arrow shards to
+# scratch. Both accept a BuildPlan and iterate every *requested* split (not
+# just ``splits_to_build``) so an already-built split can still be loaded
+# into the returned dict when ``return_dataset`` is set.
+# ---------------------------------------------------------------------------
+
+
+def _run_in_memory_strategy(
+    plan: BuildPlan,
+    *,
+    n_extract_threads: int,
+    arrow_compression: str,
+    profile: bool,
+    return_dataset: bool,
+) -> dict[str, object]:
+    """Shared chromosome-pass strategy: one scan per chromosome, shared by all splits."""
+    from datasets import Dataset  # noqa: PLC0415
+
+    from regulonado._rs import (
+        write_arrow_splits_chrom_pass,  # type: ignore[import]  # noqa: PLC0415
+    )
+
+    split_datasets: dict[str, object] = {}
+    chrom_split_names: list[str] = []
+    chrom_split_out_dirs: list[str] = []
+    chrom_split_indices: list[list[int]] = []
+    for split in plan.splits:
+        split_out = plan.output_dir / split
+        if split not in plan.split_indices:
+            if (split_out / "dataset_info.json").exists():
+                logger.info(f"Split '{split}' exists; skipping rebuild")
+                if return_dataset:
+                    split_datasets[split] = Dataset.load_from_disk(str(split_out))
+            continue
+
+        sample_indices = plan.split_indices[split]
+        logger.info(
+            f"Queueing '{split}' shard(s) [in_memory shared-scan]: "
+            f"{len(sample_indices)} samples, {plan.n_tracks} tracks, "
+            f"stored_context={plan.geometry.stored_context} bp, "
+            f"stored_n_bins={plan.geometry.stored_n_bins}, "
+            f"batch_size={plan.effective_arrow_batch}, compression={arrow_compression}, "
+            f"arrow_write_threads={plan.effective_arrow_write_threads}"
+        )
+        split_scratch = plan.scratch_out / split
+        if split_scratch.exists():
+            shutil.rmtree(split_scratch)
+        split_scratch.mkdir(parents=True, exist_ok=True)
+        chrom_split_names.append(split)
+        chrom_split_out_dirs.append(str(split_scratch))
+        chrom_split_indices.append(sample_indices)
+
+    if chrom_split_names:
+        write_arrow_splits_chrom_pass(
+            plan.active_bw_paths,
+            plan.minus_flags,
+            plan.signal_regions,
+            chrom_split_names,
+            chrom_split_out_dirs,
+            chrom_split_indices,
+            plan.bed_rows,
+            plan.active_fasta,
+            plan.geometry.stored_n_bins,
+            plan.geometry.stored_context,
+            plan.bin_size,
+            batch_size=plan.effective_arrow_batch,
+            shard_size=plan.effective_shard_size,
+            n_threads=n_extract_threads,
+            arrow_write_threads=plan.effective_arrow_write_threads,
+            compression=arrow_compression,
+            profile=profile,
+        )
+
+    for split, split_scratch_str in zip(chrom_split_names, chrom_split_out_dirs, strict=True):
+        split_scratch = Path(split_scratch_str)
+        arrow_filenames = sorted(p.name for p in split_scratch.glob("data-*-of-*.arrow"))
+        if not arrow_filenames:
+            raise RuntimeError(
+                f"in_memory produced no shards in {split_scratch}; "
+                f"check that the FASTA contains the BED chromosomes"
+            )
+        logger.info(f"Arrow shard(s) for '{split}' written ({len(arrow_filenames)} file(s))")
+        _write_hf_split_metadata(
+            split_scratch, features=plan.features, arrow_filenames=arrow_filenames
+        )
+        if return_dataset:
+            split_datasets[split] = Dataset.load_from_disk(str(split_scratch))
+    return split_datasets
+
+
+def _run_streaming_strategy(
+    plan: BuildPlan,
+    *,
+    n_extract_threads: int,
+    arrow_compression: str,
+    return_dataset: bool,
+) -> dict[str, object]:
+    """Per-split direct-BigWig strategy: bounded memory, random seeks."""
+    from datasets import Dataset  # noqa: PLC0415
+
+    from regulonado._rs import (
+        write_arrow_split_from_bigwigs,  # type: ignore[import]  # noqa: PLC0415
+    )
+
+    split_datasets: dict[str, object] = {}
+    for split in plan.splits:
+        split_out = plan.output_dir / split
+        if split not in plan.split_indices:
+            if (split_out / "dataset_info.json").exists():
+                logger.info(f"Split '{split}' exists; skipping rebuild")
+                if return_dataset:
+                    split_datasets[split] = Dataset.load_from_disk(str(split_out))
+            continue
+
+        sample_indices = plan.split_indices[split]
+        logger.info(
+            f"Writing '{split}' shard(s) [streaming]: {len(sample_indices)} samples, "
+            f"{plan.n_tracks} tracks, stored_context={plan.geometry.stored_context} bp, "
+            f"stored_n_bins={plan.geometry.stored_n_bins}, "
+            f"batch_size={plan.effective_arrow_batch}, compression={arrow_compression}"
+        )
+        split_scratch = plan.scratch_out / split
+        if split_scratch.exists():
+            shutil.rmtree(split_scratch)
+        split_scratch.mkdir(parents=True, exist_ok=True)
+
+        t_split_arrow = time.perf_counter()
+        arrow_filenames = ["data-00000-of-00001.arrow"]
+        write_arrow_split_from_bigwigs(
+            plan.active_bw_paths,
+            plan.minus_flags,
+            plan.signal_regions,
+            str(split_scratch / arrow_filenames[0]),
+            sample_indices,
+            plan.bed_rows,
+            plan.active_fasta,
+            plan.geometry.stored_n_bins,
+            plan.geometry.stored_context,
+            batch_size=plan.effective_arrow_batch,
+            n_threads=n_extract_threads,
+            compression=arrow_compression,
+        )
+        logger.info(
+            f"Arrow shard(s) for '{split}' written in "
+            f"{time.perf_counter() - t_split_arrow:.1f}s ({len(arrow_filenames)} file(s))"
+        )
+        _write_hf_split_metadata(
+            split_scratch, features=plan.features, arrow_filenames=arrow_filenames
+        )
+        if return_dataset:
+            split_datasets[split] = Dataset.load_from_disk(str(split_scratch))
+    return split_datasets
+
+
+def _run_strategy(
+    plan: BuildPlan,
+    *,
+    strategy: str,
+    n_extract_threads: int,
+    arrow_compression: str,
+    profile: bool,
+    return_dataset: bool,
+) -> dict[str, object]:
     t_arrow_total = time.perf_counter()
-    if strategy == "chrom_pass":
-        chrom_split_names: list[str] = []
-        chrom_split_out_dirs: list[str] = []
-        chrom_split_indices: list[list[int]] = []
-        for split in splits:
-            split_out = output_dir / split
-            if not overwrite and (split_out / "dataset_info.json").exists():
-                logger.info(f"Split '{split}' exists; skipping rebuild")
-                if return_dataset:
-                    split_datasets[split] = Dataset.load_from_disk(str(split_out))
-                continue
-
-            sample_indices = split_indices[split]
-            logger.info(
-                f"Queueing '{split}' shard(s) [chrom_pass shared-scan]: "
-                f"{len(sample_indices)} samples, {n_tracks} tracks, "
-                f"stored_context={stored_context} bp, stored_n_bins={stored_n_bins}, "
-                f"batch_size={effective_arrow_batch}, compression={arrow_compression}, "
-                f"arrow_write_threads={effective_arrow_write_threads}"
-            )
-
-            split_scratch = scratch_out / split
-            if split_scratch.exists():
-                shutil.rmtree(split_scratch)
-            split_scratch.mkdir(parents=True, exist_ok=True)
-            chrom_split_names.append(split)
-            chrom_split_out_dirs.append(str(split_scratch))
-            chrom_split_indices.append(sample_indices)
-
-        if chrom_split_names:
-            write_arrow_splits_chrom_pass(
-                active_bw_paths,
-                minus_flags,
-                signal_intervals,
-                chrom_split_names,
-                chrom_split_out_dirs,
-                chrom_split_indices,
-                bed_rows,
-                active_fasta,
-                stored_n_bins,
-                stored_context,
-                bin_size,
-                batch_size=effective_arrow_batch,
-                shard_size=effective_shard_size,
-                n_threads=n_extract_threads,
-                arrow_write_threads=effective_arrow_write_threads,
-                compression=arrow_compression,
-                profile=profile,
-            )
-
-        for split, split_scratch_str in zip(chrom_split_names, chrom_split_out_dirs, strict=True):
-            split_scratch = Path(split_scratch_str)
-            arrow_filenames = sorted(p.name for p in split_scratch.glob("data-*-of-*.arrow"))
-            if not arrow_filenames:
-                raise RuntimeError(
-                    f"chrom_pass produced no shards in {split_scratch}; "
-                    f"check that the FASTA contains the BED chromosomes"
-                )
-            logger.info(f"Arrow shard(s) for '{split}' written ({len(arrow_filenames)} file(s))")
-            _write_hf_split_metadata(
-                split_scratch, features=features, arrow_filenames=arrow_filenames
-            )
-            if return_dataset:
-                split_datasets[split] = Dataset.load_from_disk(str(split_scratch))
+    if strategy == "in_memory":
+        split_datasets = _run_in_memory_strategy(
+            plan,
+            n_extract_threads=n_extract_threads,
+            arrow_compression=arrow_compression,
+            profile=profile,
+            return_dataset=return_dataset,
+        )
     else:
-        for split, folds in splits.items():
-            split_out = output_dir / split
-            if not overwrite and (split_out / "dataset_info.json").exists():
-                logger.info(f"Split '{split}' exists; skipping rebuild")
-                if return_dataset:
-                    split_datasets[split] = Dataset.load_from_disk(str(split_out))
-                continue
-
-            sample_indices = split_indices[split]
-            logger.info(
-                f"Writing '{split}' shard(s) [{strategy}]: {len(sample_indices)} samples, "
-                f"{n_tracks} tracks, stored_context={stored_context} bp, "
-                f"stored_n_bins={stored_n_bins}, batch_size={effective_arrow_batch}, "
-                f"compression={arrow_compression}"
-            )
-
-            split_scratch = scratch_out / split
-            if split_scratch.exists():
-                shutil.rmtree(split_scratch)
-            split_scratch.mkdir(parents=True, exist_ok=True)
-
-            t_split_arrow = time.perf_counter()
-            arrow_filenames = ["data-00000-of-00001.arrow"]
-            write_arrow_split_from_bigwigs(
-                active_bw_paths,
-                minus_flags,
-                signal_intervals,
-                str(split_scratch / arrow_filenames[0]),
-                sample_indices,
-                bed_rows,
-                active_fasta,
-                stored_n_bins,
-                stored_context,
-                batch_size=effective_arrow_batch,
-                n_threads=n_extract_threads,
-                compression=arrow_compression,
-            )
-            logger.info(
-                f"Arrow shard(s) for '{split}' written in "
-                f"{time.perf_counter() - t_split_arrow:.1f}s ({len(arrow_filenames)} file(s))"
-            )
-            _write_hf_split_metadata(
-                split_scratch, features=features, arrow_filenames=arrow_filenames
-            )
-            if return_dataset:
-                split_datasets[split] = Dataset.load_from_disk(str(split_scratch))
+        split_datasets = _run_streaming_strategy(
+            plan,
+            n_extract_threads=n_extract_threads,
+            arrow_compression=arrow_compression,
+            return_dataset=return_dataset,
+        )
     logger.info(f"Arrow writing completed in {time.perf_counter() - t_arrow_total:.1f}s")
+    return split_datasets
 
-    logger.info(f"Publishing rebuilt splits to {output_dir}")
-    t_rsync = time.perf_counter()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for split in splits_to_build:
-        _rsync_tree(scratch_out / split, output_dir / split, delete=True)
-    (output_dir / "dataset_dict.json").write_text(
-        json.dumps({"splits": list(splits)}, indent=2)
+
+def _publish_splits(plan: BuildPlan) -> None:
+    logger.info(f"Publishing rebuilt splits to {plan.output_dir}")
+    t_publish = time.perf_counter()
+    plan.output_dir.mkdir(parents=True, exist_ok=True)
+    for split in plan.splits_to_build:
+        _publish_tree(plan.scratch_out / split, plan.output_dir / split)
+    (plan.output_dir / "dataset_dict.json").write_text(
+        json.dumps({"splits": list(plan.splits)}, indent=2)
     )
-    logger.info(f"Publication completed in {time.perf_counter() - t_rsync:.1f}s")
-    shutil.rmtree(scratch_out)
+    logger.info(f"Publication completed in {time.perf_counter() - t_publish:.1f}s")
 
+
+def _write_output_track_table(
+    plan: BuildPlan,
+    *,
+    bed_file: str | Path,
+    fasta_file: str | Path,
+    context_length: int,
+    n_pred_bins: int,
+    shift_max_bp: int,
+    strategy: str,
+) -> None:
     from datetime import datetime, timezone  # noqa: PLC0415
 
     from regulonado.tracks_table import write_track_table  # noqa: PLC0415
 
     write_track_table(
-        table,
-        output_dir / "tracks.parquet",
+        plan.track_table,
+        plan.output_dir / "tracks.parquet",
         bed_file=str(bed_file),
         fasta_file=str(fasta_file),
+        context_length=context_length,
+        bin_size=plan.bin_size,
+        n_pred_bins=n_pred_bins,
+        shift_max_bp=shift_max_bp,
+        splits=plan.splits,
+        build_strategy=strategy,
+        arrow_write_threads=plan.effective_arrow_write_threads,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        regulonado_version=_regulonado_version(),
+        command=" ".join(sys.argv),
+        edge_dropped_rows=len(plan.edge_dropped_indices),
+        edge_dropped_examples=list(plan.edge_dropped_examples),
+    )
+
+
+def build_dataset(
+    bed_file: str | Path,
+    fasta_file: str | Path,
+    track_table: str | Path,
+    output_dir: str | Path,
+    *,
+    splits: dict[str, list[str]] | None = None,
+    context_length: int = _DEFAULT_CONTEXT,
+    bin_size: int = _DEFAULT_BIN_SIZE,
+    n_pred_bins: int = _DEFAULT_PRED_BINS,
+    shift_max_bp: int = 0,
+    n_extract_threads: int = 32,
+    arrow_batch_size: int = _DEFAULT_ARROW_BATCH_SIZE,
+    shard_size: int | None = None,
+    shard_target_mb: int = _DEFAULT_SHARD_TARGET_MB,
+    arrow_compression: str = _DEFAULT_ARROW_COMPRESSION,
+    arrow_write_threads: int | None = None,
+    stage_to_scratch: bool = False,
+    overwrite: bool = False,
+    profile: bool = False,
+    strategy: str = "in_memory",
+    chrom_filter: list[str] | None = None,
+    return_dataset: bool = True,
+) -> object | None:
+    """Fast low-scratch dataset build using the Rust extension.
+
+    Each split is written directly from BigWig + FASTA sources into compressed
+    Arrow shards. Peak scratch is the current Arrow output plus one in-memory
+    record batch, not a full dense `(tracks, samples, bins)` signal file.
+
+    Track identity, dedupe and QC are already settled by the time this runs —
+    ``track_table`` is ``tracks.parquet`` from ``regulonado tracks assemble``,
+    the *only* place a track list is named. This function reads it, verifies
+    each included track's fingerprint against disk, and writes the same table
+    (with build-time scalars merged in) to ``output_dir/tracks.parquet``.
+
+    Parameters
+    ----------
+    strategy : {"in_memory", "streaming"}
+        - "in_memory" (default): decodes each chromosome's binned signal for
+          every track into RAM once, then slices every sample window from
+          that shared scan — one scan shared by all splits. Shards are
+          ordered chrom-major (largest chromosome first); each chromosome
+          yields ``ceil(samples / shard_size)`` shard files sized to
+          ~``shard_target_mb`` on disk. Rows within each shard are in
+          original BED order. Sequential reads, higher memory (the
+          per-batch RAM estimate logged below applies to this strategy);
+          ~10× fewer BigWig seeks than "streaming".
+        - "streaming": reads each sample window's interval from every
+          BigWig per batch, split by split. Bounded memory, random seeks;
+          kept mainly as the parity reference for "in_memory".
+    chrom_filter : list[str] | None
+        If given, restrict each split to BED rows on these chromosomes.
+        ``bed_rows`` is *not* renumbered — the ``index`` column on every
+        output row remains the absolute row position in the input BED
+        file. Useful for smoke tests on a single chromosome.
+    return_dataset : bool
+        If False, skip reopening the saved DatasetDict from ``output_dir``.
+        This avoids an expensive post-build reload when the caller only
+        needs the on-disk dataset.
+
+    Rows whose signal window would start before contig position 0 are
+    dropped from every split (see ``_edge_unsafe_row_indices``) rather than
+    written misaligned — never fails the build. The count and a few examples
+    are logged as a warning and recorded in the output ``tracks.parquet`` as
+    ``edge_dropped_rows`` / ``edge_dropped_examples``.
+    """
+    _validate_build_args(shift_max_bp=shift_max_bp, bin_size=bin_size, strategy=strategy)
+    _reject_bgzip_fasta(fasta_file)
+
+    bed_file = Path(bed_file)
+    output_dir = Path(output_dir)
+    plan = _plan_build(
+        bed_file=bed_file,
+        fasta_file=fasta_file,
+        track_table=track_table,
+        output_dir=output_dir,
+        splits=splits or DEFAULT_SPLITS,
         context_length=context_length,
         bin_size=bin_size,
         n_pred_bins=n_pred_bins,
         shift_max_bp=shift_max_bp,
-        splits=splits,
-        build_strategy=strategy,
-        arrow_write_threads=effective_arrow_write_threads,
-        created_at=datetime.now(timezone.utc).isoformat(),
-        regulonado_version=_regulonado_version(),
-        command=" ".join(sys.argv),
+        stage_to_scratch=stage_to_scratch,
+        overwrite=overwrite,
+        chrom_filter=chrom_filter,
+        arrow_batch_size=arrow_batch_size,
+        shard_size=shard_size,
+        shard_target_mb=shard_target_mb,
+        arrow_compression=arrow_compression,
+        arrow_write_threads=arrow_write_threads,
+        n_extract_threads=n_extract_threads,
+    )
+
+    if not plan.splits_to_build:
+        return _load_existing_splits(output_dir, plan.splits, return_dataset)
+
+    _run_strategy(
+        plan,
+        strategy=strategy,
+        n_extract_threads=n_extract_threads,
+        arrow_compression=arrow_compression,
+        profile=profile,
+        return_dataset=return_dataset,
+    )
+    _publish_splits(plan)
+    shutil.rmtree(plan.scratch_out)
+
+    _write_output_track_table(
+        plan,
+        bed_file=bed_file,
+        fasta_file=fasta_file,
+        context_length=context_length,
+        n_pred_bins=n_pred_bins,
+        shift_max_bp=shift_max_bp,
+        strategy=strategy,
     )
 
     logger.info(f"Dataset saved to {output_dir}")
@@ -799,6 +1206,8 @@ def build_dataset_fast(
             "Skipping final DatasetDict.load_from_disk(); caller can reopen output_dir if needed"
         )
         return None
+    from datasets import DatasetDict  # noqa: PLC0415
+
     return DatasetDict.load_from_disk(str(output_dir))
 
 
