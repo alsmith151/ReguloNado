@@ -14,7 +14,7 @@ inputs:
   bigwig_dir: /path/to/bigwigs
   track_sheet: track_sheet.csv
 
-build:
+dataset:
   context_length: 524288
   bin_size: 32
   n_pred_bins: 6144

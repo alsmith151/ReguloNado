@@ -79,7 +79,7 @@ class InputsConfig(BaseModel):
         return self
 
 
-class BuildConfig(BaseModel):
+class DatasetConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     context_length: int = Field(default=524_288, ge=1)
@@ -95,7 +95,7 @@ class BuildConfig(BaseModel):
     dedupe_tracks: Literal["none", "identity", "content"] = "content"
 
     @model_validator(mode="after")
-    def _shift_is_whole_bins(self) -> "BuildConfig":
+    def _shift_is_whole_bins(self) -> "DatasetConfig":
         if self.shift_max_bp % self.bin_size:
             raise ValueError(
                 f"shift_max_bp ({self.shift_max_bp}) must be a multiple of "
@@ -424,7 +424,7 @@ class RegulonadoConfig(BaseModel):
 
     results_dir: str = Field(min_length=1)
     inputs: InputsConfig
-    build: BuildConfig = Field(default_factory=BuildConfig)
+    dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     recompress: RecompressConfig = Field(default_factory=RecompressConfig)
     scaling: ScalingConfig = Field(default_factory=ScalingConfig)
     qc: QCConfig = Field(default_factory=QCConfig)

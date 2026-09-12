@@ -10,7 +10,7 @@ inputs:
   fasta: /project/milne_group/shared/seqnado_reference/hg38/UCSC/sequence/hg38.fa
   bigwig_dir: /project/milne_group/asmith/Projects/2026-08-04-aml-bm-atlas/seqnado_output/atac/bigwigs/bamnado/unscaled
 
-build:
+dataset:
   context_length: 524288
   bin_size: 32
   n_pred_bins: 6144

@@ -632,7 +632,7 @@ def test_design_config_parses_example_workflow_config():
 def test_design_config_unknown_holdout_run_raises():
     import pydantic
     from regulonado.config.models import (
-        BuildConfig,
+        DatasetConfig,
         DesignConfig,
         DesignTarget,
         InputsConfig,
@@ -648,7 +648,7 @@ def test_design_config_unknown_holdout_run_raises():
         WorkflowConfig(
             results_dir="results",
             inputs=InputsConfig(intervals="i.bed", fasta="g.fa", bigwig_dir="bw"),
-            build=BuildConfig(),
+            dataset=DatasetConfig(),
             recompress=RecompressConfig(),
             scaling=ScalingConfig(),
             train=TrainConfig(

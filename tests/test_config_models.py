@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 from regulonado.config.models import (
-    BuildConfig,
+    DatasetConfig,
     InputsConfig,
     RegulonadoConfig,
     SeqNadoProjectRef,
@@ -161,9 +161,9 @@ def test_inputs_needs_a_track_source():
 
 def test_shift_max_bp_must_be_a_whole_number_of_bins():
     with pytest.raises(ValueError, match="must be a multiple of"):
-        BuildConfig(bin_size=32, shift_max_bp=48)
+        DatasetConfig(bin_size=32, shift_max_bp=48)
 
-    assert BuildConfig(bin_size=32, shift_max_bp=64).shift_max_bp == 64
+    assert DatasetConfig(bin_size=32, shift_max_bp=64).shift_max_bp == 64
 
 
 def test_duplicate_phase_names_raise():

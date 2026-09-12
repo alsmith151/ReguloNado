@@ -19,7 +19,7 @@
 │ init                Install Snakemake execution presets into ~/.config/snakemake/.               │
 │ train               Train one model from a named preset.                                         │
 │ recompress-dataset  Rechunk/recompress a saved Arrow DatasetDict with ZSTD IPC compression.      │
-│ build               Build an Arrow DatasetDict from BED / FASTA / a pre-assembled track table.   │
+│ dataset             Build an Arrow DatasetDict from BED / FASTA / a pre-assembled track table.   │
 │ predict             Generate BigWig tracks from trained model predictions, collapsing equal      │
 │                     bins.                                                                        │
 │ design              Mutate endogenous enhancer candidates to sharpen cell-type specificity.      │

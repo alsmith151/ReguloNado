@@ -30,20 +30,20 @@ rule build_dataset:
         table=str(TRACKS_DIR / "tracks.parquet"),
     params:
         out_dir=lambda w, output: str(Path(output.info).parent),
-        context_length=config["build"]["context_length"],
-        bin_size=config["build"]["bin_size"],
-        n_pred_bins=config["build"]["n_pred_bins"],
-        shift_max_bp=config["build"]["shift_max_bp"],
-        extract_threads=config["build"]["extract_threads"],
-        arrow_write_threads=config["build"]["arrow_write_threads"],
-        arrow_batch_size=config["build"]["arrow_batch_size"],
-        compression=config["build"]["compression"],
-        stage=lambda w: "--stage" if config["build"]["stage_to_scratch"] else "--no-stage",
+        context_length=config["dataset"]["context_length"],
+        bin_size=config["dataset"]["bin_size"],
+        n_pred_bins=config["dataset"]["n_pred_bins"],
+        shift_max_bp=config["dataset"]["shift_max_bp"],
+        extract_threads=config["dataset"]["extract_threads"],
+        arrow_write_threads=config["dataset"]["arrow_write_threads"],
+        arrow_batch_size=config["dataset"]["arrow_batch_size"],
+        compression=config["dataset"]["compression"],
+        stage=lambda w: "--stage" if config["dataset"]["stage_to_scratch"] else "--no-stage",
     output:
         info=maybe_temp(str(DATASET_DIR / "dataset_dict.json")),
         table=maybe_temp(str(DATASET_DIR / "tracks.parquet")),
         splits=[maybe_temp(directory(str(DATASET_DIR / s))) for s in SPLITS],
-    threads: config["build"]["extract_threads"]
+    threads: config["dataset"]["extract_threads"]
     log:
         str(RESULTS / "logs" / "build_dataset.log"),
     shell:

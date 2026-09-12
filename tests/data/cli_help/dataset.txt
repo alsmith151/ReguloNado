@@ -1,5 +1,5 @@
                                                                                                     
- Usage: root build [OPTIONS] BED_FILE FASTA_FILE OUTPUT_DIR                                         
+ Usage: root dataset [OPTIONS] BED_FILE FASTA_FILE OUTPUT_DIR                                       
                                                                                                     
  Build an Arrow DatasetDict from BED / FASTA / a pre-assembled track table.                         
                                                                                                     
@@ -11,7 +11,7 @@
                                                                                                     
  Examples                                                                                           
  --------                                                                                           
- regulonado build intervals.bed genome.fa out/ \                                                    
+ regulonado dataset intervals.bed genome.fa out/ \                                                  
      --track-table results/tracks/tracks.parquet \                                                  
      --split train:train --split validation:valid \                                                 
      --shift-max-bp 128 --n-extract-threads 16 --stage                                              

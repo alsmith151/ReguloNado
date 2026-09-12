@@ -9,7 +9,7 @@ inputs:
   # BAM stems must match the BigWig stems: sample_1.bigWig -> sample_1.bam.
   bam_dir: /path/to/bams
 
-build:
+dataset:
   context_length: 524288
   bin_size: 32
   n_pred_bins: 6144

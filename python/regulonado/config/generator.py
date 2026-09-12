@@ -16,7 +16,7 @@ from regulonado.config.genomes import GenomeEntry, load_genome_registry
 from regulonado.config.models import (
     BAMNADO_METHODS,
     PHASE_PRESETS,
-    BuildConfig,
+    DatasetConfig,
     InputsConfig,
     RecompressConfig,
     RegulonadoConfig,
@@ -145,7 +145,7 @@ def build_config(
     else:
         defaults = dict(base)
     inputs_defaults: dict[str, Any] = defaults.get("inputs", {})
-    build_defaults: dict[str, Any] = defaults.get("build", {})
+    dataset_defaults: dict[str, Any] = defaults.get("dataset", {})
     recompress_defaults: dict[str, Any] = defaults.get("recompress", {})
     scaling_defaults: dict[str, Any] = defaults.get("scaling", {})
     train_defaults: dict[str, Any] = defaults.get("train", {})
@@ -295,46 +295,46 @@ def build_config(
         seqnado_projects=projects,
     )
 
-    # --- build / recompress -------------------------------------------------
-    build = BuildConfig(
+    # --- dataset / recompress -------------------------------------------------
+    dataset = DatasetConfig(
         **{
-            **build_defaults,
+            **dataset_defaults,
             "context_length": ask_int(
                 "Input context length (bp)?",
-                build_defaults.get("context_length", 524_288),
+                dataset_defaults.get("context_length", 524_288),
                 interactive=interactive,
             ),
             "bin_size": ask_int(
                 "Signal bin size (bp)?",
-                build_defaults.get("bin_size", 32),
+                dataset_defaults.get("bin_size", 32),
                 interactive=interactive,
             ),
             "n_pred_bins": ask_int(
                 "Number of prediction bins?",
-                build_defaults.get("n_pred_bins", 6_144),
+                dataset_defaults.get("n_pred_bins", 6_144),
                 interactive=interactive,
             ),
             "shift_max_bp": ask_int(
                 "Shift augmentation buffer per side (bp, multiple of bin size)?",
-                build_defaults.get("shift_max_bp", 64),
+                dataset_defaults.get("shift_max_bp", 64),
                 interactive=interactive,
             ),
             "extract_threads": ask_int(
                 "BigWig extraction threads?",
-                build_defaults.get("extract_threads", 32),
+                dataset_defaults.get("extract_threads", 32),
                 interactive=interactive,
             ),
             "stage_to_scratch": ask(
                 "Stage inputs to node-local scratch?",
-                "yes" if build_defaults.get("stage_to_scratch", True) else "no",
+                "yes" if dataset_defaults.get("stage_to_scratch", True) else "no",
                 is_boolean=True,
                 interactive=interactive,
             )
             if interactive
-            else build_defaults.get("stage_to_scratch", True),
+            else dataset_defaults.get("stage_to_scratch", True),
             # Aggregating projects frequently duplicates shared inputs/controls,
             # so content dedupe is the sensible default there.
-            "dedupe_tracks": build_defaults.get(
+            "dedupe_tracks": dataset_defaults.get(
                 "dedupe_tracks", "content" if len(projects) > 1 else "none"
             ),
         }
@@ -407,7 +407,7 @@ def build_config(
     return RegulonadoConfig(
         results_dir=str(results_dir),
         inputs=inputs,
-        build=build,
+        dataset=dataset,
         recompress=recompress,
         scaling=scaling,
         train=train,

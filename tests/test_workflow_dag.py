@@ -31,7 +31,7 @@ inputs:
   intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-build:
+dataset:
   context_length: 100
   bin_size: 10
   n_pred_bins: 4
@@ -165,7 +165,7 @@ inputs:
   intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-build:
+dataset:
   context_length: 100
   bin_size: 10
   n_pred_bins: 4
@@ -309,7 +309,7 @@ inputs:
   intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-build:
+dataset:
   context_length: 100
   bin_size: 10
   n_pred_bins: 4
@@ -414,7 +414,7 @@ inputs:
   intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-build:
+dataset:
   context_length: 100
   bin_size: 10
   n_pred_bins: 4
@@ -495,7 +495,7 @@ inputs:
   intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-build:
+dataset:
   context_length: 100
   bin_size: 10
   n_pred_bins: 4

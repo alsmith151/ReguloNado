@@ -2,7 +2,7 @@
 
 from regulonado.config.genomes import GenomeEntry, genome_config_path, load_genome_registry
 from regulonado.config.models import (
-    BuildConfig,
+    DatasetConfig,
     InputsConfig,
     RecompressConfig,
     RegulonadoConfig,
@@ -14,7 +14,7 @@ from regulonado.config.models import (
 )
 
 __all__ = [
-    "BuildConfig",
+    "DatasetConfig",
     "GenomeEntry",
     "InputsConfig",
     "RecompressConfig",

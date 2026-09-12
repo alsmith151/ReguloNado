@@ -6,7 +6,7 @@ inputs:
   fasta: /path/to/genome.fa
   bigwig_dir: /path/to/bigwigs
 
-build:
+dataset:
   context_length: 524288
   bin_size: 32
   n_pred_bins: 6144

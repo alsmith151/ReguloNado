@@ -224,7 +224,7 @@ $defs:
     - track
     title: AttributionTarget
     type: object
-  BuildConfig:
+  DatasetConfig:
     additionalProperties: false
     properties:
       context_length:
@@ -282,7 +282,7 @@ $defs:
         - content
         title: Dedupe Tracks
         type: string
-    title: BuildConfig
+    title: DatasetConfig
     type: object
   DesignConfig:
     additionalProperties: false
@@ -908,8 +908,8 @@ properties:
     type: string
   inputs:
     $ref: '#/$defs/InputsConfig'
-  build:
-    $ref: '#/$defs/BuildConfig'
+  dataset:
+    $ref: '#/$defs/DatasetConfig'
   recompress:
     $ref: '#/$defs/RecompressConfig'
   scaling:

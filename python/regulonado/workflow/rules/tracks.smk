@@ -49,8 +49,8 @@ rule track_discovery:
         ),
     params:
         track_source=lambda w, input: track_source(input),
-        drop_missing=lambda w: "--drop-missing" if config["build"]["drop_missing"] else "",
-        dedupe=config["build"]["dedupe_tracks"],
+        drop_missing=lambda w: "--drop-missing" if config["dataset"]["drop_missing"] else "",
+        dedupe=config["dataset"]["dedupe_tracks"],
     output:
         table=str(TRACKS_STAGE_DIR / "discovered.parquet"),
     log:
@@ -73,9 +73,9 @@ if _NEEDS_INTERVAL_MEANS:
             table=str(TRACKS_STAGE_DIR / "discovered.parquet"),
             intervals=config["inputs"]["intervals"],
         params:
-            bin_size=config["build"]["bin_size"],
-            n_pred_bins=config["build"]["n_pred_bins"],
-            shift_max_bp=config["build"]["shift_max_bp"],
+            bin_size=config["dataset"]["bin_size"],
+            n_pred_bins=config["dataset"]["n_pred_bins"],
+            shift_max_bp=config["dataset"]["shift_max_bp"],
             sample_n=QC.get("sample_windows") or 0,
             sample_arg=(
                 f"--sample-n {QC['sample_windows']}" if QC.get("sample_windows") else ""

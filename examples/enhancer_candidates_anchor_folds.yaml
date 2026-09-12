@@ -1,0 +1,108 @@
+# HL-60 / AML-BM atlas anchor-scaled training experiment.
+#
+# This follows the four-fold training layout used by the previous HL-60 design
+# run. Replace the atlas input paths and checkpoint paths if running elsewhere.
+# The anchor/background assets below are the validated outputs from:
+# 2026-08-19-unique-enhancer-finding.
+
+# Reuses dataset/dataset_dict.json already built under this result tree.
+results_dir: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/data/2026-09-10-modelling
+
+inputs:
+  intervals: /project/milne_group/asmith/Projects/2025-07-19-myeloid-specific-enhancer-identification/sequences_human.bed.gz
+  fasta: /project/milne_group/shared/seqnado_reference/hg38/UCSC/sequence/hg38.fa
+  bigwig_dir: /project/milne_group/asmith/Projects/2026-08-04-aml-bm-atlas/seqnado_output/atac/bigwigs/bamnado/unscaled
+
+dataset:
+  context_length: 524288
+  bin_size: 32
+  n_pred_bins: 6144
+  shift_max_bp: 64
+  extract_threads: 32
+  arrow_write_threads: 4
+  arrow_batch_size: 512
+  compression: lz4
+  stage_to_scratch: true
+  drop_missing: true
+  dedupe_tracks: content
+
+recompress:
+  enabled: true
+  zstd_level: 3
+  max_batch_size: 4
+  workers: 8
+
+scaling:
+  method: anchor
+  anchor_regions: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/2026-08-19-unique-enhancer-finding/resources/common_essential_windows.bed
+  background_regions: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/2026-08-19-unique-enhancer-finding/data/interim/01-track-qc/null-windows.parquet
+  heldout_regions: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/2026-08-19-unique-enhancer-finding/resources/common_essential_windows_heldout.bed
+  window_stat_bp: 1000
+  background_sample: 5000
+
+train:
+  nproc_per_node: 2
+  common:
+    data.apply_squash: false
+    trainer:
+      num_workers: 8
+      report_to: [wandb]
+
+  phases:
+    - name: head_only
+      preset: head_only
+    - name: unfreeze_output
+      preset: unfreeze_output
+
+  runs:
+    - name: fold_0
+      seed: 0
+      pretrained_model: johahi/flashzoi-replicate-0
+    - name: fold_1
+      seed: 1
+      pretrained_model: johahi/flashzoi-replicate-1
+    - name: fold_2
+      seed: 2
+      pretrained_model: johahi/flashzoi-replicate-2
+    - name: fold_3
+      seed: 3
+      pretrained_model: johahi/flashzoi-replicate-3
+
+attribution:
+  # Pre-select the signal-driving core of each candidate before design.
+  # TODO: fill in the candidate shortlist BED for this project.
+  candidates: /path/to/candidates.bed
+  shards: 8
+  runs: [fold_0, fold_1, fold_2]
+  stride: 1
+  smooth_bp: 25
+  min_zscore: 1.5
+  fix_width: 250
+  anchor: centroid
+  bigwig: true
+  targets:
+    - name: TODO_target_name
+      track: TODO_track_name
+      settings:
+        quantile: 0.92
+
+design:
+  # Automatically consumes attribution/TODO_target_name/core_regions.bed.
+  candidates: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/data/2026-09-10-modelling/attribution/TODO_target_name/core_regions.bed
+  shards: 8
+  design_runs: [fold_0, fold_1, fold_2]
+  holdout_run: fold_3
+  fold_mode: sequential
+  on_missing: skip
+  batch_size: 8
+  wandb: true
+  exclude_tracks: []
+  targets:
+    - name: TODO_target_name
+      target: TODO_cell_type_label
+      group_by: source
+      method: ism
+      settings:
+        rounds: 20
+        top_k: 1
+        ism_stride: 1

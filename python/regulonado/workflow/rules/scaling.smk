@@ -33,9 +33,9 @@ rule scale_factors:
     params:
         method=config["scaling"]["method"],
         initial=str(TRACKS_STAGE_DIR / "initial_scale_factors.parquet"),
-        bin_size=config["build"]["bin_size"],
-        n_pred_bins=config["build"]["n_pred_bins"],
-        shift_max_bp=config["build"]["shift_max_bp"],
+        bin_size=config["dataset"]["bin_size"],
+        n_pred_bins=config["dataset"]["n_pred_bins"],
+        shift_max_bp=config["dataset"]["shift_max_bp"],
         bam_dir=config["inputs"].get("bam_dir", ""),
         bamnado_method=config["scaling"].get("bamnado_method", "csaw-background"),
         bamnado_exogenous_prefix=config["scaling"].get("bamnado_exogenous_prefix", ""),
