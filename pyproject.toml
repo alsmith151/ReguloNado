@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "regulonado"
 version = "0.1.0"
 description = "Build Arrow datasets from BigWig/FASTA and finetune sequence-to-function genomics models"
-requires-python = ">=3.12,<3.14"
+requires-python = ">=3.12,<3.13"
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
@@ -16,7 +16,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Programming Language :: Rust",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
@@ -66,11 +65,15 @@ train = [
     "wandb>=0.16",
 ]
 
-# ── GPU / FlashAttention ──────────────────────────────────────────────────────
+# ── GPU ────────────────────────────────────────────────────────────────────────
+# flash-attn is deliberately NOT listed here: its setup.py imports torch at
+# build time, which breaks under an isolated pip/uv build env that hasn't
+# installed torch yet. Install it separately, after this extra, on a GPU node
+# via scripts/install_flash_attn_slurm.sh (prebuilt wheel, or source build
+# with --no-build-isolation).
 gpu = [
     "regulonado[train]",
     "ninja",
-    "flash_attn>=2.6",
 ]
 
 # ── visualisation ─────────────────────────────────────────────────────────────
@@ -149,7 +152,6 @@ environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
 # SeqNado main still publishes an older Pandera upper bound; its API is
 # compatible with ReguloNado's supported Pandera range.
 override-dependencies = ["pandera>=0.33"]
-extra-build-dependencies = { flash-attn = ["torch", "psutil", "ninja"] }
 
 [[tool.uv.index]]
 name = "pytorch-cu124"
