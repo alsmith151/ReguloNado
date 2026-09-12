@@ -396,6 +396,177 @@ design:
     assert re.search(r"rule merge_designs:\n\s+input: <TBD>", result.stdout)
 
 
+def test_design_from_attribution_resolves_the_same_core_regions_path(tmp_path):
+    """`design.from_attribution: hl60` is shorthand for hand-typing
+    `results_dir/attribution/hl60/core_regions.bed` as `design.candidates`."""
+    snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
+    if snakemake is None:
+        pytest.skip("Snakemake is an optional workflow dependency")
+
+    intervals = tmp_path / "intervals.bed"
+    fasta = tmp_path / "genome.fa"
+    candidates = tmp_path / "candidates.bed"
+    intervals.touch()
+    fasta.touch()
+    candidates.write_text("chr1\t100\t700\tcand1\n")
+
+    results = tmp_path / "results"
+    config = tmp_path / "from-attribution-config.yaml"
+    config.write_text(
+        f"""
+results_dir: {results}
+inputs:
+  intervals: {intervals}
+  fasta: {fasta}
+  bigwig_dir: {tmp_path / "bigwigs"}
+dataset:
+  context_length: 100
+  bin_size: 10
+  n_pred_bins: 4
+  shift_max_bp: 0
+  extract_threads: 1
+  arrow_write_threads: 1
+  arrow_batch_size: 4
+  compression: lz4
+  stage_to_scratch: false
+  drop_missing: true
+  dedupe_tracks: content
+recompress:
+  enabled: false
+  zstd_level: 3
+  max_batch_size: 4
+  workers: 1
+scaling:
+  method: tmm
+train:
+  nproc_per_node: 1
+  phases:
+    - {{name: first, preset: head_only}}
+  runs:
+    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
+    - {{name: fold_1, seed: 20, pretrained_model: model/b}}
+attribution:
+  candidates: {candidates}
+  shards: 1
+  runs: [fold_0, fold_1]
+  targets:
+    - {{name: hl60, track: atac_hl60}}
+design:
+  from_attribution: hl60
+  shards: 1
+  design_runs: [fold_0]
+  holdout_run: fold_1
+  targets:
+    - {{name: hl60_design, target: HL-60, group_by: source, method: ism}}
+"""
+    )
+
+    result = subprocess.run(
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            "--dry-run",
+            "--printshellcmds",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    assert result.returncode == 0, result.stderr
+    expected = str(results / "attribution" / "hl60" / "core_regions.bed")
+    assert re.search(rf"checkpoint shard_candidates:\n\s+input: {re.escape(expected)}", result.stdout)
+
+
+def test_design_from_attribution_rejects_an_unknown_target_name(tmp_path):
+    """Fails fast at DAG-construction time rather than deep in a shell command."""
+    snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
+    if snakemake is None:
+        pytest.skip("Snakemake is an optional workflow dependency")
+
+    intervals = tmp_path / "intervals.bed"
+    fasta = tmp_path / "genome.fa"
+    candidates = tmp_path / "candidates.bed"
+    intervals.touch()
+    fasta.touch()
+    candidates.write_text("chr1\t100\t700\tcand1\n")
+
+    results = tmp_path / "results"
+    config = tmp_path / "from-attribution-bad-config.yaml"
+    config.write_text(
+        f"""
+results_dir: {results}
+inputs:
+  intervals: {intervals}
+  fasta: {fasta}
+  bigwig_dir: {tmp_path / "bigwigs"}
+dataset:
+  context_length: 100
+  bin_size: 10
+  n_pred_bins: 4
+  shift_max_bp: 0
+  extract_threads: 1
+  arrow_write_threads: 1
+  arrow_batch_size: 4
+  compression: lz4
+  stage_to_scratch: false
+  drop_missing: true
+  dedupe_tracks: content
+recompress:
+  enabled: false
+  zstd_level: 3
+  max_batch_size: 4
+  workers: 1
+scaling:
+  method: tmm
+train:
+  nproc_per_node: 1
+  phases:
+    - {{name: first, preset: head_only}}
+  runs:
+    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
+    - {{name: fold_1, seed: 20, pretrained_model: model/b}}
+attribution:
+  candidates: {candidates}
+  shards: 1
+  runs: [fold_0, fold_1]
+  targets:
+    - {{name: hl60, track: atac_hl60}}
+design:
+  from_attribution: does_not_exist
+  shards: 1
+  design_runs: [fold_0]
+  holdout_run: fold_1
+  targets:
+    - {{name: hl60_design, target: HL-60, group_by: source, method: ism}}
+"""
+    )
+
+    result = subprocess.run(
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            "--dry-run",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    assert result.returncode != 0
+    assert "does_not_exist" in result.stderr + result.stdout
+
+
 def test_attribution_target_group_and_track_annotations_reach_the_pipeline(tmp_path):
     """A `target`/`group_by` attribution target (instead of `track`) reaches the CLI as
     `--target`/`--group-by`, and `inputs.track_annotations` reaches `tracks assemble` as

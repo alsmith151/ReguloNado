@@ -86,8 +86,8 @@ attribution:
         quantile: 0.92
 
 design:
-  # Automatically consumes attribution/hl60/core_regions.bed.
-  candidates: /path/to/regulonado_models/attribution/hl60/core_regions.bed
+  # Chains from the attribution target named hl60 above.
+  from_attribution: hl60
   shards: 8
   design_runs: [fold_0, fold_1, fold_2]
   holdout_run: fold_3

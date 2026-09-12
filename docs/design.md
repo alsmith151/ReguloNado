@@ -148,3 +148,20 @@ regulonado pipeline examples/enhancer_design.yaml --profile <slurm_gpu>
 
 Absent `design:`, the workflow behaves exactly as it does without this
 module.
+
+When chaining from an [attribution](attribution.md) stage in the same file, `design.from_attribution:
+<attribution target name>` is a drop-in alternative to writing out `design.candidates:
+results_dir/attribution/<name>/core_regions.bed` by hand — exactly one of `candidates` /
+`from_attribution` must be set. It only resolves inside the packaged workflow (Snakemake already
+knows `results_dir` and every attribution target name); a standalone `regulonado design --params`
+run still needs an explicit `--candidates`/`candidates:`.
+
+```yaml
+attribution:
+  targets:
+    - {name: hl60, track: atac_hl60}
+design:
+  from_attribution: hl60   # same as: candidates: <results_dir>/attribution/hl60/core_regions.bed
+  targets:
+    - {name: hl60, target: HL-60, method: ism}
+```

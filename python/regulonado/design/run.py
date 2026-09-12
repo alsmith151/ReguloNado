@@ -535,6 +535,12 @@ def run_design(config: "DesignConfig") -> DesignResult:
             f"{len(config.targets)} in config.targets. Call it once per target "
             f"(see docs/design.md)."
         )
+    if not config.candidates:
+        raise ValueError(
+            "design.candidates is required for a standalone run; 'from_attribution' only "
+            "resolves inside the packaged workflow, which passes the resolved BED as "
+            "--candidates before calling this."
+        )
     if not config.fasta:
         raise ValueError("design.fasta is required")
     if not config.out_dir:

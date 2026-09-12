@@ -339,9 +339,21 @@ $defs:
       time, so those fields are legitimately left unset in a workflow YAML).'
     properties:
       candidates:
-        minLength: 1
+        anyOf:
+        - minLength: 1
+          type: string
+        - type: 'null'
+        default: null
         title: Candidates
-        type: string
+      from_attribution:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        description: Attribution target name to consume core_regions.bed from, instead
+          of writing out 'candidates' by hand (workflow runs only, resolved via the
+          shared results_dir).
+        title: From Attribution
       shards:
         default: 1
         minimum: 1
@@ -587,7 +599,6 @@ $defs:
         default: null
         title: Wandb Group
     required:
-    - candidates
     - targets
     title: DesignConfig
     type: object

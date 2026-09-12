@@ -686,6 +686,36 @@ def test_design_config_duplicate_target_names_raise():
         )
 
 
+def test_design_config_from_attribution_is_an_alternative_to_candidates():
+    from regulonado.config.models import DesignConfig, DesignTarget
+
+    config = DesignConfig(
+        from_attribution="hl60", targets=[DesignTarget(name="a", target="K562")]
+    )
+    assert config.candidates is None
+    assert config.from_attribution == "hl60"
+
+
+def test_design_config_rejects_candidates_and_from_attribution_together():
+    import pydantic
+    from regulonado.config.models import DesignConfig, DesignTarget
+
+    with pytest.raises(pydantic.ValidationError, match="exactly one of"):
+        DesignConfig(
+            candidates="c.bed",
+            from_attribution="hl60",
+            targets=[DesignTarget(name="a", target="K562")],
+        )
+
+
+def test_design_config_rejects_neither_candidates_nor_from_attribution():
+    import pydantic
+    from regulonado.config.models import DesignConfig, DesignTarget
+
+    with pytest.raises(pydantic.ValidationError, match="exactly one of"):
+        DesignConfig(targets=[DesignTarget(name="a", target="K562")])
+
+
 def test_design_config_shards_must_be_positive():
     import pydantic
     from regulonado.config.models import DesignConfig, DesignTarget

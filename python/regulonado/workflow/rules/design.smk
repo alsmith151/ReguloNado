@@ -45,6 +45,23 @@ if DESIGN:
         holdout = DESIGN.get("holdout_run")
         return [name for name in RUN_NAMES if name != holdout]
 
+    def _design_candidates_path():
+        """The candidate BED: 'candidates' verbatim, or chained from an attribution target's
+        core_regions.bed via 'from_attribution' — the same file docs/design.md already tells
+        users to point 'candidates' at by hand, just without needing to spell out results_dir/
+        ATTRIBUTION_DIR/the target name themselves.
+        """
+        if DESIGN.get("candidates"):
+            return DESIGN["candidates"]
+        name = DESIGN["from_attribution"]
+        if ATTRIBUTION and name not in ATTRIBUTION_TARGET_NAMES:
+            raise ValueError(
+                f"design.from_attribution={name!r} names no attribution target; available: "
+                f"{', '.join(ATTRIBUTION_TARGET_NAMES)}"
+            )
+        return str(ATTRIBUTION_DIR / name / "core_regions.bed")
+
+    DESIGN_CANDIDATES = _design_candidates_path()
     DESIGN_RUN_NAMES = _design_run_names()
     DESIGN_TARGETS = DESIGN["targets"]
     DESIGN_TARGET_NAMES = [target["name"] for target in DESIGN_TARGETS]
@@ -150,7 +167,7 @@ if DESIGN:
         precomputed module-level list.
         """
         input:
-            DESIGN["candidates"],
+            DESIGN_CANDIDATES,
         output:
             directory(str(DESIGN_DIR / "shards")),
         run:

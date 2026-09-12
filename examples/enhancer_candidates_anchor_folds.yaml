@@ -93,8 +93,10 @@ attribution:
         quantile: 0.92
 
 design:
-  # Automatically consumes attribution/TODO_target_name/core_regions.bed.
-  candidates: /path/to/regulonado_models/attribution/TODO_target_name/core_regions.bed
+  # Chains from the attribution target named TODO_target_name above — same as writing
+  # candidates: <results_dir>/attribution/TODO_target_name/core_regions.bed by hand
+  # (docs/design.md#run-it-at-scale-via-the-workflow).
+  from_attribution: TODO_target_name
   shards: 8
   design_runs: [fold_0, fold_1, fold_2]
   holdout_run: fold_3

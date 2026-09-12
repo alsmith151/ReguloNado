@@ -240,13 +240,29 @@ class DesignConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    candidates: str = Field(min_length=1)
+    candidates: str | None = Field(default=None, min_length=1)
+    from_attribution: str | None = Field(
+        default=None,
+        description=(
+            "Attribution target name to consume core_regions.bed from, instead of writing out "
+            "'candidates' by hand (workflow runs only, resolved via the shared results_dir)."
+        ),
+    )
     shards: int = Field(default=1, ge=1)
     holdout_run: str | None = None
     design_runs: list[str] | None = None
     checkpoint_dirs: list[str] | None = None
     holdout_checkpoint: str | None = None
     targets: list[DesignTarget] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _exactly_one_candidates_source(self) -> "DesignConfig":
+        if (self.candidates is None) == (self.from_attribution is None):
+            raise ValueError(
+                "design must set exactly one of 'candidates' (a BED path) or "
+                "'from_attribution' (an attribution target name to chain from)"
+            )
+        return self
 
     # Standalone-CLI I/O: unused when nested under a full workflow run, where the pipeline
     # supplies these from `inputs:` and the rule's own per-shard output path instead.
