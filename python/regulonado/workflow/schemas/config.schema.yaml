@@ -10,7 +10,25 @@ $defs:
 
       Upstream of ``design``: point ``design.candidates`` at this stage''s
 
-      ``core_regions.bed`` to optimise only the core rather than the whole candidate.'
+      ``core_regions.bed`` to optimise only the core rather than the whole candidate.
+
+
+      Doubles as the single-run config consumed by ``regulonado attribute --params``:
+      a workflow
+
+      YAML sets ``targets`` to several entries and lets the pipeline resolve checkpoints/paths
+      per
+
+      (target, shard); a standalone CLI run sets ``targets`` to exactly one entry
+      and supplies
+
+      ``fasta``/``intervals``-or-``dataset_dir``/``out_dir``/``checkpoint_dirs`` directly
+      (the
+
+      pipeline instead supplies the I/O paths and resolves checkpoints at shell time,
+      so those
+
+      fields are legitimately left unset in a workflow YAML).'
     properties:
       candidates:
         minLength: 1
@@ -33,20 +51,156 @@ $defs:
         anyOf:
         - items:
             type: string
+          minItems: 1
           type: array
         - type: 'null'
         default: null
         title: Checkpoint Dirs
-      common:
-        additionalProperties: true
-        title: Common
-        type: object
       targets:
         items:
           $ref: '#/$defs/AttributionTarget'
         minItems: 1
         title: Targets
         type: array
+      fasta:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Fasta
+      intervals:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Intervals
+      dataset_dir:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Dataset Dir
+      out_dir:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Out Dir
+      bin_reduction:
+        default: mean
+        enum:
+        - mean
+        - topk
+        - max
+        title: Bin Reduction
+        type: string
+      topk_bins:
+        default: 10
+        minimum: 1
+        title: Topk Bins
+        type: integer
+      fold_reduction:
+        default: mean
+        enum:
+        - mean
+        - median
+        title: Fold Reduction
+        type: string
+      pad:
+        default: 0
+        minimum: 0
+        title: Pad
+        type: integer
+      stride:
+        default: 1
+        minimum: 1
+        title: Stride
+        type: integer
+      positions:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Positions
+      on_missing:
+        default: error
+        enum:
+        - error
+        - center
+        - skip
+        title: On Missing
+        type: string
+      smooth_bp:
+        default: 25
+        minimum: 1
+        title: Smooth Bp
+        type: integer
+      quantile:
+        default: 0.9
+        exclusiveMaximum: 1.0
+        exclusiveMinimum: 0.0
+        title: Quantile
+        type: number
+      min_width_bp:
+        default: 50
+        minimum: 1
+        title: Min Width Bp
+        type: integer
+      merge_gap_bp:
+        default: 20
+        minimum: 0
+        title: Merge Gap Bp
+        type: integer
+      min_zscore:
+        default: 1.5
+        title: Min Zscore
+        type: number
+      max_cores_per_candidate:
+        default: 1
+        minimum: 1
+        title: Max Cores Per Candidate
+        type: integer
+      anchor:
+        default: centroid
+        enum:
+        - centroid
+        - peak
+        title: Anchor
+        type: string
+      fix_width:
+        anyOf:
+        - minimum: 1
+          type: integer
+        - type: 'null'
+        default: null
+        title: Fix Width
+      bigwig:
+        default: true
+        title: Bigwig
+        type: boolean
+      rtol:
+        default: 0.01
+        minimum: 0.0
+        title: Rtol
+        type: number
+      fold_mode:
+        default: resident
+        enum:
+        - resident
+        - sequential
+        title: Fold Mode
+        type: string
+      batch_size:
+        default: 8
+        minimum: 1
+        title: Batch Size
+        type: integer
+      device:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Device
     required:
     - candidates
     - targets
@@ -133,7 +287,27 @@ $defs:
   DesignConfig:
     additionalProperties: false
     description: 'Optional synthetic-enhancer-design stage: mutate candidates for
-      cell-type specificity.'
+      cell-type specificity.
+
+
+      Doubles as the single-run config consumed by ``regulonado design --params``:
+      a workflow YAML
+
+      sets ``targets`` to several entries (one per cell-type target, each possibly
+      a different
+
+      ``method``) and lets the pipeline resolve checkpoints/paths per (target, shard);
+      a standalone
+
+      CLI run sets ``targets`` to exactly one entry and supplies
+
+      ``fasta``/``intervals``-or-``dataset_dir``/``out_dir``/``checkpoint_dirs`` directly
+      (the
+
+      pipeline instead supplies the I/O paths from ``inputs:`` and resolves checkpoints
+      at shell
+
+      time, so those fields are legitimately left unset in a workflow YAML).'
     properties:
       candidates:
         minLength: 1
@@ -172,16 +346,217 @@ $defs:
         - type: 'null'
         default: null
         title: Holdout Checkpoint
-      common:
-        additionalProperties: true
-        title: Common
-        type: object
       targets:
         items:
           $ref: '#/$defs/DesignTarget'
         minItems: 1
         title: Targets
         type: array
+      fasta:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Fasta
+      intervals:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Intervals
+      dataset_dir:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Dataset Dir
+      track_sheet:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Track Sheet
+      out_dir:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Out Dir
+      seed:
+        anyOf:
+        - type: integer
+        - type: 'null'
+        default: null
+        title: Seed
+      rounds:
+        default: 20
+        minimum: 1
+        title: Rounds
+        type: integer
+      pad:
+        default: 0
+        minimum: 0
+        title: Pad
+        type: integer
+      top_k:
+        default: 1
+        minimum: 1
+        title: Top K
+        type: integer
+      ism_stride:
+        default: 1
+        minimum: 1
+        title: Ism Stride
+        type: integer
+      ism_positions:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Ism Positions
+      population_size:
+        default: 20
+        minimum: 1
+        title: Population Size
+        type: integer
+      model_queries_per_batch:
+        anyOf:
+        - minimum: 1
+          type: integer
+        - type: 'null'
+        default: null
+        title: Model Queries Per Batch
+      top_n:
+        default: 10
+        minimum: 1
+        title: Top N
+        type: integer
+      mu:
+        default: 1.0
+        exclusiveMinimum: 0
+        title: Mu
+        type: number
+      recomb_rate:
+        default: 0.1
+        minimum: 0
+        title: Recomb Rate
+        type: number
+      threshold:
+        default: 0.1
+        title: Threshold
+        type: number
+      rho:
+        default: 2
+        minimum: 1
+        title: Rho
+        type: integer
+      on_missing:
+        default: error
+        enum:
+        - error
+        - center
+        - skip
+        title: On Missing
+        type: string
+      offtarget_reduction:
+        default: logsumexp
+        enum:
+        - logsumexp
+        - max
+        - mean
+        title: Offtarget Reduction
+        type: string
+      objective:
+        default: specificity
+        enum:
+        - specificity
+        - selective-activation
+        title: Objective
+        type: string
+      offtarget_boost_weight:
+        default: 1.0
+        minimum: 0
+        title: Offtarget Boost Weight
+        type: number
+      offtarget_boost_tolerance:
+        default: 0.0
+        minimum: 0
+        title: Offtarget Boost Tolerance
+        type: number
+      offtarget_temperature:
+        default: 1.0
+        exclusiveMinimum: 0
+        title: Offtarget Temperature
+        type: number
+      gain_transform:
+        default: raw
+        enum:
+        - raw
+        - log2-fold-change
+        title: Gain Transform
+        type: string
+      gain_pseudocount:
+        default: 1.0
+        exclusiveMinimum: 0
+        title: Gain Pseudocount
+        type: number
+      target_alpha:
+        default: 1.0
+        title: Target Alpha
+        type: number
+      bending_factor:
+        default: 0.0
+        title: Bending Factor
+        type: number
+      bin_reduction:
+        default: mean
+        enum:
+        - mean
+        - topk
+        title: Bin Reduction
+        type: string
+      topk_bins:
+        default: 10
+        minimum: 1
+        title: Topk Bins
+        type: integer
+      fold_mode:
+        default: resident
+        enum:
+        - resident
+        - sequential
+        title: Fold Mode
+        type: string
+      batch_size:
+        default: 8
+        minimum: 1
+        title: Batch Size
+        type: integer
+      device:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Device
+      exclude_tracks:
+        items:
+          type: string
+        title: Exclude Tracks
+        type: array
+      wandb:
+        default: false
+        title: Wandb
+        type: boolean
+      wandb_project:
+        default: regulonado-design
+        title: Wandb Project
+        type: string
+      wandb_group:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Wandb Group
     required:
     - candidates
     - targets

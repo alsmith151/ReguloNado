@@ -80,23 +80,28 @@ if ATTRIBUTION:
             )
         return ""
 
-    def _attr_flags(wildcards):
-        """Merge common then per-target settings into repeatable, shell-safe CLI flags."""
+    # ISM-sweep tuning fields of AttributionConfig; everything else in ATTRIBUTION (candidates,
+    # shards, runs, checkpoint_dirs, targets, ...) is structural and handled via rule wildcards.
+    _ATTR_SETTINGS_KEYS = {
+        "bin_reduction", "topk_bins", "fold_reduction", "pad", "stride", "positions",
+        "on_missing", "smooth_bp", "quantile", "min_width_bp", "merge_gap_bp", "min_zscore",
+        "max_cores_per_candidate", "anchor", "fix_width", "bigwig", "rtol", "fold_mode",
+        "batch_size", "device",
+    }
+
+    def _attr_settings_json(wildcards):
+        """Merge shared then per-target ISM-sweep settings into one JSON blob for --params.
+
+        ``regulonado attribute`` only takes the handful of I/O flags below directly; everything
+        else (bin/fold reduction, smoothing, thresholds, ...) reaches it as a validated
+        AttributionConfig loaded from this file.
+        """
+        import json
+
         target = ATTRIBUTION_TARGET_BY_NAME[wildcards.target]
-        merged = {}
-        for settings in (ATTRIBUTION.get("common", {}), target.get("settings", {})):
-            merged.update(_flatten_settings(settings))
-        flags = []
-        for key, value in sorted(merged.items()):
-            flag = "--" + key.replace("_", "-")
-            if isinstance(value, bool):
-                flags.append(flag if value else "--no-" + key.replace("_", "-"))
-            elif isinstance(value, (list, tuple)):
-                for item in value:
-                    flags.extend((flag, shlex.quote(str(item))))
-            else:
-                flags.extend((flag, shlex.quote(str(value))))
-        return " ".join(flags)
+        merged = {k: v for k, v in ATTRIBUTION.items() if k in _ATTR_SETTINGS_KEYS}
+        merged.update(_flatten_settings(target.get("settings", {})))
+        return json.dumps(merged, sort_keys=True)
 
     rule shard_attribution_candidates:
         input:
@@ -124,7 +129,7 @@ if ATTRIBUTION:
             fasta=config["inputs"]["fasta"],
             dataset_dir=str(training_dataset_dir()),
             out_dir=lambda w: str(ATTRIBUTION_DIR / w.target / "shards" / w.shard),
-            flags=_attr_flags,
+            settings_json=_attr_settings_json,
             resolver=str(Path(workflow.basedir) / "scripts" / "resolve_checkpoint.py"),
             run_dirs=_attr_run_dirs(),
             explicit_checkpoint_args=_attr_checkpoint_args(),
@@ -158,14 +163,18 @@ if ATTRIBUTION:
                 done
             fi
 
+            PARAMS_FILE=$(mktemp)
+            trap 'rm -f "$PARAMS_FILE"' EXIT
+            printf '%s' {params.settings_json:q} > "$PARAMS_FILE"
+
             regulonado attribute \
+                --params "$PARAMS_FILE" \
                 --candidates {input.shard:q} \
                 --intervals {input.intervals:q} \
                 "${{CHECKPOINT_ARGS[@]}}" \
                 --fasta {params.fasta:q} \
                 --dataset-dir {params.dataset_dir:q} \
                 --track {params.track:q} \
-                {params.flags} \
                 --out {params.out_dir:q} \
                 > {log:q} 2>&1
             """

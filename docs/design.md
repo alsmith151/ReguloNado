@@ -78,31 +78,55 @@ held-out score is the number that decides whether a design is real.
 Both start from the candidate's endogenous sequence — never a random one —
 and only ever touch its editable span.
 
-- **`--method ism`** (default): greedy in-silico mutagenesis. Each round
+- **`method: ism`** (default): greedy in-silico mutagenesis. Each round
   scores every alternative base at every editable position and accepts the
-  best non-conflicting substitutions (`--top-k`), stopping once no
+  best non-conflicting substitutions (`top_k`), stopping once no
   substitution helps. This is exhaustive, so it is also the expensive one: a
   600 bp candidate is 1800 forward passes per round, times the folds
-  optimised against, times the number of candidates. `--ism-stride` and
-  `--ism-positions` (restrict to a motif BED) cut that down; the CLI prints
+  optimised against, times the number of candidates. `ism_stride` and
+  `ism_positions` (restrict to a motif BED) cut that down; the command prints
   the projected forward-pass count before starting.
-- **`--method adalead`**: an evolutionary search seeded with the endogenous
+- **`method: adalead`**: an evolutionary search seeded with the endogenous
   sequence plus mutants of it, with real recombination
-  (`--population-size` > 1, `--recomb-rate`).
+  (`population_size` > 1, `recomb_rate`).
+
+`top_k`/`ism_stride`/`ism_positions` only apply under `ism`;
+`population_size`/`model_queries_per_batch`/`mu`/`recomb_rate`/`threshold`/`rho`
+only under `adalead` — setting one for the other method is rejected rather
+than silently ignored.
 
 ## Run it
 
+`regulonado design` only takes a handful of options directly (I/O paths, the
+target and search method, `--out`); everything else — rounds, ISM/AdaLead
+tuning, the selective-activation objective, ... — is a validated
+`DesignConfig` (`config/models.py`) loaded via `--params`:
+
+```yaml
+# design-params.yaml
+objective: selective-activation
+targets:
+  - name: k562
+    target: K562
+    method: ism
+    settings: {rounds: 30, top_k: 1}
+```
+
 ```bash
 regulonado design \
+  --params design-params.yaml \
   --candidates my_enhancers.bed \
   --intervals data/atlas/intervals.bed \
   --checkpoint runs/fold_0 --checkpoint runs/fold_1 --checkpoint runs/fold_2 \
   --holdout-checkpoint runs/fold_3 \
   --fasta genome.fa --dataset-dir data/atlas \
   --target K562 \
-  --objective selective-activation \
   --out designs/
 ```
+
+The `--target`/`--method`/`--group-by` flags override the params file's
+(single) target entry; every other CLI flag overrides the matching top-level
+`DesignConfig` field.
 
 Candidates are processed independently, so the command is restartable and
 safe to shard over a BED split. Outputs land in `--out`:

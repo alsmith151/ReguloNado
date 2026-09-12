@@ -53,13 +53,12 @@ attribution:
   # Attribute with the same folds design will optimise against; fold_3 is left
   # out here so it stays a genuine hold-out downstream.
   runs: [fold_0, fold_1, fold_2]
-  common:
-    stride: 1                 # raise to subsample; keep <= smooth_bp
-    smooth_bp: 25
-    min_zscore: 1.5           # candidates flatter than this produce no core at all
-    fix_width: 250            # synthesis-ready fixed-length cores
-    anchor: centroid
-    bigwig: true
+  stride: 1                 # raise to subsample; keep <= smooth_bp
+  smooth_bp: 25
+  min_zscore: 1.5           # candidates flatter than this produce no core at all
+  fix_width: 250            # synthesis-ready fixed-length cores
+  anchor: centroid
+  bigwig: true
   targets:
     - name: hl60
       track: atac_hl60        # a single track name, or its index

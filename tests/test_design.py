@@ -7,7 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
+from conftest import TinyBackbone as _TinyBackbone
+from conftest import write_bed as _write_bed
 from regulonado.design.objective import (
     SpecificityEnergy,
     TrackGroups,
@@ -18,25 +19,17 @@ from regulonado.design.search import AdaLead, AdaLeadConfig, adalead, ism_greedy
 from regulonado.design.sequence import (
     DatasetWindowIndex,
     Seed,
+    _IndexedWindow,
     context_bp_to_pred_bins,
-    decode,
-    one_hot,
     resolve_seeds,
-    reverse_complement,
 )
-from regulonado.inference import Window
+from regulonado.genomics import Window, decode, one_hot, reverse_complement
 
 # Tiny geometry for fast tests, matching tests/test_predict_bigwig.py's convention.
 N_PRED_BINS = 4
 BIN_SIZE = 10
 PRED_BP = N_PRED_BINS * BIN_SIZE  # 40
 CONTEXT = 100
-
-
-def _write_bed(path: Path, rows: list[tuple]) -> Path:
-    lines = ["\t".join(str(field) for field in row) for row in rows]
-    path.write_text("\n".join(lines) + "\n")
-    return path
 
 
 # --------------------------------------------------------------------------- #
@@ -158,14 +151,47 @@ def test_resolve_seeds_pad_widens_editable_without_moving_window(tmp_path, index
     assert (seeds[0].window.pred_start, seeds[0].window.pred_end) == (500, 540)
 
 
+def test_dataset_window_index_containing_supports_mixed_window_widths():
+    # `from_bed` always builds equal-width windows (one n_pred_bins/bin_size for the whole
+    # index), so this constructs the index directly with a narrow and a much wider window to
+    # exercise `containing`'s bisect bound against a real width difference. n_pred_bins*bin_size
+    # (40) is deliberately far smaller than the wide window's actual width (1000): a bisect bound
+    # derived from that fixed value (as opposed to the true max window width) would wrongly
+    # exclude the wide window from the candidate bracket below.
+    narrow = Window(chrom="chr1", pred_start=1000, pred_end=1040, ctx_start=970, ctx_end=1070)
+    wide = Window(chrom="chr1", pred_start=500, pred_end=1500, ctx_start=400, ctx_end=1600)
+    by_chrom = {
+        "chr1": sorted(
+            [
+                _IndexedWindow(window=wide, fold_label="wide", row_index=0),
+                _IndexedWindow(window=narrow, fold_label="narrow", row_index=1),
+            ],
+            key=lambda iw: iw.window.pred_start,
+        )
+    }
+    index = DatasetWindowIndex(by_chrom, context_length=200, n_pred_bins=4, bin_size=10)
+
+    # Contained by both.
+    both = index.containing("chr1", 1010, 1020)
+    assert {iw.fold_label for iw in both} == {"narrow", "wide"}
+
+    # Only the wide window reaches far enough left to contain this one.
+    only_wide = index.containing("chr1", 600, 900)
+    assert {iw.fold_label for iw in only_wide} == {"wide"}
+
+    # Starts inside the wide window but runs past its end — contained by neither.
+    assert index.containing("chr1", 1490, 1600) == []
+
+    # Unknown chromosome.
+    assert index.containing("chr2", 0, 10) == []
+
+
 # --------------------------------------------------------------------------- #
 # 3. resolve_track_groups                                                    #
 # --------------------------------------------------------------------------- #
 def test_resolve_track_groups_from_track_sheet_collapses_replicates(tmp_path):
     sheet = tmp_path / "tracks.csv"
-    sheet.write_text(
-        "sample_id,source\nt0,K562\nt1,K562\nt2,HepG2\nt3,HepG2\n"
-    )
+    sheet.write_text("sample_id,source\nt0,K562\nt1,K562\nt2,HepG2\nt3,HepG2\n")
     groups = resolve_track_groups(
         ["t0", "t1", "t2", "t3"], group_by="source", target="K562", track_sheet=sheet
     )
@@ -248,9 +274,7 @@ def test_specificity_energy_batch_independence():
     a = one_hot("ACGTA")
     b = one_hot("ACGTN")
     batched = energy_fn(np.stack([a, b])).energy
-    individually = torch.stack(
-        [energy_fn(a[None]).energy[0], energy_fn(b[None]).energy[0]]
-    )
+    individually = torch.stack([energy_fn(a[None]).energy[0], energy_fn(b[None]).energy[0]])
     assert torch.allclose(batched, individually)
 
 
@@ -411,9 +435,7 @@ def test_log2_fold_change_normalizes_disparate_count_scales():
 
 
 def test_log2_fold_change_rejects_nonpositive_shifted_scores():
-    energy_fn = _selective_energy(
-        gain_transform="log2-fold-change", gain_pseudocount=0.5
-    )
+    energy_fn = _selective_energy(gain_transform="log2-fold-change", gain_pseudocount=0.5)
     with pytest.raises(ValueError, match="positive"):
         energy_fn._gain(torch.tensor([-1.0]), torch.tensor([0.0]))
 
@@ -532,17 +554,6 @@ def test_adalead_seeded_from_endogenous_sequence_and_correct_length():
 # --------------------------------------------------------------------------- #
 # 7. FoldEnsemble                                                            #
 # --------------------------------------------------------------------------- #
-class _TinyBackbone(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.proj = nn.Conv1d(4, 8, 1)
-        self.feature_dim = 8
-
-    def forward_features(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.proj(input_ids)
-
-    def iter_named_blocks(self):
-        yield "proj", self.proj
 
 
 def _make_checkpoint(tmp_path, name, *, n_pred_bins=N_PRED_BINS):
@@ -577,9 +588,7 @@ def test_fold_ensemble_mismatched_geometry_raises(tmp_path, monkeypatch):
     bad = _make_checkpoint(tmp_path, "fold_b", n_pred_bins=N_PRED_BINS + 1)
 
     with pytest.raises(ValueError, match="fold_b"):
-        FoldEnsemble(
-            [FoldSpec(good, name="fold_a"), FoldSpec(bad, name="fold_b")], device="cpu"
-        )
+        FoldEnsemble([FoldSpec(good, name="fold_a"), FoldSpec(bad, name="fold_b")], device="cpu")
 
 
 def test_fold_ensemble_sequential_and_resident_agree(tmp_path, monkeypatch):
@@ -615,9 +624,9 @@ def test_design_config_parses_example_workflow_config():
     assert {t.name for t in config.design.targets} == {"target_ism", "target_adalead"}
     assert config.design.holdout_run == "fold_3"
     assert config.design.design_runs == ["fold_0", "fold_1", "fold_2"]
-    assert config.design.common["objective"] == "selective-activation"
-    assert config.design.common["gain_transform"] == "log2-fold-change"
-    assert config.design.common["offtarget_boost_weight"] == 1.0
+    assert config.design.objective == "selective-activation"
+    assert config.design.gain_transform == "log2-fold-change"
+    assert config.design.offtarget_boost_weight == 1.0
 
 
 def test_design_config_unknown_holdout_run_raises():
@@ -673,6 +682,57 @@ def test_design_config_shards_must_be_positive():
     from regulonado.config.models import DesignConfig, DesignTarget
 
     with pytest.raises(pydantic.ValidationError):
+        DesignConfig(candidates="c.bed", shards=0, targets=[DesignTarget(name="a", target="K562")])
+
+
+def test_design_config_rejects_adalead_only_field_with_method_ism():
+    """F03: the old CLI accepted --population-size under --method ism and silently ignored it."""
+    import pydantic
+    from regulonado.config.models import DesignConfig, DesignTarget
+
+    with pytest.raises(pydantic.ValidationError, match="AdaLead-only"):
         DesignConfig(
-            candidates="c.bed", shards=0, targets=[DesignTarget(name="a", target="K562")]
+            candidates="c.bed",
+            targets=[DesignTarget(name="a", target="K562", method="ism")],
+            population_size=50,
         )
+
+
+def test_design_config_rejects_ism_only_field_with_method_adalead():
+    import pydantic
+    from regulonado.config.models import DesignConfig, DesignTarget
+
+    with pytest.raises(pydantic.ValidationError, match="ISM-only"):
+        DesignConfig(
+            candidates="c.bed",
+            targets=[
+                DesignTarget(name="a", target="K562", method="adalead", settings={"top_k": 2})
+            ],
+        )
+
+
+def test_design_config_params_round_trip(tmp_path):
+    """A DesignConfig serialised to YAML (as the workflow/CLI --params flow does) reloads
+    identically."""
+    import yaml
+    from regulonado.config.models import DesignConfig, DesignTarget
+
+    config = DesignConfig(
+        candidates="c.bed",
+        checkpoint_dirs=["fold_0", "fold_1"],
+        fasta="genome.fa",
+        intervals="intervals.bed",
+        out_dir="out/",
+        rounds=5,
+        objective="selective-activation",
+        targets=[DesignTarget(name="cli", target="K562", method="ism", settings={"top_k": 2})],
+    )
+    # exclude_unset, not exclude_none: dumping every default too would make every method-
+    # specific field (population_size et al., all defaulted) look "explicitly set" on reload,
+    # via model_fields_set -- and wrongly trip the ism/adalead consistency check below.
+    params_path = tmp_path / "params.yaml"
+    params_path.write_text(yaml.safe_dump(config.model_dump(mode="json", exclude_unset=True)))
+
+    reloaded = DesignConfig.model_validate(yaml.safe_load(params_path.read_text()))
+
+    assert reloaded == config

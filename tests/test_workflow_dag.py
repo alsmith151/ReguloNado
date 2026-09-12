@@ -196,13 +196,12 @@ design:
   checkpoint_dirs:
     - {checkpoint_a}
     - {checkpoint_b}
-  common:
-    objective: selective-activation
-    gain_transform: log2-fold-change
-    gain_pseudocount: 1.0
-    offtarget_boost_weight: 1.5
-    offtarget_boost_tolerance: 0.05
-    offtarget_temperature: 0.4
+  objective: selective-activation
+  gain_transform: log2-fold-change
+  gain_pseudocount: 1.0
+  offtarget_boost_weight: 1.5
+  offtarget_boost_tolerance: 0.05
+  offtarget_temperature: 0.4
   targets:
     - name: k562
       target: K562
@@ -254,12 +253,16 @@ design:
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     assert "regulonado design" in output
-    assert "--objective selective-activation" in output
-    assert "--gain-transform log2-fold-change" in output
-    assert "--gain-pseudocount 1.0" in output
-    assert "--offtarget-boost-weight 2.5" in output
-    assert "--offtarget-boost-tolerance 0.05" in output
-    assert "--offtarget-temperature 0.4" in output
+    # The target/method dispatch stays a direct CLI flag; the tuning settings reach the command
+    # as a validated DesignConfig written to the --params file (cli/design.py, F03/S5).
+    assert "--target K562" in output
+    assert "--params" in output
+    assert '"objective": "selective-activation"' in output
+    assert '"gain_transform": "log2-fold-change"' in output
+    assert '"gain_pseudocount": 1.0' in output
+    assert '"offtarget_boost_weight": 2.5' in output
+    assert '"offtarget_boost_tolerance": 0.05' in output
+    assert '"offtarget_temperature": 0.4' in output
     assert str(tmp_path / "results" / "design" / "k562" / "designs.tsv") in output
 
     cli_result = subprocess.run(
@@ -280,8 +283,8 @@ design:
     )
     cli_output = cli_result.stdout + cli_result.stderr
     assert cli_result.returncode == 0, cli_output
-    assert "--objective selective-activation" in cli_output
-    assert "--gain-transform log2-fold-change" in cli_output
+    assert '"objective": "selective-activation"' in cli_output
+    assert '"gain_transform": "log2-fold-change"' in cli_output
 
 
 def test_attribution_stage_chains_into_design(tmp_path):
@@ -336,10 +339,9 @@ attribution:
   candidates: {candidates}
   shards: 2
   runs: [fold_0, fold_1]
-  common:
-    stride: 4
-    fix_width: 300
-    bigwig: true
+  stride: 4
+  fix_width: 300
+  bigwig: true
   targets:
     - {{name: hl60, track: atac_hl60, settings: {{quantile: 0.92}}}}
 design:
@@ -374,12 +376,14 @@ design:
     assert re.search(r"attribute_shard\s+2", result.stdout)
     assert re.search(r"merge_attributions\s+1", result.stdout)
     assert "regulonado attribute" in result.stdout
-    # The named track and both common and per-target settings must reach the command line.
+    # The named track is a direct CLI flag; common and per-target settings reach the command as
+    # a validated AttributionConfig written to the --params file (cli/attribute.py, F03/S5).
     assert "--track atac_hl60" in result.stdout
-    assert "--stride 4" in result.stdout
-    assert "--fix-width 300" in result.stdout
-    assert "--quantile 0.92" in result.stdout
-    assert "--bigwig" in result.stdout
+    assert "--params" in result.stdout
+    assert '"stride": 4' in result.stdout
+    assert '"fix_width": 300' in result.stdout
+    assert '"quantile": 0.92' in result.stdout
+    assert '"bigwig": true' in result.stdout
     # And design must run downstream of attribution, not in parallel with it: shard_candidates
     # (a checkpoint, since its shard count depends on content merge_attributions produces)
     # depends on attribution's merged output, and merge_designs in turn depends on the

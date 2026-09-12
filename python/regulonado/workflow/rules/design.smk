@@ -94,27 +94,40 @@ if DESIGN:
             return []
         return str(phase_run_dir(holdout, PHASE_NAMES[-1]) / "trainer_state.json")
 
-    def _design_flags(wildcards):
-        """Merge common then per-target settings into repeatable, shell-safe CLI flags."""
+    # Search-tuning fields of DesignConfig; everything else in DESIGN (candidates, shards,
+    # holdout_run, design_runs, checkpoint_dirs, targets, ...) is structural and handled via
+    # rule wildcards / the checkpoint-resolution shell logic below instead.
+    _DESIGN_SETTINGS_KEYS = {
+        "rounds", "pad", "top_k", "ism_stride", "ism_positions", "population_size",
+        "model_queries_per_batch", "top_n", "mu", "recomb_rate", "threshold", "rho",
+        "on_missing", "offtarget_reduction", "objective", "offtarget_boost_weight",
+        "offtarget_boost_tolerance", "offtarget_temperature", "gain_transform", "gain_pseudocount",
+        "target_alpha", "bending_factor", "bin_reduction", "topk_bins", "fold_mode", "batch_size",
+        "device", "exclude_tracks", "wandb", "wandb_project", "wandb_group",
+    }
+
+    def _design_settings_json(wildcards):
+        """Merge shared then per-target search-tuning settings into one JSON blob for --params.
+
+        ``regulonado design`` only takes the handful of I/O and dispatch flags below directly
+        (candidates/checkpoint/fasta/target/group-by/method/out/intervals/dataset-dir);
+        everything else (rounds, AdaLead/ISM tuning, the selective-activation objective, ...)
+        reaches it as a validated DesignConfig loaded from this file.
+        """
+        import json
+
         target = DESIGN_TARGET_BY_NAME[wildcards.target]
-        merged = {}
-        for settings in (DESIGN.get("common", {}), target.get("settings", {})):
-            merged.update(_flatten_settings(settings))
-        # Keep each configured design target in its own W&B project by default.
-        # An explicit wandb_project in common/target settings remains authoritative.
+        merged = {k: v for k, v in DESIGN.items() if k in _DESIGN_SETTINGS_KEYS}
+        merged.update(_flatten_settings(target.get("settings", {})))
+        # Keep each configured design target in its own W&B project/group by default. An
+        # explicit wandb_project/wandb_group above or in the target's own settings wins.
         merged.setdefault("wandb_project", "regulonado-design")
         merged.setdefault("wandb_group", f"{wildcards.target}-{DESIGN_WANDB_RUN_ID}")
-        flags = []
-        for key, value in sorted(merged.items()):
-            flag = "--" + key.replace("_", "-")
-            if isinstance(value, bool):
-                flags.append(flag if value else "--no-" + key.replace("_", "-"))
-            elif isinstance(value, (list, tuple)):
-                for item in value:
-                    flags.extend((flag, shlex.quote(str(item))))
-            else:
-                flags.extend((flag, shlex.quote(str(value))))
-        return " ".join(flags)
+        # track_sheet is not one of design's own CLI flags (unlike --dataset-dir), so it has
+        # to reach the run through --params too; inputs.track_sheet is the fallback default.
+        if config["inputs"].get("track_sheet"):
+            merged.setdefault("track_sheet", config["inputs"]["track_sheet"])
+        return json.dumps(merged, sort_keys=True)
 
     def _design_checkpoint_args():
         if DESIGN_CHECKPOINT_DIRS:
@@ -168,9 +181,8 @@ if DESIGN:
             method=lambda w: DESIGN_TARGET_BY_NAME[w.target].get("method", "ism"),
             fasta=config["inputs"]["fasta"],
             dataset_dir=str(training_dataset_dir()),
-            track_sheet=config["inputs"].get("track_sheet") or "",
             out_dir=lambda w: str(DESIGN_DIR / w.target / "shards" / w.shard),
-            flags=_design_flags,
+            settings_json=_design_settings_json,
             resolver=str(Path(workflow.basedir) / "scripts" / "resolve_checkpoint.py"),
             design_run_dirs=_design_run_dirs(),
             holdout_run_dir=_design_holdout_dir(),
@@ -213,23 +225,21 @@ if DESIGN:
                 HOLDOUT_ARGS=(--holdout-checkpoint "$HCKPT")
             fi
 
-            TRACK_SHEET_ARGS=()
-            if [ -n "{params.track_sheet}" ]; then
-                TRACK_SHEET_ARGS=(--track-sheet {params.track_sheet:q})
-            fi
+            PARAMS_FILE=$(mktemp)
+            trap 'rm -f "$PARAMS_FILE"' EXIT
+            printf '%s' {params.settings_json:q} > "$PARAMS_FILE"
 
             regulonado design \
+                --params "$PARAMS_FILE" \
                 --candidates {input.shard:q} \
                 --intervals {input.intervals:q} \
                 "${{CHECKPOINT_ARGS[@]}}" \
                 "${{HOLDOUT_ARGS[@]}}" \
                 --fasta {params.fasta:q} \
                 --dataset-dir {params.dataset_dir:q} \
-                "${{TRACK_SHEET_ARGS[@]}}" \
                 --target {params.target:q} \
                 --group-by {params.group_by:q} \
                 --method {params.method:q} \
-                {params.flags} \
                 --out {params.out_dir:q} \
                 > {log:q} 2>&1
             """

@@ -73,17 +73,19 @@ design:
   shards: 8
   holdout_run: fold_3
   design_runs: [fold_0, fold_1, fold_2]
-  common:
-    fold_mode: sequential
-    batch_size: 8
-    # Reward target-cell gain from the endogenous seed while penalising activation elsewhere.
-    objective: selective-activation
-    gain_transform: log2-fold-change
-    gain_pseudocount: 1.0
-    offtarget_boost_weight: 1.0
-    # log2(1.10): allow roughly 10% off-target growth before applying a penalty.
-    offtarget_boost_tolerance: 0.138
-    offtarget_temperature: 0.1
+  fold_mode: sequential
+  batch_size: 8
+  # Reward target-cell gain from the endogenous seed while penalising activation elsewhere.
+  objective: selective-activation
+  gain_transform: log2-fold-change
+  gain_pseudocount: 1.0
+  offtarget_boost_weight: 1.0
+  # log2(1.10): allow roughly 10% off-target growth before applying a penalty.
+  offtarget_boost_tolerance: 0.138
+  offtarget_temperature: 0.1
+  # top_k/ism_stride and population_size/mu/recomb_rate are method-specific, so they live in
+  # each target's own `settings` (this file mixes ism and adalead targets) rather than at the
+  # top level above.
   targets:
     - name: target_ism
       target: <cell type>

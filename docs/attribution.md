@@ -106,8 +106,21 @@ To cut it down:
 
 ## Run it
 
+`regulonado attribute` takes only the I/O flags directly — candidates, checkpoints, fasta,
+track, intervals/dataset-dir and out. Everything else (bin/fold reduction, smoothing,
+thresholds, ...) comes from `--params`, a YAML or JSON file parsed as
+[`AttributionConfig`](../python/regulonado/config/models.py); flags given directly on the
+command line override anything `--params` sets.
+
+```yaml
+# attribute_params.yaml
+fix_width: 250
+min_zscore: 1.5
+```
+
 ```bash
 regulonado attribute \
+  --params attribute_params.yaml \
   --candidates enhancer_shortlist.bed \
   --fasta genome.fa \
   --dataset-dir results/dataset \
@@ -115,7 +128,6 @@ regulonado attribute \
   --checkpoint results/train/fold_1/peak_finetune \
   --checkpoint results/train/fold_2/peak_finetune \
   --track atac_hl60 \
-  --fix-width 250 \
   --out results/attribution/hl60
 ```
 
@@ -147,10 +159,9 @@ attribution:
   candidates: enhancer_shortlist.bed
   shards: 8
   runs: [fold_0, fold_1, fold_2]
-  common:
-    stride: 1
-    fix_width: 250
-    min_zscore: 1.5
+  stride: 1
+  fix_width: 250
+  min_zscore: 1.5
   targets:
     - name: hl60
       track: atac_hl60

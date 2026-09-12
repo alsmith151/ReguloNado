@@ -123,9 +123,9 @@ class ScalingConfig(BaseModel):
     window_stat_bp: int = Field(default=1000, ge=1)
     window_stat_bp_by_assay: dict[str, int] | None = None
     background_sample: int | None = Field(default=5000, ge=1)
-    bamnado_method: Literal[
-        "tmm", "csaw-background", "cpm", "median-of-ratios", "spike-in"
-    ] | None = None
+    bamnado_method: (
+        Literal["tmm", "csaw-background", "cpm", "median-of-ratios", "spike-in"] | None
+    ) = None
     bamnado_exogenous_prefix: str | None = None
     seqnado_project: str | None = Field(
         default=None,
@@ -154,8 +154,8 @@ class QCConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    checks: list[Literal["sparsity", "interval_signal", "replicate_concordance", "anchor"]] = (
-        Field(default_factory=list)
+    checks: list[Literal["sparsity", "interval_signal", "replicate_concordance", "anchor"]] = Field(
+        default_factory=list
     )
     rules: dict[str, dict[Literal["min", "max"], float]] = Field(default_factory=dict)
     drop_degenerate: bool = False
@@ -219,7 +219,16 @@ class DesignTarget(BaseModel):
 
 
 class DesignConfig(BaseModel):
-    """Optional synthetic-enhancer-design stage: mutate candidates for cell-type specificity."""
+    """Optional synthetic-enhancer-design stage: mutate candidates for cell-type specificity.
+
+    Doubles as the single-run config consumed by ``regulonado design --params``: a workflow YAML
+    sets ``targets`` to several entries (one per cell-type target, each possibly a different
+    ``method``) and lets the pipeline resolve checkpoints/paths per (target, shard); a standalone
+    CLI run sets ``targets`` to exactly one entry and supplies
+    ``fasta``/``intervals``-or-``dataset_dir``/``out_dir``/``checkpoint_dirs`` directly (the
+    pipeline instead supplies the I/O paths from ``inputs:`` and resolves checkpoints at shell
+    time, so those fields are legitimately left unset in a workflow YAML).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -229,8 +238,56 @@ class DesignConfig(BaseModel):
     design_runs: list[str] | None = None
     checkpoint_dirs: list[str] | None = None
     holdout_checkpoint: str | None = None
-    common: dict[str, Any] = Field(default_factory=dict)
     targets: list[DesignTarget] = Field(min_length=1)
+
+    # Standalone-CLI I/O: unused when nested under a full workflow run, where the pipeline
+    # supplies these from `inputs:` and the rule's own per-shard output path instead.
+    fasta: str | None = None
+    intervals: str | None = None
+    dataset_dir: str | None = None
+    track_sheet: str | None = None
+    out_dir: str | None = None
+    seed: int | None = None
+
+    # Search tuning shared by every target unless a target's own `settings` overrides it (the
+    # workflow rule flattens common+per-target settings into these fields before calling
+    # `regulonado design --params`; see workflow/rules/design.smk). Defaults match the CLI's
+    # previous per-flag defaults. Only set `top_k`/`ism_stride`/`ism_positions` (ISM-only) or
+    # `population_size`/`model_queries_per_batch`/`mu`/`recomb_rate`/`threshold`/`rho`
+    # (AdaLead-only) at this top level when every target in the file shares one `method` — for a
+    # mixed-method file (like examples/enhancer_design.yaml) set them per-target instead, via
+    # `targets[i].settings`.
+    rounds: int = Field(default=20, ge=1)
+    pad: int = Field(default=0, ge=0)
+    top_k: int = Field(default=1, ge=1)
+    ism_stride: int = Field(default=1, ge=1)
+    ism_positions: str | None = None
+    population_size: int = Field(default=20, ge=1)
+    model_queries_per_batch: int | None = Field(default=None, ge=1)
+    top_n: int = Field(default=10, ge=1)
+    mu: float = Field(default=1.0, gt=0)
+    recomb_rate: float = Field(default=0.1, ge=0)
+    threshold: float = 0.1
+    rho: int = Field(default=2, ge=1)
+    on_missing: Literal["error", "center", "skip"] = "error"
+    offtarget_reduction: Literal["logsumexp", "max", "mean"] = "logsumexp"
+    objective: Literal["specificity", "selective-activation"] = "specificity"
+    offtarget_boost_weight: float = Field(default=1.0, ge=0)
+    offtarget_boost_tolerance: float = Field(default=0.0, ge=0)
+    offtarget_temperature: float = Field(default=1.0, gt=0)
+    gain_transform: Literal["raw", "log2-fold-change"] = "raw"
+    gain_pseudocount: float = Field(default=1.0, gt=0)
+    target_alpha: float = 1.0
+    bending_factor: float = 0.0
+    bin_reduction: Literal["mean", "topk"] = "mean"
+    topk_bins: int = Field(default=10, ge=1)
+    fold_mode: Literal["resident", "sequential"] = "resident"
+    batch_size: int = Field(default=8, ge=1)
+    device: str | None = None
+    exclude_tracks: list[str] = Field(default_factory=list)
+    wandb: bool = False
+    wandb_project: str = "regulonado-design"
+    wandb_group: str | None = None
 
     @model_validator(mode="after")
     def _target_names_are_unique(self) -> "DesignConfig":
@@ -240,6 +297,35 @@ class DesignConfig(BaseModel):
             raise ValueError(
                 f"design.targets names must be unique; repeated: {', '.join(duplicates)}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _method_specific_settings_are_consistent(self) -> "DesignConfig":
+        """Reject an ISM-only/AdaLead-only field set (top-level, or in a target's own
+        `settings`) for a target whose `method` never reads it — the CLI used to accept and
+        silently ignore these (docs/audit-2026-09-11.xml F03).
+        """
+        ism_only = {"top_k", "ism_stride", "ism_positions"}
+        adalead_only = {
+            "population_size",
+            "model_queries_per_batch",
+            "mu",
+            "recomb_rate",
+            "threshold",
+            "rho",
+        }
+        set_fields = self.model_fields_set
+        for target in self.targets:
+            explicit = {name for name in (ism_only | adalead_only) if name in set_fields}
+            explicit |= set(target.settings)
+            forbidden = adalead_only if target.method == "ism" else ism_only
+            bad = sorted(explicit & forbidden)
+            if bad:
+                other = "AdaLead" if target.method == "ism" else "ISM"
+                raise ValueError(
+                    f"design target {target.name!r} uses method {target.method!r}, which "
+                    f"ignores {other}-only setting(s): {', '.join(bad)}"
+                )
         return self
 
 
@@ -258,6 +344,13 @@ class AttributionConfig(BaseModel):
 
     Upstream of ``design``: point ``design.candidates`` at this stage's
     ``core_regions.bed`` to optimise only the core rather than the whole candidate.
+
+    Doubles as the single-run config consumed by ``regulonado attribute --params``: a workflow
+    YAML sets ``targets`` to several entries and lets the pipeline resolve checkpoints/paths per
+    (target, shard); a standalone CLI run sets ``targets`` to exactly one entry and supplies
+    ``fasta``/``intervals``-or-``dataset_dir``/``out_dir``/``checkpoint_dirs`` directly (the
+    pipeline instead supplies the I/O paths and resolves checkpoints at shell time, so those
+    fields are legitimately left unset in a workflow YAML).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -265,9 +358,38 @@ class AttributionConfig(BaseModel):
     candidates: str = Field(min_length=1)
     shards: int = Field(default=1, ge=1)
     runs: list[str] | None = None
-    checkpoint_dirs: list[str] | None = None
-    common: dict[str, Any] = Field(default_factory=dict)
+    checkpoint_dirs: list[str] | None = Field(default=None, min_length=1)
     targets: list[AttributionTarget] = Field(min_length=1)
+
+    # Standalone-CLI I/O: unused when this config is nested under a full workflow run, where the
+    # pipeline supplies these from `inputs:` and the rule's own per-shard output path instead.
+    fasta: str | None = None
+    intervals: str | None = None
+    dataset_dir: str | None = None
+    out_dir: str | None = None
+
+    # ISM-sweep tuning, shared by every target; a target's own `settings` can override any of
+    # these per-target. Defaults match the sweep's previous CLI defaults.
+    bin_reduction: Literal["mean", "topk", "max"] = "mean"
+    topk_bins: int = Field(default=10, ge=1)
+    fold_reduction: Literal["mean", "median"] = "mean"
+    pad: int = Field(default=0, ge=0)
+    stride: int = Field(default=1, ge=1)
+    positions: str | None = None
+    on_missing: Literal["error", "center", "skip"] = "error"
+    smooth_bp: int = Field(default=25, ge=1)
+    quantile: float = Field(default=0.90, gt=0.0, lt=1.0)
+    min_width_bp: int = Field(default=50, ge=1)
+    merge_gap_bp: int = Field(default=20, ge=0)
+    min_zscore: float = 1.5
+    max_cores_per_candidate: int = Field(default=1, ge=1)
+    anchor: Literal["centroid", "peak"] = "centroid"
+    fix_width: int | None = Field(default=None, ge=1)
+    bigwig: bool = True
+    rtol: float = Field(default=0.01, ge=0.0)
+    fold_mode: Literal["resident", "sequential"] = "resident"
+    batch_size: int = Field(default=8, ge=1)
+    device: str | None = None
 
     @model_validator(mode="after")
     def _target_names_are_unique(self) -> "AttributionConfig":
@@ -276,6 +398,21 @@ class AttributionConfig(BaseModel):
         if duplicates:
             raise ValueError(
                 f"attribution.targets names must be unique; repeated: {', '.join(duplicates)}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _mode_specific_options_are_consistent(self) -> "AttributionConfig":
+        set_fields = self.model_fields_set
+        if "topk_bins" in set_fields and self.bin_reduction != "topk":
+            raise ValueError(
+                "attribution.topk_bins only applies when bin_reduction='topk'; it was set "
+                f"while bin_reduction={self.bin_reduction!r}"
+            )
+        if "stride" in set_fields and self.stride != 1 and self.positions is not None:
+            raise ValueError(
+                "attribution.stride is ignored once positions restricts the sweep to explicit "
+                "coordinates; set only one of them"
             )
         return self
 
@@ -335,8 +472,7 @@ class RegulonadoConfig(BaseModel):
         unknown = sorted(name for name in self.attribution.runs if name not in run_names)
         if unknown:
             raise ValueError(
-                f"attribution.runs names train.runs entries that don't exist: "
-                f"{', '.join(unknown)}"
+                f"attribution.runs names train.runs entries that don't exist: {', '.join(unknown)}"
             )
         return self
 
@@ -388,9 +524,7 @@ class RegulonadoConfig(BaseModel):
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            yaml.safe_dump(self.to_dict(), sort_keys=False, default_flow_style=False)
-        )
+        path.write_text(yaml.safe_dump(self.to_dict(), sort_keys=False, default_flow_style=False))
         return path
 
     def to_dict(self) -> dict[str, Any]:
@@ -405,9 +539,7 @@ class RegulonadoConfig(BaseModel):
         for section in ("train",):
             if not data.get(section, {}).get("common"):
                 data.get(section, {}).pop("common", None)
-        for item in data.get("train", {}).get("phases", []) + data.get("train", {}).get(
-            "runs", []
-        ):
+        for item in data.get("train", {}).get("phases", []) + data.get("train", {}).get("runs", []):
             if not item.get("settings"):
                 item.pop("settings", None)
         return data
