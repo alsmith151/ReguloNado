@@ -69,6 +69,14 @@ class InputsConfig(BaseModel):
             "not QC is enabled."
         ),
     )
+    track_annotations: str | None = Field(
+        default=None,
+        description=(
+            "CSV/parquet of track_name + extra columns (e.g. 'group') merged in at 'tracks "
+            "assemble' — a separate DAG input from track_sheet/bigwig_dir, so editing it "
+            "re-runs only assembly, not discovery."
+        ),
+    )
 
     @model_validator(mode="after")
     def _require_a_track_source(self) -> "InputsConfig":
@@ -330,13 +338,39 @@ class DesignConfig(BaseModel):
 
 
 class AttributionTarget(BaseModel):
+    """One attribution readout: either an exact ``track``, or a track ``group``.
+
+    A ``group`` readout averages every track whose ``group_by`` column (a
+    ``TrackRecord``/``tracks.parquet`` column such as ``source`` or a freeform
+    ``group`` label) equals ``target`` — the same grouping ``design`` targets
+    already use via ``DesignTarget.group_by``.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    track: str
+    track: str | None = None
+    target: str | None = None
+    group_by: str | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
 
     _check_name = field_validator("name")(staticmethod(_validate_name))
+
+    @model_validator(mode="after")
+    def _exactly_one_selector(self) -> "AttributionTarget":
+        if (self.track is None) == (self.target is None):
+            raise ValueError(
+                f"attribution target {self.name!r} must set exactly one of 'track' "
+                f"(an exact track name/index) or 'target' (a group value, with 'group_by')"
+            )
+        if self.track is not None and self.group_by is not None:
+            raise ValueError(
+                f"attribution target {self.name!r} sets 'group_by' but not 'target'; "
+                f"'group_by' only applies to a 'target'-based group readout"
+            )
+        if self.target is not None and self.group_by is None:
+            self.group_by = "source"
+        return self
 
 
 class AttributionConfig(BaseModel):
@@ -367,6 +401,12 @@ class AttributionConfig(BaseModel):
     intervals: str | None = None
     dataset_dir: str | None = None
     out_dir: str | None = None
+
+    # Group-target resolution: a `target`-based AttributionTarget resolves against `track_sheet`
+    # if set, else `dataset_dir`/tracks.parquet. `exclude_tracks` removes tracks from every
+    # group (and from off-target consideration) regardless of which one they'd otherwise match.
+    track_sheet: str | None = None
+    exclude_tracks: list[str] = Field(default_factory=list)
 
     # ISM-sweep tuning, shared by every target; a target's own `settings` can override any of
     # these per-target. Defaults match the sweep's previous CLI defaults.

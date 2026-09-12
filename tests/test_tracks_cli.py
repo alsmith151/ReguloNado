@@ -99,6 +99,41 @@ def test_assemble_exclude_track_applies_even_with_qc_off(tmp_path, bigwig_dir):
     assert table.loc["a", "status"] == "included"
 
 
+def test_assemble_annotations_merges_a_group_column(tmp_path, bigwig_dir):
+    discovered = tmp_path / "discovered.parquet"
+    runner.invoke(tracks_app, ["discover", str(discovered), "--bigwig-dir", str(bigwig_dir)])
+
+    annotations = tmp_path / "groups.csv"
+    annotations.write_text("track_name,group\na,hl60\nb,k562\n")
+
+    assembled = tmp_path / "tracks.parquet"
+    result = runner.invoke(
+        tracks_app,
+        ["assemble", str(discovered), "-o", str(assembled), "--annotations", str(annotations)],
+    )
+    assert result.exit_code == 0, result.output
+
+    table = read_track_table(assembled).set_index("track_name")
+    assert table.loc["a", "group"] == "hl60"
+    assert table.loc["b", "group"] == "k562"
+
+
+def test_assemble_annotations_rejects_an_unknown_track_name(tmp_path, bigwig_dir):
+    discovered = tmp_path / "discovered.parquet"
+    runner.invoke(tracks_app, ["discover", str(discovered), "--bigwig-dir", str(bigwig_dir)])
+
+    annotations = tmp_path / "groups.csv"
+    annotations.write_text("track_name,group\na,hl60\nnonexistent,k562\n")
+
+    result = runner.invoke(
+        tracks_app,
+        ["assemble", str(discovered), "-o", str(tmp_path / "tracks.parquet"), "--annotations",
+         str(annotations)],
+    )
+    assert result.exit_code != 0
+    assert "nonexistent" in result.output
+
+
 def test_assemble_column_set_is_identical_with_qc_on_and_off(tmp_path, bigwig_dir):
     """Stable schema: an unrun stage leaves its columns null, not absent."""
     discovered = tmp_path / "discovered.parquet"

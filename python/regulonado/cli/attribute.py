@@ -29,6 +29,10 @@ def _apply_cli_overrides(
     intervals: Optional[Path],
     dataset_dir: Optional[Path],
     track: Optional[str],
+    target: Optional[str],
+    group_by: Optional[str],
+    track_sheet: Optional[Path],
+    exclude_track: Optional[list[str]],
 ) -> dict[str, Any]:
     """Layer explicit CLI flags onto a ``--params``-loaded mapping; CLI flags win."""
     overrides = {
@@ -38,17 +42,24 @@ def _apply_cli_overrides(
         "out_dir": str(out_dir) if out_dir else None,
         "intervals": str(intervals) if intervals else None,
         "dataset_dir": str(dataset_dir) if dataset_dir else None,
+        "track_sheet": str(track_sheet) if track_sheet else None,
+        "exclude_tracks": list(exclude_track) if exclude_track else None,
     }
     for key, value in overrides.items():
         if value is not None:
             data[key] = value
 
-    if track is not None:
+    if track is not None or target is not None or group_by is not None:
         targets = data.get("targets")
         if not targets:
-            data["targets"] = [{"name": "cli", "track": track}]
-        else:
+            data["targets"] = [{"name": "cli"}]
+            targets = data["targets"]
+        if track is not None:
             targets[0]["track"] = track
+        if target is not None:
+            targets[0]["target"] = target
+        if group_by is not None:
+            targets[0]["group_by"] = group_by
     return data
 
 
@@ -72,6 +83,32 @@ def attribute(
     ] = None,
     track: Annotated[
         Optional[str], typer.Option("--track", help="Track to attribute against: name or index.")
+    ] = None,
+    target: Annotated[
+        Optional[str],
+        typer.Option(
+            "--target",
+            help="Group value to attribute against (e.g. a cell type), averaged over every "
+            "track whose --group-by column matches. Alternative to --track.",
+        ),
+    ] = None,
+    group_by: Annotated[
+        Optional[str],
+        typer.Option(
+            "--group-by",
+            help="Track-sheet/tracks.parquet column --target is matched against (default "
+            "'source' when --target is set).",
+        ),
+    ] = None,
+    track_sheet: Annotated[
+        Optional[Path],
+        typer.Option("--track-sheet", help="CSV to resolve --target's group from, if not relying "
+                     "on --dataset-dir's tracks.parquet."),
+    ] = None,
+    exclude_track: Annotated[
+        Optional[list[str]],
+        typer.Option("--exclude-track", help="track_name to exclude from --target's group "
+                     "(repeatable)."),
     ] = None,
     out_dir: Annotated[
         Optional[Path], typer.Option("--out", help="Directory to write attribution outputs.")
@@ -111,6 +148,10 @@ def attribute(
         intervals=intervals,
         dataset_dir=dataset_dir,
         track=track,
+        target=target,
+        group_by=group_by,
+        track_sheet=track_sheet,
+        exclude_track=exclude_track,
     )
 
     try:

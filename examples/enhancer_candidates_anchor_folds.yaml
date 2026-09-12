@@ -83,6 +83,12 @@ attribution:
   targets:
     - name: TODO_target_name
       track: TODO_track_name
+      # Alternative to `track:` above — attribute against every track sharing a group label
+      # instead of one exact track (see docs/attribution.md#attributing-against-a-track-group;
+      # `group` is a freeform tracks.parquet column, attachable post-discovery via
+      # `tracks assemble --annotations`, docs/track-table.md#adding-metadata-after-discovery):
+      # target: TODO_cell_type_label
+      # group_by: group
       settings:
         quantile: 0.92
 

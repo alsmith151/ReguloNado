@@ -106,8 +106,9 @@ To cut it down:
 
 ## Run it
 
-`regulonado attribute` takes only the I/O flags directly — candidates, checkpoints, fasta,
-track, intervals/dataset-dir and out. Everything else (bin/fold reduction, smoothing,
+`regulonado attribute` takes only the I/O and target-selection flags directly — candidates,
+checkpoints, fasta, track (or target/group-by/track-sheet/exclude-track), intervals/dataset-dir
+and out. Everything else (bin/fold reduction, smoothing,
 thresholds, ...) comes from `--params`, a YAML or JSON file parsed as
 [`AttributionConfig`](../python/regulonado/config/models.py); flags given directly on the
 command line override anything `--params` sets.
@@ -138,6 +139,35 @@ regulonado design \
   --candidates results/attribution/hl60/core_regions.bed \
   ... --out results/design/hl60
 ```
+
+## Attributing against a track group
+
+`--track` names one exact track. `--target`/`--group-by` attribute against a *group* instead —
+every track whose `--group-by` column (a `tracks.parquet`/track-sheet column: `condition`,
+`source`, `assay`, `ip`, or a freeform label like `group`) equals `--target` is averaged
+together first, the same grouping `regulonado design`'s `--target`/`--group-by` already use (see
+[design.md](design.md#the-objective) — the mechanism, resolution order (`--track-sheet` CSV, then
+`--dataset-dir`'s `tracks.parquet`), and column choices are identical).
+`--group-by` defaults to `source` when `--target` is set.
+
+```bash
+regulonado attribute \
+  --params attribute_params.yaml \
+  --candidates enhancer_shortlist.bed \
+  --fasta genome.fa \
+  --dataset-dir results/dataset \
+  --checkpoint results/train/fold_0/peak_finetune \
+  --target hl60 \
+  --group-by group \
+  --out results/attribution/hl60
+```
+
+A track only has a `group` label if one was attached to `tracks.parquet` — see
+[track-table.md](track-table.md#adding-metadata-after-discovery) for adding it after
+`regulonado tracks discover` without redoing discovery from a hand-written `--track-sheet` (in
+the full pipeline, `inputs.track_annotations` wires this in as its own DAG input, so editing it
+doesn't force track discovery to re-run either). `--exclude-track` drops a track from every
+group's consideration, same as `design`.
 
 ## Outputs
 

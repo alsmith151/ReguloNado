@@ -393,6 +393,15 @@ def assemble(
     qc_report: Annotated[
         Optional[Path], typer.Option("--qc-report", help="qc_report.parquet")
     ] = None,
+    annotations: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--annotations",
+            help="CSV/parquet with a 'track_name' column plus arbitrary extra columns (e.g. "
+            "'group') to merge in — the way to attach grouping metadata after 'tracks discover' "
+            "without redoing discovery from a hand-crafted --track-sheet.",
+        ),
+    ] = None,
     drop_degenerate: Annotated[
         bool, typer.Option("--drop-degenerate", help="Drop tracks with qc_verdict == 'failed'")
     ] = False,
@@ -427,6 +436,20 @@ def assemble(
         qc_df = pd.read_parquet(qc_report) if str(qc_report).endswith(".parquet") \
             else pd.read_csv(qc_report)
         merged = merged.merge(qc_df, on="track_name", how="left", validate="one_to_one")
+
+    if annotations is not None:
+        ann_df = pd.read_parquet(annotations) if str(annotations).endswith(".parquet") \
+            else pd.read_csv(annotations)
+        if "track_name" not in ann_df.columns:
+            typer.echo("--annotations file must have a 'track_name' column", err=True)
+            raise typer.Exit(1)
+        unknown_annotated = set(ann_df["track_name"]) - set(merged["track_name"])
+        if unknown_annotated:
+            typer.echo(
+                f"--annotations track_name(s) not found: {sorted(unknown_annotated)}", err=True
+            )
+            raise typer.Exit(1)
+        merged = merged.merge(ann_df, on="track_name", how="left", validate="one_to_one")
 
     for column in (*_CANONICAL_SCALE_COLUMNS, *_CANONICAL_QC_COLUMNS):
         if column not in merged.columns:

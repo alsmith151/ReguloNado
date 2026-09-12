@@ -51,6 +51,48 @@ Every column group is present in the final table whether or not its stage ran �
 leaves its columns null rather than absent, so a reader never has to branch on which stages were
 enabled ("stable schema").
 
+## Adding metadata after discovery
+
+A `group` label (or any other freeform annotation — a project name, an attribution note) doesn't
+have to be known before `regulonado tracks discover` runs. Discover from bigwigs first, then
+layer labels on with `tracks assemble --annotations`:
+
+```bash
+regulonado tracks discover results/tracks/_stages/discovered.parquet --bigwig-dir bigwigs/
+
+# groups.csv:
+#   track_name,group
+#   atac_hl60_rep1,hl60
+#   atac_hl60_rep2,hl60
+#   atac_k562_rep1,k562
+
+regulonado tracks assemble results/tracks/_stages/discovered.parquet \
+  --annotations groups.csv \
+  --output results/tracks/tracks.parquet
+```
+
+`--annotations` merges any CSV/parquet with a `track_name` column onto the table by that column,
+the same way `--scale-factors`/`--qc-report` already do; every one of its other columns becomes a
+bare, additive column on `tracks.parquet` (an unknown `track_name` in the file is rejected rather
+than silently ignored). `group_by: group` in a `design`/`attribution` target then reads it back —
+see [design.md](design.md#the-objective) and [attribution.md](attribution.md#attributing-against-a-track-group).
+
+In the full pipeline (`regulonado.yaml`, not the bare CLI), point `inputs.track_annotations` at
+the file instead of hand-invoking `tracks assemble`:
+
+```yaml
+inputs:
+  bigwig_dir: bigwigs/
+  track_annotations: groups.csv
+```
+
+`track_assemble` is a separate Snakemake rule from `track_discovery`
+(`workflow/rules/tracks.smk`), and `track_annotations` is wired as *its* input, not
+`track_discovery`'s — editing `groups.csv` (to add a group, fix a label, ...) only invalidates
+`track_assemble` (and everything downstream of `tracks.parquet`). It never forces
+`track_discovery` to re-scan every BigWig, the same way editing `inputs.exclude_tracks` already
+doesn't.
+
 ## `tracks.parquet` is a strict superset
 
 `tracks/_stages/discovered.parquet`, `interval_means.parquet`, `scale_factors.parquet`, and

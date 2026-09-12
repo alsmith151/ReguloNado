@@ -150,9 +150,17 @@ rule track_assemble:
         discovered=str(TRACKS_STAGE_DIR / "discovered.parquet"),
         scale_factors=str(TRACKS_STAGE_DIR / "scale_factors.parquet"),
         qc_report=str(TRACKS_STAGE_DIR / "qc_report.parquet") if QC_CHECKS else [],
+        annotations=(
+            [config["inputs"]["track_annotations"]]
+            if config["inputs"].get("track_annotations")
+            else []
+        ),
     params:
         qc_report_arg=(
             f"--qc-report {TRACKS_STAGE_DIR / 'qc_report.parquet'}" if QC_CHECKS else ""
+        ),
+        annotations_arg=lambda w, input: (
+            f"--annotations {shlex.quote(str(input.annotations[0]))}" if input.annotations else ""
         ),
         drop_degenerate=(
             "--drop-degenerate" if QC.get("drop_degenerate") and QC_CHECKS else ""
@@ -171,6 +179,7 @@ rule track_assemble:
             --output {output.table:q} \
             --scale-factors {input.scale_factors:q} \
             {params.qc_report_arg} \
+            {params.annotations_arg} \
             {params.drop_degenerate} \
             {params.exclude} \
             > {log:q} 2>&1

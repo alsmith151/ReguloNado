@@ -49,14 +49,19 @@ BASES = "ACGT"
 # --------------------------------------------------------------------------- #
 @dataclass(slots=True)
 class TrackReadout:
-    """Scalar readout of a single track over a bin window, ensembled across folds.
+    """Scalar readout of one or more tracks over a bin window, ensembled across folds.
+
+    ``track_indices`` is one or more track columns; with more than one, they are averaged
+    together first (a group readout — e.g. every track sharing a track-sheet ``group`` label),
+    exactly as ``design.objective.SpecificityEnergy`` averages replicate tracks within a group. A
+    single index behaves exactly as the old single-track readout did.
 
     ``__call__`` returns ``(scores (B,), per_fold_scores (F, B))`` — the per-fold array is kept so
     callers can check that folds agree about a core rather than trusting their mean.
     """
 
     ensemble: Any  # design.predictor.FoldEnsemble, or any object with .predict()
-    track_index: int
+    track_indices: Sequence[int]
     bins: slice
     reduction: Literal["mean", "topk", "max"] = "mean"
     topk_bins: int = 10
@@ -65,7 +70,8 @@ class TrackReadout:
     def __call__(self, one_hot_batch) -> tuple[np.ndarray, np.ndarray]:
         preds = self.ensemble.predict(one_hot_batch)  # (F, B, T, N)
         # _to_numpy carries the bf16 -> float32 guard flashzoi needs (numpy has no bfloat16).
-        windowed = _to_numpy(preds[:, :, self.track_index, self.bins])  # (F, B, W)
+        windowed = _to_numpy(preds[:, :, list(self.track_indices), self.bins])  # (F, B, k, W)
+        windowed = windowed.mean(axis=2)  # (F, B, W) — no-op mean when k == 1
 
         if self.reduction == "mean":
             per_fold = windowed.mean(axis=-1)

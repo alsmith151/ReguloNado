@@ -86,6 +86,17 @@ $defs:
         - type: 'null'
         default: null
         title: Out Dir
+      track_sheet:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Track Sheet
+      exclude_tracks:
+        items:
+          type: string
+        title: Exclude Tracks
+        type: array
       bin_reduction:
         default: mean
         enum:
@@ -208,20 +219,38 @@ $defs:
     type: object
   AttributionTarget:
     additionalProperties: false
+    description: "One attribution readout: either an exact ``track``, or a track ``group``.\n\
+      \nA ``group`` readout averages every track whose ``group_by`` column (a\n``TrackRecord``/``tracks.parquet``\
+      \ column such as ``source`` or a freeform\n``group`` label) equals ``target``\
+      \ \u2014 the same grouping ``design`` targets\nalready use via ``DesignTarget.group_by``."
     properties:
       name:
         title: Name
         type: string
       track:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
         title: Track
-        type: string
+      target:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Target
+      group_by:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Group By
       settings:
         additionalProperties: true
         title: Settings
         type: object
     required:
     - name
-    - track
     title: AttributionTarget
     type: object
   DatasetConfig:
@@ -635,6 +664,15 @@ $defs:
           type: string
         title: Exclude Tracks
         type: array
+      track_annotations:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        description: "CSV/parquet of track_name + extra columns (e.g. 'group') merged\
+          \ in at 'tracks assemble' \u2014 a separate DAG input from track_sheet/bigwig_dir,\
+          \ so editing it re-runs only assembly, not discovery."
+        title: Track Annotations
     required:
     - intervals
     - fasta

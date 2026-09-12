@@ -80,7 +80,7 @@ def _motif_context(seed_value: int = 0) -> np.ndarray:
 # 1. TrackReadout                                                             #
 # --------------------------------------------------------------------------- #
 def test_track_readout_selects_the_named_track_and_bin_window():
-    readout = TrackReadout(_MotifEnsemble(), track_index=1, bins=slice(0, N_PRED_BINS))
+    readout = TrackReadout(_MotifEnsemble(), track_indices=[1], bins=slice(0, N_PRED_BINS))
     context = _motif_context()
     scores, per_fold = readout(context[None])
     assert scores.shape == (1,)
@@ -89,13 +89,13 @@ def test_track_readout_selects_the_named_track_and_bin_window():
     assert scores[0] == pytest.approx(40.0)
 
     # Track 0 is inert, so it must read exactly zero.
-    other = TrackReadout(_MotifEnsemble(), track_index=0, bins=slice(0, N_PRED_BINS))
+    other = TrackReadout(_MotifEnsemble(), track_indices=[0], bins=slice(0, N_PRED_BINS))
     assert other(context[None])[0][0] == pytest.approx(0.0)
 
 
 def test_track_readout_bin_reductions_differ_and_topk_is_bounded():
     context = _motif_context()
-    kwargs = dict(ensemble=_MotifEnsemble(), track_index=1, bins=slice(0, N_PRED_BINS))
+    kwargs = dict(ensemble=_MotifEnsemble(), track_indices=[1], bins=slice(0, N_PRED_BINS))
     mean = TrackReadout(**kwargs, reduction="mean")(context[None])[0][0]
     maximum = TrackReadout(**kwargs, reduction="max")(context[None])[0][0]
     # The dummy is flat across bins, so all reductions agree; the point is that topk clamps k
@@ -108,7 +108,7 @@ def test_track_readout_fold_reduction_mean_vs_median():
     # Three folds, one wild outlier: the median must ignore it, the mean must not.
     ensemble = _MotifEnsemble(n_folds=3, fold_scale=[1.0, 1.0, 10.0])
     context = _motif_context()
-    kwargs = dict(ensemble=ensemble, track_index=1, bins=slice(0, N_PRED_BINS))
+    kwargs = dict(ensemble=ensemble, track_indices=[1], bins=slice(0, N_PRED_BINS))
     mean = TrackReadout(**kwargs, fold_reduction="mean")(context[None])[0][0]
     median = TrackReadout(**kwargs, fold_reduction="median")(context[None])[0][0]
     assert median == pytest.approx(40.0)
@@ -116,8 +116,18 @@ def test_track_readout_fold_reduction_mean_vs_median():
     assert mean != pytest.approx(median)
 
 
+def test_track_readout_averages_multiple_tracks():
+    # A group readout with >1 track_indices averages them before any bin/fold reduction —
+    # track 1 is the only responsive one (per _MotifEnsemble), track 0 always reads zero, so a
+    # [0, 1] group must read exactly half of the single-track [1] readout.
+    context = _motif_context()
+    single = TrackReadout(_MotifEnsemble(), track_indices=[1], bins=slice(0, N_PRED_BINS))
+    grouped = TrackReadout(_MotifEnsemble(), track_indices=[0, 1], bins=slice(0, N_PRED_BINS))
+    assert grouped(context[None])[0][0] == pytest.approx(single(context[None])[0][0] / 2)
+
+
 def test_track_readout_rejects_unknown_reductions():
-    readout = TrackReadout(_MotifEnsemble(), 1, slice(0, N_PRED_BINS), reduction="nope")
+    readout = TrackReadout(_MotifEnsemble(), [1], slice(0, N_PRED_BINS), reduction="nope")
     with pytest.raises(ValueError, match="Unknown reduction"):
         readout(_motif_context()[None])
 
@@ -127,7 +137,7 @@ def test_track_readout_rejects_unknown_reductions():
 # --------------------------------------------------------------------------- #
 def test_ism_scan_recovers_the_planted_motif():
     seed, context = _seed(), _motif_context()
-    readout = TrackReadout(_MotifEnsemble(), 1, seed.bins)
+    readout = TrackReadout(_MotifEnsemble(), [1], seed.bins)
     result = ism_scan(readout, seed, context, batch_size=32)
 
     assert result.effect.shape == (4, 100)
@@ -144,7 +154,7 @@ def test_ism_scan_recovers_the_planted_motif():
 
 def test_ism_scan_zeroes_the_reference_row_and_fills_all_alternates():
     seed, context = _seed(), _motif_context()
-    result = ism_scan(TrackReadout(_MotifEnsemble(), 1, seed.bins), seed, context, batch_size=32)
+    result = ism_scan(TrackReadout(_MotifEnsemble(), [1], seed.bins), seed, context, batch_size=32)
     for column, ref_base in enumerate(result.ref_bases):
         assert result.effect[ref_base, column] == 0.0
         alts = [b for b in range(4) if b != ref_base]
@@ -155,7 +165,7 @@ def test_ism_scan_scores_all_four_bases_at_an_n():
     seed = _seed()
     context = _motif_context()
     context[:, 250] = 0  # an N: no clean one-hot, so no identity edit exists
-    result = ism_scan(TrackReadout(_MotifEnsemble(), 1, seed.bins), seed, context, batch_size=32)
+    result = ism_scan(TrackReadout(_MotifEnsemble(), [1], seed.bins), seed, context, batch_size=32)
     column = 250 - seed.editable.start
     assert result.ref_bases[column] == -1
     assert np.isfinite(result.effect[:, column]).all()  # all four, not three
@@ -163,7 +173,7 @@ def test_ism_scan_scores_all_four_bases_at_an_n():
 
 def test_ism_scan_respects_stride_and_leaves_unscanned_positions_nan():
     seed, context = _seed(), _motif_context()
-    result = ism_scan(TrackReadout(_MotifEnsemble(), 1, seed.bins), seed, context, stride=5)
+    result = ism_scan(TrackReadout(_MotifEnsemble(), [1], seed.bins), seed, context, stride=5)
     assert list(result.positions) == list(range(180, 280, 5))
     scanned = result.positions - seed.editable.start
     assert np.isfinite(result.importance[scanned]).all()
@@ -174,7 +184,7 @@ def test_ism_scan_respects_stride_and_leaves_unscanned_positions_nan():
 def test_ism_scan_restricted_to_explicit_positions_stays_inside_editable():
     seed, context = _seed(), _motif_context()
     result = ism_scan(
-        TrackReadout(_MotifEnsemble(), 1, seed.bins),
+        TrackReadout(_MotifEnsemble(), [1], seed.bins),
         seed,
         context,
         positions=[100, 205, 210, 999],  # 100 and 999 fall outside the editable span
@@ -185,13 +195,13 @@ def test_ism_scan_restricted_to_explicit_positions_stays_inside_editable():
 def test_ism_scan_without_scannable_positions_raises():
     seed, context = _seed(), _motif_context()
     with pytest.raises(ValueError, match="No positions to scan"):
-        ism_scan(TrackReadout(_MotifEnsemble(), 1, seed.bins), seed, context, positions=[])
+        ism_scan(TrackReadout(_MotifEnsemble(), [1], seed.bins), seed, context, positions=[])
 
 
 def test_ism_scan_does_not_mutate_the_caller_context():
     seed, context = _seed(), _motif_context()
     before = context.copy()
-    ism_scan(TrackReadout(_MotifEnsemble(), 1, seed.bins), seed, context, batch_size=8)
+    ism_scan(TrackReadout(_MotifEnsemble(), [1], seed.bins), seed, context, batch_size=8)
     assert np.array_equal(context, before)
 
 
@@ -379,7 +389,7 @@ def test_peak_anchor_differs_from_centroid_on_a_skewed_profile():
 def _record(name: str, start: int, end: int) -> AttributionRecord:
     seed = _seed(name, start, end)
     context = _motif_context()
-    result = ism_scan(TrackReadout(_MotifEnsemble(), 1, seed.bins), seed, context, batch_size=32)
+    result = ism_scan(TrackReadout(_MotifEnsemble(), [1], seed.bins), seed, context, batch_size=32)
     cores, diagnostics = call_cores(
         result.importance,
         editable=seed.editable,
@@ -487,6 +497,35 @@ def test_attribution_config_parses_and_defaults():
     )
     assert config.shards == 1
     assert config.targets[0].track == "atac_hl60"
+
+
+def test_attribution_target_group_readout_defaults_group_by_to_source():
+    config = AttributionConfig(
+        candidates="c.bed", targets=[{"name": "hl60", "target": "K562"}]
+    )
+    assert config.targets[0].track is None
+    assert config.targets[0].group_by == "source"
+
+
+def test_attribution_target_rejects_track_and_target_together():
+    with pytest.raises(ValueError, match="exactly one of"):
+        AttributionConfig(
+            candidates="c.bed",
+            targets=[{"name": "a", "track": "t", "target": "K562"}],
+        )
+
+
+def test_attribution_target_rejects_neither_track_nor_target():
+    with pytest.raises(ValueError, match="exactly one of"):
+        AttributionConfig(candidates="c.bed", targets=[{"name": "a"}])
+
+
+def test_attribution_target_rejects_group_by_without_target():
+    with pytest.raises(ValueError, match="only applies to a 'target'-based"):
+        AttributionConfig(
+            candidates="c.bed",
+            targets=[{"name": "a", "track": "t", "group_by": "source"}],
+        )
 
 
 def test_attribution_config_rejects_duplicate_target_names():

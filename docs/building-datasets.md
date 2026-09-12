@@ -26,7 +26,10 @@ regulonado tracks assemble results/tracks/_stages/discovered.parquet \
 colliding stems among included tracks raise here, not later. `assemble` is the step that always
 runs regardless of whether QC did, and is the only place a track's final `status` (and therefore
 `track_index`) is decided — see [track-table.md](track-table.md) for the full column reference and
-the five `status` values.
+the five `status` values. `--annotations` merges in a CSV/parquet the same way `--scale-factors`/
+`--qc-report` do, for attaching a `group` label (or any other freeform metadata) after `discover`
+without redoing it from a hand-written `--track-sheet` — see
+[track-table.md](track-table.md#adding-metadata-after-discovery).
 
 ## Build
 

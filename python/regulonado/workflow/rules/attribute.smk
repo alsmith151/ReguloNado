@@ -86,7 +86,7 @@ if ATTRIBUTION:
         "bin_reduction", "topk_bins", "fold_reduction", "pad", "stride", "positions",
         "on_missing", "smooth_bp", "quantile", "min_width_bp", "merge_gap_bp", "min_zscore",
         "max_cores_per_candidate", "anchor", "fix_width", "bigwig", "rtol", "fold_mode",
-        "batch_size", "device",
+        "batch_size", "device", "exclude_tracks",
     }
 
     def _attr_settings_json(wildcards):
@@ -101,7 +101,18 @@ if ATTRIBUTION:
         target = ATTRIBUTION_TARGET_BY_NAME[wildcards.target]
         merged = {k: v for k, v in ATTRIBUTION.items() if k in _ATTR_SETTINGS_KEYS}
         merged.update(_flatten_settings(target.get("settings", {})))
+        # track_sheet is not one of attribute's own CLI flags (unlike --dataset-dir), so it has
+        # to reach the run through --params too; inputs.track_sheet is the fallback default.
+        if config["inputs"].get("track_sheet"):
+            merged.setdefault("track_sheet", config["inputs"]["track_sheet"])
         return json.dumps(merged, sort_keys=True)
+
+    def _attr_track_selector_args(target):
+        """``--track name`` or ``--target value --group-by column``, shell-quoted."""
+        if target.get("track") is not None:
+            return f"--track {shlex.quote(str(target['track']))}"
+        group_by = target.get("group_by", "source")
+        return f"--target {shlex.quote(str(target['target']))} --group-by {shlex.quote(group_by)}"
 
     rule shard_attribution_candidates:
         input:
@@ -125,7 +136,9 @@ if ATTRIBUTION:
             intervals=config["inputs"]["intervals"],
             checkpoints=_attr_checkpoint_state_inputs,
         params:
-            track=lambda w: ATTRIBUTION_TARGET_BY_NAME[w.target]["track"],
+            track_selector_args=lambda w: _attr_track_selector_args(
+                ATTRIBUTION_TARGET_BY_NAME[w.target]
+            ),
             fasta=config["inputs"]["fasta"],
             dataset_dir=str(training_dataset_dir()),
             out_dir=lambda w: str(ATTRIBUTION_DIR / w.target / "shards" / w.shard),
@@ -174,7 +187,7 @@ if ATTRIBUTION:
                 "${{CHECKPOINT_ARGS[@]}}" \
                 --fasta {params.fasta:q} \
                 --dataset-dir {params.dataset_dir:q} \
-                --track {params.track:q} \
+                {params.track_selector_args} \
                 --out {params.out_dir:q} \
                 > {log:q} 2>&1
             """

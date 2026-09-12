@@ -50,13 +50,35 @@ def _load_ensemble(config: "AttributionConfig") -> "FoldEnsemble":
     )
 
 
-def _resolve_track_index(config: "AttributionConfig", ensemble: "FoldEnsemble") -> int:
-    from regulonado.inference import resolve_tracks
+def _resolve_track_indices(config: "AttributionConfig", ensemble: "FoldEnsemble") -> list[int]:
+    target = config.targets[0]
+    if target.track is not None:
+        from regulonado.inference import resolve_tracks
 
-    track = config.targets[0].track
-    index = resolve_tracks([track], ensemble.track_names)[0]
-    logger.info(f"Attributing against track {ensemble.track_names[index]!r} (index {index})")
-    return index
+        indices = resolve_tracks([target.track], ensemble.track_names)
+        logger.info(
+            f"Attributing against track {ensemble.track_names[indices[0]]!r} (index "
+            f"{indices[0]})"
+        )
+        return indices
+
+    from regulonado.design.objective import resolve_track_group_indices
+
+    track_sheet = Path(config.track_sheet) if config.track_sheet else None
+    dataset_dir = Path(config.dataset_dir) if config.dataset_dir else None
+    indices = resolve_track_group_indices(
+        ensemble.track_names,
+        group_by=target.group_by,
+        target=target.target,
+        exclude_tracks=set(config.exclude_tracks),
+        track_sheet=track_sheet,
+        dataset_dir=dataset_dir,
+    )
+    logger.info(
+        f"Attributing against group {target.group_by}={target.target!r}: "
+        f"{len(indices)} track(s): {[ensemble.track_names[i] for i in indices]}"
+    )
+    return indices
 
 
 def _resolve_intervals(config: "AttributionConfig") -> Path:
@@ -109,16 +131,19 @@ def _log_projected_passes(seeds: list["Seed"], config: "AttributionConfig") -> N
 
 
 def _build_run_info(
-    config: "AttributionConfig", ensemble, track_index: int, n_candidates: int
+    config: "AttributionConfig", ensemble, track_indices: list[int], n_candidates: int
 ) -> dict:
+    target = config.targets[0]
+    selector = target.track if target.track is not None else f"group:{target.group_by}={target.target}"
     return {
         "status": "in_progress",
         "candidates": config.candidates,
         "intervals": config.intervals,
         "dataset_dir": config.dataset_dir,
         "checkpoints": list(config.checkpoint_dirs or []),
-        "track": ensemble.track_names[track_index],
-        "track_index": track_index,
+        "track": selector,
+        "track_indices": track_indices,
+        "selected_track_names": [ensemble.track_names[i] for i in track_indices],
         "track_names": list(ensemble.track_names),
         "bin_reduction": config.bin_reduction,
         "topk_bins": config.topk_bins,
@@ -156,7 +181,7 @@ def _score_one_candidate(
     total: int,
     seed: "Seed",
     ensemble,
-    track_index: int,
+    track_indices: list[int],
     fasta,
     chrom_sizes: dict[str, int],
     scan_positions: list[tuple[str, int, int]] | None,
@@ -179,7 +204,7 @@ def _score_one_candidate(
     result = ism_scan(
         TrackReadout(
             ensemble,
-            track_index=track_index,
+            track_indices=track_indices,
             bins=seed.bins,
             reduction=config.bin_reduction,
             topk_bins=config.topk_bins,
@@ -228,7 +253,7 @@ def _process_candidates(
     config: "AttributionConfig",
     seeds: list["Seed"],
     ensemble,
-    track_index: int,
+    track_indices: list[int],
     fasta,
     chrom_sizes: dict[str, int],
     scan_positions: list[tuple[str, int, int]] | None,
@@ -241,7 +266,7 @@ def _process_candidates(
     for candidate_index, seed in enumerate(seeds, start=1):
         records.append(
             _score_one_candidate(
-                config, candidate_index, len(seeds), seed, ensemble, track_index, fasta,
+                config, candidate_index, len(seeds), seed, ensemble, track_indices, fasta,
                 chrom_sizes, scan_positions,
             )
         )
@@ -282,7 +307,7 @@ def run_attribution(config: "AttributionConfig") -> AttributionResult:
     out_dir = Path(config.out_dir)
     intervals = _resolve_intervals(config)
     ensemble = _load_ensemble(config)
-    track_index = _resolve_track_index(config, ensemble)
+    track_indices = _resolve_track_indices(config, ensemble)
 
     index = DatasetWindowIndex.from_bed(
         intervals,
@@ -297,9 +322,10 @@ def run_attribution(config: "AttributionConfig") -> AttributionResult:
     scan_positions = _load_scan_positions(config)
     fasta, chrom_sizes = _prepare_fasta(config)
 
-    run_info = _build_run_info(config, ensemble, track_index, len(seeds))
+    run_info = _build_run_info(config, ensemble, track_indices, len(seeds))
     records = _process_candidates(
-        config, seeds, ensemble, track_index, fasta, chrom_sizes, scan_positions, run_info, out_dir
+        config, seeds, ensemble, track_indices, fasta, chrom_sizes, scan_positions, run_info,
+        out_dir,
     )
 
     n_called = sum(1 for record in records if record.cores)

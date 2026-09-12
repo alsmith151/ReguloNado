@@ -12,6 +12,7 @@ from conftest import write_bed as _write_bed
 from regulonado.design.objective import (
     SpecificityEnergy,
     TrackGroups,
+    resolve_track_group_indices,
     resolve_track_groups,
 )
 from regulonado.design.predictor import FoldEnsemble, FoldSpec
@@ -218,6 +219,14 @@ def test_resolve_track_groups_falls_back_to_config_metadata():
     )
     assert groups.target_idx.tolist() == [True, True, False, False]
     assert groups.other_group_masks["1"].tolist() == [False, False, True, True]
+
+
+def test_resolve_track_group_indices_returns_positional_indices(tmp_path):
+    sheet = tmp_path / "tracks.csv"
+    sheet.write_text("sample_id,group\nt0,hl60\nt1,k562\nt2,hl60\nt3,k562\n")
+    assert resolve_track_group_indices(
+        ["t0", "t1", "t2", "t3"], group_by="group", target="hl60", track_sheet=sheet
+    ) == [0, 2]
 
 
 # --------------------------------------------------------------------------- #

@@ -16,7 +16,13 @@ from typing import Literal
 import torch
 import torch.nn as nn
 
-__all__ = ["EnergyResult", "SpecificityEnergy", "TrackGroups", "resolve_track_groups"]
+__all__ = [
+    "EnergyResult",
+    "SpecificityEnergy",
+    "TrackGroups",
+    "resolve_track_group_indices",
+    "resolve_track_groups",
+]
 
 # group_by column -> the RegulonadoConfig.track_metadata key holding its id vector.
 # Mirrors tracks.CATEGORICAL_FIELDS / training.runner._TRACK_METADATA_FIELD_MAP; the
@@ -84,6 +90,33 @@ def resolve_track_groups(
     return TrackGroups(
         labels=labels, target=target, target_idx=target_idx, other_group_masks=other_group_masks
     )
+
+
+def resolve_track_group_indices(
+    track_names: list[str],
+    *,
+    group_by: str,
+    target: str,
+    exclude_tracks: set[str] | None = None,
+    track_sheet: str | Path | None = None,
+    dataset_dir: str | Path | None = None,
+    config: object | None = None,
+) -> list[int]:
+    """Positional indices of every track in ``target``'s group — see :func:`resolve_track_groups`.
+
+    The read-only counterpart callers reach for when they just need "which tracks", not the full
+    off-target mask bookkeeping ``SpecificityEnergy`` needs (e.g. attribution's group readout).
+    """
+    groups = resolve_track_groups(
+        track_names,
+        group_by=group_by,
+        target=target,
+        exclude_tracks=exclude_tracks,
+        track_sheet=track_sheet,
+        dataset_dir=dataset_dir,
+        config=config,
+    )
+    return groups.target_idx.nonzero().flatten().tolist()
 
 
 def _labels_from_track_sheet(
