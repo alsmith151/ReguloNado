@@ -1,17 +1,17 @@
-# HL-60 / AML-BM atlas anchor-scaled training experiment.
+# Anchor-scaled training experiment with downstream attribution and design.
 #
-# This follows the four-fold training layout used by the previous HL-60 design
-# run. Replace the atlas input paths and checkpoint paths if running elsewhere.
-# The anchor/background assets below are the validated outputs from:
-# 2026-08-19-unique-enhancer-finding.
+# This follows the four-fold training layout used by the HL-60 design example.
+# Replace the input paths and checkpoint paths if running elsewhere.
+# The anchor/background assets below are the validated outputs of a prior
+# enhancer-finding run.
 
 # Reuses dataset/dataset_dict.json already built under this result tree.
-results_dir: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/data/2026-09-10-modelling
+results_dir: /path/to/regulonado_models
 
 inputs:
-  intervals: /project/milne_group/asmith/Projects/2025-07-19-myeloid-specific-enhancer-identification/sequences_human.bed.gz
-  fasta: /project/milne_group/shared/seqnado_reference/hg38/UCSC/sequence/hg38.fa
-  bigwig_dir: /project/milne_group/asmith/Projects/2026-08-04-aml-bm-atlas/seqnado_output/atac/bigwigs/bamnado/unscaled
+  intervals: /path/to/intervals.bed.gz
+  fasta: /path/to/genome.fa
+  bigwig_dir: /path/to/bigwigs
 
 dataset:
   context_length: 524288
@@ -34,9 +34,9 @@ recompress:
 
 scaling:
   method: anchor
-  anchor_regions: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/2026-08-19-unique-enhancer-finding/resources/common_essential_windows.bed
-  background_regions: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/2026-08-19-unique-enhancer-finding/data/interim/01-track-qc/null-windows.parquet
-  heldout_regions: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/2026-08-19-unique-enhancer-finding/resources/common_essential_windows_heldout.bed
+  anchor_regions: /path/to/common_essential_windows.bed
+  background_regions: /path/to/null_windows.parquet
+  heldout_regions: /path/to/common_essential_windows_heldout.bed
   window_stat_bp: 1000
   background_sample: 5000
 
@@ -88,7 +88,7 @@ attribution:
 
 design:
   # Automatically consumes attribution/TODO_target_name/core_regions.bed.
-  candidates: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/data/2026-09-10-modelling/attribution/TODO_target_name/core_regions.bed
+  candidates: /path/to/regulonado_models/attribution/TODO_target_name/core_regions.bed
   shards: 8
   design_runs: [fold_0, fold_1, fold_2]
   holdout_run: fold_3
