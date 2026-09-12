@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -156,7 +157,6 @@ def train(
         return
 
     if nproc_per_node > 1:
-        import os
         import random
 
         # Avoid port collisions when multiple jobs land on the same node.
@@ -173,7 +173,17 @@ def train(
     else:
         command = [sys.executable, "-m", "regulonado.training.runner", *overrides]
 
+    env = os.environ.copy()
+    if nproc_per_node <= 1:
+        # Pin to a single visible GPU so a single training process can never
+        # see >1 device: transformers.Trainer auto-wraps nn.DataParallel
+        # across every visible GPU otherwise, which crashes (StopIteration
+        # on replicated submodules) and silently splits the batch wrong even
+        # when it doesn't crash.
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        env["CUDA_VISIBLE_DEVICES"] = visible.split(",")[0].strip() if visible else "0"
+
     typer.echo(shell_join(command))
     if dry_run:
         return
-    raise typer.Exit(subprocess.run(command).returncode)
+    raise typer.Exit(subprocess.run(command, env=env).returncode)
