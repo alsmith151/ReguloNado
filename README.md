@@ -25,6 +25,18 @@ source .venv/bin/activate
 The optional `gpu` extra builds FlashAttention and therefore needs a compatible
 CUDA toolkit and `nvcc`.
 
+## Stability
+
+At version 0.x, the stable public interfaces are:
+
+- **Command-line interface** (`regulonado` commands)
+- **On-disk file formats** (`tracks.parquet`, dataset Arrow files, saved checkpoints)
+
+The Python API beyond the five entry points—`build_dataset`, `load_model_for_inference`,
+`read_track_table`, `RegionPredictor`, and `run_training`—is experimental and may change
+without notice. Submodule internals (`regulonado.model`, `regulonado.training`, etc.) are
+not part of the stable API.
+
 ## Working alongside SeqNado
 
 [SeqNado](https://github.com/Milne-Group/SeqNado) produces the BigWigs

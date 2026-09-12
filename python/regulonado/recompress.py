@@ -9,6 +9,7 @@ Use through the CLI:
     regulonado recompress-dataset <src> <dst> --level 3 --workers 4
 """
 
+import logging
 import shutil
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,12 +17,18 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.ipc as ipc
-from loguru import logger
+
+logger = logging.getLogger(__name__)
 
 
 def recompress_shard(
     src: Path, dst: Path, level: int, max_batch_size: int | None
 ) -> tuple[int, int]:
+    """Recompress one Arrow IPC shard from ``src`` to ``dst`` with ZSTD compression.
+
+    Optionally splits large batches to ``max_batch_size`` rows. Returns (src_size, dst_size)
+    in bytes.
+    """
     opts = ipc.IpcWriteOptions(compression=pa.Codec("zstd", level))
     with open(src, "rb") as fh:
         reader = ipc.open_stream(fh)
@@ -43,6 +50,11 @@ def recompress_shard(
 def recompress_split(
     split_src: Path, split_dst: Path, level: int, workers: int, max_batch_size: int | None
 ) -> None:
+    """Recompress all Arrow shards in ``split_src`` to ``split_dst`` using thread pool.
+
+    Copies non-Arrow metadata files verbatim. Uses ``workers`` parallel threads to
+    recompress shards. Logs per-shard sizes and final compression ratio.
+    """
     split_dst.mkdir(parents=True, exist_ok=True)
 
     # Copy metadata files verbatim
@@ -90,6 +102,37 @@ def recompress_dataset(
     remove_src: bool = False,
     overwrite: bool = False,
 ) -> None:
+    """Recompress a HuggingFace Arrow dataset to ZSTD IPC body compression.
+
+    Streams each shard one at a time (no full-dataset RAM spike) and rewrites
+    with ZSTD at given compression level. Copies all non-Arrow metadata files
+    verbatim. Output is a drop-in replacement for ``load_from_disk()``.
+
+    Parameters
+    ----------
+    src : Path
+        Source dataset directory.
+    dst : Path
+        Destination directory (must not exist unless ``overwrite=True``).
+    level : int, optional
+        ZSTD compression level (default 3).
+    workers : int, optional
+        Number of parallel threads for recompressing shards (default 4).
+    max_batch_size : int | None, optional
+        Split batches larger than this row count (default None = no splitting).
+    remove_src : bool, optional
+        Remove source after successful compression (default False).
+    overwrite : bool, optional
+        Overwrite existing destination (default False).
+
+    Raises
+    ------
+    FileNotFoundError
+        If source does not exist.
+    ValueError
+        If source and destination are not distinct or if destination exists
+        and ``overwrite=False``.
+    """
     src = src.resolve()
     dst = dst.resolve()
     if not src.exists():

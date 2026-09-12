@@ -12,54 +12,35 @@ except ImportError:
 
 __all__ = [
     "__version__",
-    "ActivationType",
-    "BackboneAdapter",
-    "BackboneSpec",
-    "BackboneType",
-    "BorzoiBackboneAdapter",
-    "EnformerBackboneAdapter",
-    "FiLMPerturbHead",
-    "FreezePolicy",
-    "HeadType",
-    "RegulonadoModel",
-    "LogFiLMPerturbHead",
-    "PerturbHead",
-    "RegulonadoConfig",
-    "ResidualFiLMPerturbHead",
-    "TrackMetadataEncoder",
-    "TransferMLPPerturbHead",
-    "build_backbone_adapter",
-    "build_condition_shared_track_index",
-    "build_perturb_head",
+    "build_dataset",
+    "load_model_for_inference",
+    "read_track_table",
+    "RegionPredictor",
+    "run_training",
     "metrics",
     "model",
     "training",
     "viz",
 ]
 
-# Previously imported eagerly; now lazy so core installs (no torch) work.
-# Accessing any of these triggers import of regulonado.model, which requires [train].
-_MODEL_EXPORTS = frozenset({
-    "ActivationType",
-    "BackboneAdapter",
-    "BackboneSpec",
-    "BackboneType",
-    "BorzoiBackboneAdapter",
-    "EnformerBackboneAdapter",
-    "FiLMPerturbHead",
-    "FreezePolicy",
-    "HeadType",
-    "RegulonadoModel",
-    "LogFiLMPerturbHead",
-    "PerturbHead",
-    "RegulonadoConfig",
-    "ResidualFiLMPerturbHead",
-    "TrackMetadataEncoder",
-    "TransferMLPPerturbHead",
-    "build_backbone_adapter",
-    "build_condition_shared_track_index",
-    "build_perturb_head",
+# Lazy exports for the five main workflow entry points.
+# These are the stable public API at 0.x; the rest of regulonado is experimental.
+_WORKFLOW_EXPORTS = frozenset({
+    "build_dataset",
+    "load_model_for_inference",
+    "read_track_table",
+    "RegionPredictor",
+    "run_training",
 })
+
+# Mapping of workflow exports to their defining modules.
+_WORKFLOW_MODULES = {
+    "build_dataset": "regulonado.dataset.build",
+    "load_model_for_inference": "regulonado.inference",
+    "read_track_table": "regulonado.tracks_table",
+    "RegionPredictor": "regulonado.inference",
+    "run_training": "regulonado.training.runner",
+}
 
 _SUBMODULES = frozenset({"metrics", "model", "training", "viz"})
 
@@ -67,8 +48,9 @@ _SUBMODULES = frozenset({"metrics", "model", "training", "viz"})
 def __getattr__(name: str) -> object:
     import importlib
 
-    if name in _MODEL_EXPORTS:
-        mod = importlib.import_module("regulonado.model")
+    if name in _WORKFLOW_EXPORTS:
+        mod_name = _WORKFLOW_MODULES[name]
+        mod = importlib.import_module(mod_name)
         obj = getattr(mod, name)
         globals()[name] = obj
         return obj
