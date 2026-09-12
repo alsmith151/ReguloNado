@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -7,13 +8,14 @@ from typing import Any
 
 import numpy as np
 import torch
-from loguru import logger
 from transformers import (
     TrainerCallback,
     TrainerControl,
     TrainerState,
     TrainingArguments,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _inverse_signal_transform(
@@ -117,7 +119,7 @@ def _plot_examples(
             plt.close(fig)
 
 
-class _WandbConfigCallback(TrainerCallback):
+class WandbConfigCallback(TrainerCallback):
     """Push the full resolved Hydra config to wandb.config on the first log event.
 
     HF Trainer only syncs TrainingArguments; backbone/head/loss/data settings
@@ -147,11 +149,11 @@ class _WandbConfigCallback(TrainerCallback):
 
             if wandb.run is not None:
                 wandb.config.update({"regulonado": self._cfg}, allow_val_change=True)
-        except Exception:
-            pass
+        except (ValueError, TypeError, RuntimeError) as e:
+            logger.warning(f"Failed to update wandb config: {e}")
 
 
-class _LRLogCallback(TrainerCallback):
+class LRLogCallback(TrainerCallback):
     """Log per-param-group learning rates so head and backbone LRs are both visible."""
 
     def on_log(
@@ -173,7 +175,7 @@ class _LRLogCallback(TrainerCallback):
             state.log_history[-1].update(logs)
 
 
-class _EvalPlotCallback(TrainerCallback):
+class EvalPlotCallback(TrainerCallback):
     """After each validation run, plot a handful of pred-vs-target examples.
 
     Runs the model directly on raw dataset items so predictions are the full

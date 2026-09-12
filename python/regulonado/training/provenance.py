@@ -105,7 +105,7 @@ def _environment_summary() -> dict[str, Any]:
     }
 
 
-def _write_provenance(
+def write_provenance(
     *,
     output_dir: Path,
     cfg: Mapping[str, Any],

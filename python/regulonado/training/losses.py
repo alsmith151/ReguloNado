@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from regulonado.metrics import _paired_group_masks
+from regulonado.metrics import paired_group_masks
 
 
 def squash(y: torch.Tensor, eps: float = 1e-2) -> torch.Tensor:
@@ -292,7 +292,7 @@ def paired_binwise_log2fc_loss(
     pseudocount: float = 1.0,
     delta: float = 0.5,
 ) -> torch.Tensor:
-    pair_masks = _paired_group_masks(condition_ids, shared_track_index)
+    pair_masks = paired_group_masks(condition_ids, shared_track_index)
     if not pair_masks:
         return pred.new_zeros(())
 

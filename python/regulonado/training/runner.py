@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import random
 from collections.abc import Callable, Mapping, Sequence
 from os import environ
@@ -14,7 +15,6 @@ import numpy as np
 import torch
 from datasets import DatasetDict, load_from_disk
 from datasets import IterableDataset as HFIterableDataset
-from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 from torch.optim import AdamW
@@ -36,9 +36,9 @@ from regulonado.model import (
     build_condition_shared_track_index,
 )
 from regulonado.training.callbacks import (
-    _EvalPlotCallback,
-    _LRLogCallback,
-    _WandbConfigCallback,
+    EvalPlotCallback,
+    LRLogCallback,
+    WandbConfigCallback,
 )
 from regulonado.training.config import TrainerConfig
 from regulonado.training.losses import (
@@ -52,10 +52,12 @@ from regulonado.training.losses import (
     transfer_calibration_loss,
 )
 from regulonado.training.metrics import (
-    _make_compute_metrics,
-    _make_preprocess_logits_for_metrics,
+    make_compute_metrics,
+    make_preprocess_logits_for_metrics,
 )
-from regulonado.training.provenance import _write_provenance
+from regulonado.training.provenance import write_provenance
+
+logger = logging.getLogger(__name__)
 
 
 def _rank() -> int:
@@ -957,6 +959,370 @@ def _estimate_shuffle_buffer(
     return max(10, int(ram_gb * 1e9 / bytes_per_sample))
 
 
+def _resolve_trainer_config(cfg: Mapping[str, Any]) -> TrainerConfig:
+    """Validate ``cfg`` and merge ``cfg["trainer"]`` into a :class:`TrainerConfig`.
+
+    Raises
+    ------
+    ValueError
+        If a required top-level section is missing, the trainer section fails
+        to validate, or both ``resume_from_checkpoint`` and
+        ``init_weights_from_checkpoint`` are set.
+    """
+    required_sections = ("data", "backbone", "head", "model", "loss", "trainer")
+    missing_sections = [section for section in required_sections if section not in cfg]
+    if missing_sections:
+        raise ValueError(
+            "Training configuration is missing required section(s): "
+            + ", ".join(missing_sections)
+        )
+    try:
+        trainer_cfg = OmegaConf.to_object(
+            OmegaConf.merge(OmegaConf.structured(TrainerConfig), cfg["trainer"])
+        )
+    except OmegaConfBaseException as exc:
+        raise ValueError(f"Invalid trainer configuration: {exc}") from exc
+    if not isinstance(trainer_cfg, TrainerConfig):
+        raise TypeError("Trainer configuration did not resolve to TrainerConfig")
+    trainer_cfg = dataclasses.replace(
+        trainer_cfg,
+        resume_from_checkpoint=_normalise_checkpoint_mode(trainer_cfg.resume_from_checkpoint),
+        init_weights_from_checkpoint=(trainer_cfg.init_weights_from_checkpoint or None),
+    )
+    if trainer_cfg.resume_from_checkpoint and trainer_cfg.init_weights_from_checkpoint:
+        raise ValueError(
+            "Set only one of trainer.resume_from_checkpoint or trainer.init_weights_from_checkpoint"
+        )
+    return trainer_cfg
+
+
+def _load_training_dataset(
+    data_path: Path,
+    *,
+    streaming: bool,
+    rank: int,
+) -> DatasetDict | dict[str, Any]:
+    """Load the dataset from disk or as an HF streaming source, with timing logs."""
+    logger.info(f"[rank {rank}] loading dataset from {data_path} (streaming={streaming}) ...")
+    t0 = perf_counter()
+    dataset_dict = (
+        _load_dataset_streaming(data_path) if streaming else load_from_disk(str(data_path))
+    )
+    if streaming:
+        logger.info(f"[rank {rank}] dataset opened in {perf_counter() - t0:.1f}s (streaming)")
+    else:
+        sizes = {split: len(dataset_dict[split]) for split in dataset_dict}
+        logger.info(f"[rank {rank}] dataset loaded in {perf_counter() - t0:.1f}s | splits={sizes}")
+    return dataset_dict
+
+
+def _load_metadata_and_records(
+    data_path: Path,
+    metadata_path: Path | None,
+    dataset_dict: DatasetDict | dict[str, Any],
+    *,
+    streaming: bool,
+    rank: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Load track metadata/records and cross-check them against the Arrow dataset.
+
+    Raises
+    ------
+    ValueError
+        If the Arrow dataset's label width disagrees with the included track count.
+    """
+    metadata = load_dataset_metadata(data_path, metadata_path)
+    records = track_records(metadata)
+    logger.info(f"[rank {rank}] metadata loaded | {len(records)} tracks")
+
+    if not streaming:
+        labels_feature = dataset_dict[next(iter(dataset_dict))].features.get("labels")
+        # Array2D (the real, Rust-built dataset) exposes .shape; other feature
+        # types (e.g. a plain Sequence, as in small hand-built test datasets)
+        # don't carry a fixed track count to check against.
+        arrow_n_tracks = getattr(labels_feature, "shape", (None,))[0]
+        if arrow_n_tracks is not None and arrow_n_tracks != len(records):
+            raise ValueError(
+                f"Arrow label width ({arrow_n_tracks}) != included track count "
+                f"({len(records)}); tracks.parquet and the Arrow dataset are out of sync — "
+                "rebuild the dataset."
+            )
+    return metadata, records
+
+
+def _prepare_dataset_splits(
+    dataset_dict: DatasetDict | dict[str, Any],
+    data_cfg: Mapping[str, Any],
+    trainer_cfg: TrainerConfig,
+    metadata: Mapping[str, Any],
+    *,
+    streaming: bool,
+    seed: int,
+) -> DatasetDict | dict[str, Any]:
+    """Apply streaming shuffle and eval-sample capping, ahead of transform application."""
+    if streaming and "train" in dataset_dict:
+        shuffle_buffer = _estimate_shuffle_buffer(data_cfg, metadata)
+        dataset_dict["train"] = dataset_dict["train"].shuffle(buffer_size=shuffle_buffer, seed=seed)
+
+    max_eval_samples = (
+        int(trainer_cfg.max_eval_samples) if trainer_cfg.max_eval_samples is not None else None
+    )
+    if max_eval_samples is not None and "validation" in dataset_dict:
+        val = dataset_dict["validation"]
+        if isinstance(val, HFIterableDataset):
+            # Stride-filter is memory-free and gives uniform coverage across all chromosomes,
+            # which is statistically equivalent for an unbiased Pearson estimate.
+            n_val = (
+                val.info.splits["validation"].num_examples
+                if val.info and val.info.splits and "validation" in val.info.splits
+                else None
+            )
+            if n_val and n_val > max_eval_samples:
+                stride = n_val // max_eval_samples
+                dataset_dict["validation"] = val.filter(
+                    lambda _, idx: idx % stride == 0, with_indices=True
+                ).take(max_eval_samples)
+            else:
+                dataset_dict["validation"] = val.take(max_eval_samples)
+        else:
+            n_val = len(val)
+            if n_val > max_eval_samples:
+                rng = np.random.default_rng(seed)
+                indices = sorted(rng.choice(n_val, size=max_eval_samples, replace=False).tolist())
+                dataset_dict["validation"] = val.select(indices)
+            else:
+                dataset_dict["validation"] = val
+    return dataset_dict
+
+
+def _build_model_with_logging(
+    cfg: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    records: Sequence[Mapping[str, Any]],
+    adapter_builder: Callable[[BackboneSpec], torch.nn.Module],
+    *,
+    rank: int,
+) -> RegulonadoModel:
+    """Build the model via :func:`build_model`, logging timing and parameter count."""
+    logger.info(f"[rank {rank}] building model ...")
+    t0 = perf_counter()
+    model = build_model(cfg, metadata, records, adapter_builder)
+    n_params = sum(p.numel() for p in model.parameters())
+    logger.info(
+        f"[rank {rank}] model built in {perf_counter() - t0:.1f}s | {n_params / 1e6:.1f}M params"
+    )
+    return model
+
+
+def _build_collate_and_loss(
+    cfg: Mapping[str, Any],
+    records: Sequence[Mapping[str, Any]],
+) -> tuple[
+    Callable[[list[dict[str, Any]]], dict[str, torch.Tensor]],
+    Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    np.ndarray,
+    np.ndarray,
+]:
+    """Build the batch collate function and loss function, plus scale/background arrays.
+
+    The scale factors and background arrays are also needed later by the eval-plot
+    callback, so they are returned alongside the loss function rather than recomputed.
+    """
+    track_metadata_tensors = (
+        constant_track_metadata(records)
+        if bool(cfg["model"].get("use_track_metadata", False))
+        else {}
+    )
+    collate_fn = _build_collate_fn(track_metadata_tensors)
+
+    scale_factors, _, clip_hard, background = resolve_scale_and_clip(records)
+    labels_already_scaled = bool(
+        cfg["data"].get("apply_scale", True)
+        or cfg["data"].get("apply_squash", True)
+        or cfg["data"].get("apply_clip", True)
+    )
+    loss_fn = _build_loss_fn(
+        cfg["loss"],
+        scale_factors=scale_factors,
+        clip_hard=clip_hard,
+        labels_already_scaled=labels_already_scaled,
+    )
+    return collate_fn, loss_fn, scale_factors, background
+
+
+def _guard_streaming_persistent_workers(
+    trainer_cfg: TrainerConfig,
+    *,
+    streaming: bool,
+) -> TrainerConfig:
+    """Disable persistent dataloader workers for streaming datasets.
+
+    Persistent workers with HF IterableDataset accumulate Arrow file handles and
+    shuffle-buffer state between iterator cycles — workers never restart to clear them.
+    """
+    if streaming and trainer_cfg.persistent_workers:
+        import warnings
+
+        warnings.warn(
+            "persistent_workers=True is unsafe with streaming datasets (memory leak). "
+            "Overriding to persistent_workers=False.",
+            stacklevel=2,
+        )
+        trainer_cfg = dataclasses.replace(trainer_cfg, persistent_workers=False)
+    return trainer_cfg
+
+
+def _prepare_model_for_training(
+    model: RegulonadoModel,
+    trainer_cfg: TrainerConfig,
+    *,
+    rank: int,
+) -> None:
+    """Apply the freeze policy and, if configured, warm-start weights from a checkpoint."""
+    _apply_freeze_policy(model, trainer_cfg)
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(
+        f"[rank {rank}] freeze policy applied (freeze_backbone={trainer_cfg.freeze_backbone}) | "
+        f"{n_trainable / 1e6:.1f}M trainable params"
+    )
+    if trainer_cfg.init_weights_from_checkpoint:
+        logger.info(
+            f"[rank {rank}] warm-starting weights from "
+            f"{trainer_cfg.init_weights_from_checkpoint} ..."
+        )
+        load_model_weights_only(model, trainer_cfg.init_weights_from_checkpoint)
+        logger.info(f"[rank {rank}] warm-start weights loaded")
+
+
+def _setup_optimization(
+    model: RegulonadoModel,
+    trainer_cfg: TrainerConfig,
+    dataset_dict: DatasetDict | dict[str, Any],
+    *,
+    streaming: bool,
+    output_dir: Path,
+) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler, TrainingArguments]:
+    """Build the optimizer, LR scheduler, and HF ``TrainingArguments`` together."""
+    optimizer = _build_optimizer(model, trainer_cfg)
+    train_size = None if streaming else len(dataset_dict["train"])
+    scheduler = _build_scheduler_for_trainer(
+        optimizer,
+        trainer_cfg,
+        train_dataset_size=train_size,
+    )
+    training_args = _build_training_arguments(
+        output_dir,
+        trainer_cfg,
+        has_eval="validation" in dataset_dict,
+    )
+    return optimizer, scheduler, training_args
+
+
+def _build_training_callbacks(
+    cfg: Mapping[str, Any],
+    trainer_cfg: TrainerConfig,
+    val_dataset: Any,
+    collate_fn: Callable[[list[dict[str, Any]]], dict[str, torch.Tensor]],
+    scale_factors: np.ndarray,
+    background: np.ndarray,
+    records: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+) -> list[TrainerCallback]:
+    """Assemble the trainer callback list (wandb config, LR logging, early stopping, eval plots)."""
+    callbacks: list[TrainerCallback] = [WandbConfigCallback(cfg), LRLogCallback()]
+    if trainer_cfg.early_stopping_patience is not None and val_dataset is not None:
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=trainer_cfg.early_stopping_patience,
+                early_stopping_threshold=trainer_cfg.early_stopping_threshold,
+            )
+        )
+    track_names = [Path(r["bigwig_path"]).stem for r in records if r.get("bigwig_path")]
+    if val_dataset is not None and trainer_cfg.num_plot_examples > 0:
+        callbacks.append(
+            EvalPlotCallback(
+                dataset=val_dataset,
+                collate_fn=collate_fn,
+                num_examples=trainer_cfg.num_plot_examples,
+                output_dir=output_dir,
+                track_names=track_names or None,
+                scale_factors=scale_factors,
+                background=background,
+                apply_squash=bool(cfg["data"].get("apply_squash", True)),
+                apply_scale=bool(cfg["data"].get("apply_scale", True)),
+            )
+        )
+    return callbacks
+
+
+def _run_training_loop(
+    trainer: "RegulonadoTrainer",
+    trainer_cfg: TrainerConfig,
+    *,
+    rank: int,
+) -> None:
+    """Log start-of-training context and run ``trainer.train()``."""
+    logger.info(
+        f"[rank {rank}] starting trainer.train() | "
+        f"max_steps={trainer_cfg.max_steps} max_epochs={trainer_cfg.max_epochs} "
+        f"batch_size={trainer_cfg.batch_size} grad_accum={trainer_cfg.gradient_accumulation_steps} "
+        f"resume={trainer_cfg.resume_from_checkpoint} eval_on_start={trainer_cfg.eval_on_start}"
+    )
+    t0 = perf_counter()
+    trainer.train(resume_from_checkpoint=trainer_cfg.resume_from_checkpoint)
+    logger.info(f"[rank {rank}] trainer.train() returned after {perf_counter() - t0:.1f}s")
+
+
+def _finalize_trainer_outputs(
+    trainer: "RegulonadoTrainer",
+    output_dir: Path,
+) -> dict[str, list[float]]:
+    """Save the final model/trainer state and extract the loss history."""
+    train_losses = [
+        float(entry["loss"])
+        for entry in trainer.state.log_history
+        if "loss" in entry and "eval_loss" not in entry
+    ]
+    eval_losses = [
+        float(entry["eval_loss"]) for entry in trainer.state.log_history if "eval_loss" in entry
+    ]
+    if not train_losses:
+        train_losses = [
+            float(entry["train_loss"])
+            for entry in trainer.state.log_history
+            if "train_loss" in entry
+        ]
+    trainer.save_model(output_dir)
+    trainer.save_state()
+    return {"train/loss": train_losses, "eval/loss": eval_losses}
+
+
+def _build_training_summary(
+    cfg: Mapping[str, Any],
+    output_dir: Path,
+    seed: int,
+    metadata_path: Path | None,
+    records: Sequence[Mapping[str, Any]],
+    trainer_cfg: TrainerConfig,
+    history: dict[str, list[float]],
+) -> dict[str, Any]:
+    """Assemble the training summary dict and write it to ``output_dir/training_summary.json``."""
+    summary = {
+        "output_dir": str(output_dir),
+        "seed": seed,
+        "metadata_path": str(metadata_path) if metadata_path else None,
+        "n_tracks": len(records),
+        "backbone": cfg["backbone"]["name"],
+        "pretrained_model": cfg["backbone"].get("pretrained_name"),
+        "head": cfg["head"]["type"],
+        "resume_from_checkpoint": trainer_cfg.resume_from_checkpoint,
+        "init_weights_from_checkpoint": trainer_cfg.init_weights_from_checkpoint,
+        "history": history,
+    }
+    (output_dir / "training_summary.json").write_text(json.dumps(summary, indent=2))
+    return summary
+
+
 def run_training(
     cfg: Mapping[str, Any],
     *,
@@ -998,30 +1364,7 @@ def run_training(
         - init_weights_from_checkpoint: path if warm-started
         - history: dict with "train/loss" and "eval/loss" lists
     """
-    required_sections = ("data", "backbone", "head", "model", "loss", "trainer")
-    missing_sections = [section for section in required_sections if section not in cfg]
-    if missing_sections:
-        raise ValueError(
-            "Training configuration is missing required section(s): "
-            + ", ".join(missing_sections)
-        )
-    try:
-        trainer_cfg = OmegaConf.to_object(
-            OmegaConf.merge(OmegaConf.structured(TrainerConfig), cfg["trainer"])
-        )
-    except OmegaConfBaseException as exc:
-        raise ValueError(f"Invalid trainer configuration: {exc}") from exc
-    if not isinstance(trainer_cfg, TrainerConfig):
-        raise TypeError("Trainer configuration did not resolve to TrainerConfig")
-    trainer_cfg = dataclasses.replace(
-        trainer_cfg,
-        resume_from_checkpoint=_normalise_checkpoint_mode(trainer_cfg.resume_from_checkpoint),
-        init_weights_from_checkpoint=(trainer_cfg.init_weights_from_checkpoint or None),
-    )
-    if trainer_cfg.resume_from_checkpoint and trainer_cfg.init_weights_from_checkpoint:
-        raise ValueError(
-            "Set only one of trainer.resume_from_checkpoint or trainer.init_weights_from_checkpoint"
-        )
+    trainer_cfg = _resolve_trainer_config(cfg)
 
     seed = int(cfg.get("seed", 42))
     _seed_everything(seed)
@@ -1035,132 +1378,30 @@ def run_training(
         f"streaming={streaming} output_dir={cfg.get('output_dir')}"
     )
 
-    logger.info(f"[rank {rank}] loading dataset from {data_path} (streaming={streaming}) ...")
-    t0 = perf_counter()
-    dataset_dict = (
-        _load_dataset_streaming(data_path) if streaming else load_from_disk(str(data_path))
-    )
-    if streaming:
-        logger.info(f"[rank {rank}] dataset opened in {perf_counter() - t0:.1f}s (streaming)")
-    else:
-        sizes = {split: len(dataset_dict[split]) for split in dataset_dict}
-        logger.info(f"[rank {rank}] dataset loaded in {perf_counter() - t0:.1f}s | splits={sizes}")
+    dataset_dict = _load_training_dataset(data_path, streaming=streaming, rank=rank)
 
     metadata_path_value = cfg["data"].get("metadata_path")
     metadata_path = Path(str(metadata_path_value)) if metadata_path_value else None
-    metadata = load_dataset_metadata(data_path, metadata_path)
-    records = track_records(metadata)
-    logger.info(f"[rank {rank}] metadata loaded | {len(records)} tracks")
-
-    if not streaming:
-        labels_feature = dataset_dict[next(iter(dataset_dict))].features.get("labels")
-        # Array2D (the real, Rust-built dataset) exposes .shape; other feature
-        # types (e.g. a plain Sequence, as in small hand-built test datasets)
-        # don't carry a fixed track count to check against.
-        arrow_n_tracks = getattr(labels_feature, "shape", (None,))[0]
-        if arrow_n_tracks is not None and arrow_n_tracks != len(records):
-            raise ValueError(
-                f"Arrow label width ({arrow_n_tracks}) != included track count "
-                f"({len(records)}); tracks.parquet and the Arrow dataset are out of sync — "
-                "rebuild the dataset."
-            )
-
-    if streaming and "train" in dataset_dict:
-        shuffle_buffer = _estimate_shuffle_buffer(cfg["data"], metadata)
-        dataset_dict["train"] = dataset_dict["train"].shuffle(buffer_size=shuffle_buffer, seed=seed)
-
-    max_eval_samples = (
-        int(cfg["trainer"]["max_eval_samples"])
-        if cfg["trainer"].get("max_eval_samples") is not None
-        else None
+    metadata, records = _load_metadata_and_records(
+        data_path, metadata_path, dataset_dict, streaming=streaming, rank=rank
     )
-    if max_eval_samples is not None and "validation" in dataset_dict:
-        val = dataset_dict["validation"]
-        if isinstance(val, HFIterableDataset):
-            # Stride-filter is memory-free and gives uniform coverage across all chromosomes,
-            # which is statistically equivalent for an unbiased Pearson estimate.
-            n_val = (
-                val.info.splits["validation"].num_examples
-                if val.info and val.info.splits and "validation" in val.info.splits
-                else None
-            )
-            if n_val and n_val > max_eval_samples:
-                stride = n_val // max_eval_samples
-                dataset_dict["validation"] = val.filter(
-                    lambda _, idx: idx % stride == 0, with_indices=True
-                ).take(max_eval_samples)
-            else:
-                dataset_dict["validation"] = val.take(max_eval_samples)
-        else:
-            n_val = len(val)
-            if n_val > max_eval_samples:
-                rng = np.random.default_rng(seed)
-                indices = sorted(rng.choice(n_val, size=max_eval_samples, replace=False).tolist())
-                dataset_dict["validation"] = val.select(indices)
-            else:
-                dataset_dict["validation"] = val
 
+    dataset_dict = _prepare_dataset_splits(
+        dataset_dict, cfg["data"], trainer_cfg, metadata, streaming=streaming, seed=seed
+    )
     dataset_dict = _apply_dataset_transforms(dataset_dict, metadata, records, cfg["data"])
     logger.info(f"[rank {rank}] dataset transforms applied")
 
-    logger.info(f"[rank {rank}] building model ...")
-    t0 = perf_counter()
-    model = build_model(cfg, metadata, records, adapter_builder)
-    n_params = sum(p.numel() for p in model.parameters())
-    logger.info(
-        f"[rank {rank}] model built in {perf_counter() - t0:.1f}s | {n_params / 1e6:.1f}M params"
-    )
-    track_metadata_tensors = (
-        constant_track_metadata(records)
-        if bool(cfg["model"].get("use_track_metadata", False))
-        else {}
-    )
-    collate_fn = _build_collate_fn(track_metadata_tensors)
-
-    scale_factors, _, clip_hard, background = resolve_scale_and_clip(records)
-    labels_already_scaled = bool(
-        cfg["data"].get("apply_scale", True)
-        or cfg["data"].get("apply_squash", True)
-        or cfg["data"].get("apply_clip", True)
-    )
-    loss_fn = _build_loss_fn(
-        cfg["loss"],
-        scale_factors=scale_factors,
-        clip_hard=clip_hard,
-        labels_already_scaled=labels_already_scaled,
-    )
-
-    # Persistent workers with HF IterableDataset accumulate Arrow file handles and
-    # shuffle-buffer state between iterator cycles — workers never restart to clear them.
-    # Force non-persistent workers for streaming datasets to prevent this memory leak.
-    if streaming and trainer_cfg.persistent_workers:
-        import warnings
-
-        warnings.warn(
-            "persistent_workers=True is unsafe with streaming datasets (memory leak). "
-            "Overriding to persistent_workers=False.",
-            stacklevel=2,
-        )
-        trainer_cfg = dataclasses.replace(trainer_cfg, persistent_workers=False)
+    model = _build_model_with_logging(cfg, metadata, records, adapter_builder, rank=rank)
+    collate_fn, loss_fn, scale_factors, background = _build_collate_and_loss(cfg, records)
+    trainer_cfg = _guard_streaming_persistent_workers(trainer_cfg, streaming=streaming)
 
     output_dir = Path(str(cfg.get("output_dir") or Path.cwd() / "outputs"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    _apply_freeze_policy(model, trainer_cfg)
-    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(
-        f"[rank {rank}] freeze policy applied (freeze_backbone={trainer_cfg.freeze_backbone}) | "
-        f"{n_trainable / 1e6:.1f}M trainable params"
-    )
-    if trainer_cfg.init_weights_from_checkpoint:
-        logger.info(
-            f"[rank {rank}] warm-starting weights from "
-            f"{trainer_cfg.init_weights_from_checkpoint} ..."
-        )
-        load_model_weights_only(model, trainer_cfg.init_weights_from_checkpoint)
-        logger.info(f"[rank {rank}] warm-start weights loaded")
+    _prepare_model_for_training(model, trainer_cfg, rank=rank)
 
-    _write_provenance(
+    write_provenance(
         output_dir=output_dir,
         cfg=cfg,
         data_path=data_path,
@@ -1170,43 +1411,14 @@ def run_training(
         trainer_cfg=trainer_cfg,
     )
 
-    optimizer = _build_optimizer(model, trainer_cfg)
-    train_size = None if streaming else len(dataset_dict["train"])
-    scheduler = _build_scheduler_for_trainer(
-        optimizer,
-        trainer_cfg,
-        train_dataset_size=train_size,
+    optimizer, scheduler, training_args = _setup_optimization(
+        model, trainer_cfg, dataset_dict, streaming=streaming, output_dir=output_dir
     )
-    training_args = _build_training_arguments(
-        output_dir,
-        trainer_cfg,
-        has_eval="validation" in dataset_dict,
+    val_dataset = dataset_dict.get("validation")
+    callbacks = _build_training_callbacks(
+        cfg, trainer_cfg, val_dataset, collate_fn, scale_factors, background, records, output_dir
     )
     topk_bins = int(cfg["trainer"].get("topk_bins", 256))
-    callbacks: list[TrainerCallback] = [_WandbConfigCallback(cfg), _LRLogCallback()]
-    if trainer_cfg.early_stopping_patience is not None and "validation" in dataset_dict:
-        callbacks.append(
-            EarlyStoppingCallback(
-                early_stopping_patience=trainer_cfg.early_stopping_patience,
-                early_stopping_threshold=trainer_cfg.early_stopping_threshold,
-            )
-        )
-    track_names = [Path(r["bigwig_path"]).stem for r in records if r.get("bigwig_path")]
-    val_dataset = dataset_dict.get("validation")
-    if val_dataset is not None and trainer_cfg.num_plot_examples > 0:
-        callbacks.append(
-            _EvalPlotCallback(
-                dataset=val_dataset,
-                collate_fn=collate_fn,
-                num_examples=trainer_cfg.num_plot_examples,
-                output_dir=output_dir,
-                track_names=track_names or None,
-                scale_factors=scale_factors,
-                background=background,
-                apply_squash=bool(cfg["data"].get("apply_squash", True)),
-                apply_scale=bool(cfg["data"].get("apply_scale", True)),
-            )
-        )
     trainer = RegulonadoTrainer(
         model=model,
         args=training_args,
@@ -1216,50 +1428,16 @@ def run_training(
         optimizers=(optimizer, scheduler),
         callbacks=callbacks,
         loss_fn=loss_fn,
-        compute_metrics=_make_compute_metrics(len(records)),
-        preprocess_logits_for_metrics=_make_preprocess_logits_for_metrics(topk_bins),
+        compute_metrics=make_compute_metrics(len(records)),
+        preprocess_logits_for_metrics=make_preprocess_logits_for_metrics(topk_bins),
     )
-    logger.info(
-        f"[rank {rank}] starting trainer.train() | "
-        f"max_steps={trainer_cfg.max_steps} max_epochs={trainer_cfg.max_epochs} "
-        f"batch_size={trainer_cfg.batch_size} grad_accum={trainer_cfg.gradient_accumulation_steps} "
-        f"resume={trainer_cfg.resume_from_checkpoint} eval_on_start={trainer_cfg.eval_on_start}"
-    )
-    t0 = perf_counter()
-    trainer.train(resume_from_checkpoint=trainer_cfg.resume_from_checkpoint)
-    logger.info(f"[rank {rank}] trainer.train() returned after {perf_counter() - t0:.1f}s")
-    train_losses = [
-        float(entry["loss"])
-        for entry in trainer.state.log_history
-        if "loss" in entry and "eval_loss" not in entry
-    ]
-    eval_losses = [
-        float(entry["eval_loss"]) for entry in trainer.state.log_history if "eval_loss" in entry
-    ]
-    if not train_losses:
-        train_losses = [
-            float(entry["train_loss"])
-            for entry in trainer.state.log_history
-            if "train_loss" in entry
-        ]
-    trainer.save_model(output_dir)
-    trainer.save_state()
-    history = {"train/loss": train_losses, "eval/loss": eval_losses}
 
-    summary = {
-        "output_dir": str(output_dir),
-        "seed": seed,
-        "metadata_path": str(metadata_path) if metadata_path else None,
-        "n_tracks": len(records),
-        "backbone": cfg["backbone"]["name"],
-        "pretrained_model": cfg["backbone"].get("pretrained_name"),
-        "head": cfg["head"]["type"],
-        "resume_from_checkpoint": trainer_cfg.resume_from_checkpoint,
-        "init_weights_from_checkpoint": trainer_cfg.init_weights_from_checkpoint,
-        "history": history,
-    }
-    (output_dir / "training_summary.json").write_text(json.dumps(summary, indent=2))
-    return summary
+    _run_training_loop(trainer, trainer_cfg, rank=rank)
+    history = _finalize_trainer_outputs(trainer, output_dir)
+
+    return _build_training_summary(
+        cfg, output_dir, seed, metadata_path, records, trainer_cfg, history
+    )
 
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="train")

@@ -18,7 +18,7 @@ def _safe_corr(x: np.ndarray, y: np.ndarray) -> float:
     return float("nan") if not np.isfinite(r) else r
 
 
-def _make_preprocess_logits_for_metrics(topk_bins: int) -> Callable:
+def make_preprocess_logits_for_metrics(topk_bins: int) -> Callable:
     """Return a preprocess_logits_for_metrics function that accumulates Pearson sufficient stats.
 
     Returns [B, T, 18] per batch:
@@ -67,7 +67,7 @@ def _make_preprocess_logits_for_metrics(topk_bins: int) -> Callable:
     return preprocess
 
 
-def _make_compute_metrics(
+def make_compute_metrics(
     n_tracks: int,
 ) -> Callable[[EvalPrediction], dict[str, float]]:
     def _pearson_from_stats(

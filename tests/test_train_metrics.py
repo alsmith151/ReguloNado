@@ -11,11 +11,11 @@ import numpy as np
 import pytest
 import torch
 
-# Import the private helpers directly so the test is self-contained.
+# Import the metrics helpers directly so the test is self-contained.
 from regulonado.training.runner import (
     RegulonadoTrainer,
-    _make_compute_metrics,
-    _make_preprocess_logits_for_metrics,
+    make_compute_metrics,
+    make_preprocess_logits_for_metrics,
 )
 from scipy import stats as scipy_stats
 from transformers import Trainer
@@ -47,21 +47,21 @@ def _make_batch(
 
 class TestPreprocess:
     def test_output_shape_btl_labels(self):
-        preprocess = _make_preprocess_logits_for_metrics(topk_bins=8)
+        preprocess = make_preprocess_logits_for_metrics(topk_bins=8)
         logits, labels = _make_batch(B=3, T=5, L=20, labels_transposed=False)
         out = preprocess(logits, labels)
         assert out.shape == (3, 5, 18), out.shape
 
     def test_output_shape_transposed_labels(self):
         """HF datasets loads labels as [B, L, T]; preprocess must handle it."""
-        preprocess = _make_preprocess_logits_for_metrics(topk_bins=8)
+        preprocess = make_preprocess_logits_for_metrics(topk_bins=8)
         logits, labels_lt = _make_batch(B=3, T=5, L=20, labels_transposed=True)
         out = preprocess(logits, labels_lt)
         assert out.shape == (3, 5, 18), out.shape
 
     def test_transposed_labels_same_stats(self):
         """Stats must be identical regardless of whether labels are transposed."""
-        preprocess = _make_preprocess_logits_for_metrics(topk_bins=8)
+        preprocess = make_preprocess_logits_for_metrics(topk_bins=8)
         logits, labels_btl = _make_batch(B=3, T=5, L=20, labels_transposed=False)
         labels_blt = labels_btl.transpose(1, 2)
 
@@ -70,7 +70,7 @@ class TestPreprocess:
         torch.testing.assert_close(out_btl, out_blt)
 
     def test_tuple_logits_unpacked(self):
-        preprocess = _make_preprocess_logits_for_metrics(topk_bins=4)
+        preprocess = make_preprocess_logits_for_metrics(topk_bins=4)
         logits, labels = _make_batch(B=2, T=3, L=16)
         out_plain = preprocess(logits, labels)
         out_tuple = preprocess((logits, torch.zeros(1)), labels)
@@ -78,7 +78,7 @@ class TestPreprocess:
 
     def test_topk_capped_at_L(self):
         """topk_bins > L should not raise."""
-        preprocess = _make_preprocess_logits_for_metrics(topk_bins=1000)
+        preprocess = make_preprocess_logits_for_metrics(topk_bins=1000)
         logits, labels = _make_batch(B=2, T=3, L=16)
         out = preprocess(logits, labels)
         assert out.shape == (2, 3, 18)
@@ -86,7 +86,7 @@ class TestPreprocess:
     def test_n_column_values(self):
         """Col 5 (n for all bins) must equal L; col 11 (n for topk) must equal min(k, L)."""
         L, topk = 20, 8
-        preprocess = _make_preprocess_logits_for_metrics(topk_bins=topk)
+        preprocess = make_preprocess_logits_for_metrics(topk_bins=topk)
         logits, labels = _make_batch(B=2, T=3, L=L)
         out = preprocess(logits, labels)
         assert out[..., 5].unique().item() == pytest.approx(L)
@@ -100,8 +100,8 @@ class TestPreprocess:
 class TestComputeMetrics:
     def _run(self, n_batches: int = 5, B: int = 4, T: int = 6, L: int = 24, topk: int = 8):
         """Accumulate stats over n_batches and return metrics dict."""
-        preprocess = _make_preprocess_logits_for_metrics(topk_bins=topk)
-        compute_metrics = _make_compute_metrics(n_tracks=T)
+        preprocess = make_preprocess_logits_for_metrics(topk_bins=topk)
+        compute_metrics = make_compute_metrics(n_tracks=T)
 
         all_stats = []
         for seed in range(n_batches):
@@ -130,8 +130,8 @@ class TestComputeMetrics:
 
     def test_perfect_prediction(self):
         """When logits == labels, all Pearson values should be 1.0."""
-        preprocess = _make_preprocess_logits_for_metrics(topk_bins=8)
-        compute_metrics = _make_compute_metrics(n_tracks=4)
+        preprocess = make_preprocess_logits_for_metrics(topk_bins=8)
+        compute_metrics = make_compute_metrics(n_tracks=4)
 
         rng = torch.Generator()
         rng.manual_seed(42)
@@ -146,8 +146,8 @@ class TestComputeMetrics:
     def test_against_scipy_pearson(self):
         """Sufficient-stats Pearson must match scipy on the same flat data."""
         B, T, L, topk = 6, 3, 30, 10
-        preprocess = _make_preprocess_logits_for_metrics(topk_bins=topk)
-        compute_metrics = _make_compute_metrics(n_tracks=T)
+        preprocess = make_preprocess_logits_for_metrics(topk_bins=topk)
+        compute_metrics = make_compute_metrics(n_tracks=T)
 
         rng = torch.Generator()
         rng.manual_seed(7)
@@ -176,8 +176,8 @@ class TestComputeMetrics:
 
     def test_constant_signal_track_is_nan(self):
         """A flat track produces undefined Pearson; compute_metrics must survive it."""
-        preprocess = _make_preprocess_logits_for_metrics(topk_bins=8)
-        compute_metrics = _make_compute_metrics(n_tracks=2)
+        preprocess = make_preprocess_logits_for_metrics(topk_bins=8)
+        compute_metrics = make_compute_metrics(n_tracks=2)
 
         logits = torch.zeros(3, 2, 20)
         labels = torch.zeros(3, 2, 20)

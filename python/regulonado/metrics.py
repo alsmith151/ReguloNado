@@ -13,7 +13,7 @@ from torchmetrics.functional import (
 )
 
 
-def _paired_group_masks(
+def paired_group_masks(
     condition_ids: torch.Tensor,
     shared_track_index: torch.Tensor | None = None,
     *,
@@ -130,6 +130,11 @@ def delta_log2fc_vectors(
     meas_B: torch.Tensor,
     pseudocount: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Compute log2 fold-changes between two groups for predicted and measured.
+
+    Returns (pred_log2fc, meas_log2fc) as 1D arrays. Each input is summed over
+    tracks (dim -1) then averaged over samples (dim 1) before computing log2fc.
+    """
     def _log2fc(a: torch.Tensor, b: torch.Tensor, ps: float) -> np.ndarray:
         a_mean = a.float().mean(dim=1).sum(dim=-1)
         b_mean = b.float().mean(dim=1).sum(dim=-1)
@@ -146,7 +151,14 @@ def paired_delta_log2fc_vectors(
     shared_track_index: torch.Tensor | None = None,
     pseudocount: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    pair_masks = _paired_group_masks(condition_ids, shared_track_index)
+    """Compute log2 fold-changes for paired conditions (e.g., baseline vs. perturbed).
+
+    Finds pairs of baseline (condition_id=0) and perturbed (condition_id=1)
+    samples, optionally grouped by shared_track_index. For each pair, computes
+    log2fc as log2(perturbed) - log2(baseline) averaged across tracks.
+    Returns (pred_log2fc, target_log2fc) as concatenated 1D arrays.
+    """
+    pair_masks = paired_group_masks(condition_ids, shared_track_index)
     if not pair_masks:
         empty = np.empty(0, dtype=np.float64)
         return empty, empty
@@ -172,6 +184,11 @@ def paired_delta_log2fc_vectors(
 
 
 def delta_log2fc_pearson(pred_lfc: np.ndarray, meas_lfc: np.ndarray) -> float:
+    """Pearson r between predicted and measured log2 fold-changes.
+
+    Non-finite values are dropped. Returns NaN if fewer than 2 finite points or
+    if either array has zero standard deviation.
+    """
     pred_lfc = np.asarray(pred_lfc, dtype=np.float64)
     meas_lfc = np.asarray(meas_lfc, dtype=np.float64)
     finite_mask = np.isfinite(pred_lfc) & np.isfinite(meas_lfc)
@@ -184,6 +201,12 @@ def delta_log2fc_pearson(pred_lfc: np.ndarray, meas_lfc: np.ndarray) -> float:
 
 
 def delta_log2fc_metrics(pred_lfc: np.ndarray, meas_lfc: np.ndarray) -> dict[str, float]:
+    """Pearson, Spearman, and top-variance Pearson correlations for delta log2fc.
+
+    Top-variance Pearson is computed over the top 20% of measured fold-changes
+    by absolute value. All three return NaN if fewer than 2 finite points or if
+    either array has zero standard deviation.
+    """
     pred_lfc = np.asarray(pred_lfc, dtype=np.float64)
     meas_lfc = np.asarray(meas_lfc, dtype=np.float64)
     finite_mask = np.isfinite(pred_lfc) & np.isfinite(meas_lfc)
@@ -213,6 +236,11 @@ def delta_log2fc_metrics(pred_lfc: np.ndarray, meas_lfc: np.ndarray) -> dict[str
 
 
 def init_validation_metric_state() -> dict[str, Any]:
+    """Create an empty state dict for accumulating validation metrics across batches.
+
+    Fields hold lists of arrays (delta_lfc, meas_lfc) and sums for raw reconstruction
+    (count, sums, sums of squares, cross-products).
+    """
     return {
         "pred_lfc_chunks": [],
         "meas_lfc_chunks": [],
@@ -232,6 +260,11 @@ def update_validation_metric_state(
     pred_lfc: np.ndarray | None = None,
     meas_lfc: np.ndarray | None = None,
 ) -> None:
+    """Accumulate log2 fold-changes into state. Non-finite values are filtered out.
+
+    If both arrays are provided, their finite elements (element-wise intersection)
+    are appended to state['pred_lfc_chunks'] and state['meas_lfc_chunks'].
+    """
     if pred_lfc is not None and meas_lfc is not None:
         pred_lfc = np.asarray(pred_lfc, dtype=np.float64)
         meas_lfc = np.asarray(meas_lfc, dtype=np.float64)
@@ -246,6 +279,11 @@ def update_validation_reconstruction_state(
     raw_pred: np.ndarray,
     raw_target: np.ndarray,
 ) -> None:
+    """Accumulate raw prediction vs. target statistics for reconstruction metrics.
+
+    Computes and accumulates sums, sums of squares, and cross-products used by
+    Pearson, MAE, and RMSE. Non-finite elements are filtered out first.
+    """
     raw_pred = np.asarray(raw_pred, dtype=np.float64).reshape(-1)
     raw_target = np.asarray(raw_target, dtype=np.float64).reshape(-1)
     finite_mask = np.isfinite(raw_pred) & np.isfinite(raw_target)
@@ -264,6 +302,12 @@ def update_validation_reconstruction_state(
 
 
 def finalize_validation_metric_state(state: dict[str, Any]) -> dict[str, float]:
+    """Finalize accumulated state to a dict of metric values (floats, may be NaN).
+
+    Computes delta_lfc metrics (pearson, spearman, top_variance_pearson) and
+    reconstruction metrics (raw_pearson, raw_mae, raw_rmse) prefixed by their
+    category. Returns balanced_score if both are available, else whichever exists.
+    """
     pred_lfc = _concat_chunks(state["pred_lfc_chunks"])
     meas_lfc = _concat_chunks(state["meas_lfc_chunks"])
     delta_metrics = {}
@@ -311,10 +355,21 @@ def finalize_validation_metric_state(state: dict[str, Any]) -> dict[str, float]:
 
 
 def per_track_pearson(preds: np.ndarray, targets: np.ndarray) -> dict[int, float]:
+    """Pearson r per track (column index) between preds and targets.
+
+    Input arrays are (B, T) where B is batch/window count and T is tracks.
+    Each track must have at least 2 finite points and nonzero variance; tracks
+    failing these checks return NaN.
+    """
     return _per_track_metric(preds, targets, _pearson, min_count=2, require_variance=True)
 
 
 def per_track_spearman(preds: np.ndarray, targets: np.ndarray) -> dict[int, float]:
+    """Spearman rho per track (column index) between preds and targets.
+
+    Input arrays are (B, T). Each track must have at least 2 finite points and
+    nonzero variance; tracks failing these checks return NaN.
+    """
     return _per_track_metric(preds, targets, _spearman, min_count=2, require_variance=True)
 
 
@@ -323,6 +378,12 @@ def amplitude_calibration_per_track(
     targets: np.ndarray,
     quantile: float = 0.99,
 ) -> dict[int, float]:
+    """Ratio of predicted to target amplitude at a percentile, per track.
+
+    Amplitude is the absolute value at the given quantile (default 99th). Each
+    track must have at least 2 finite points; tracks with zero target amplitude
+    return NaN. Input arrays are (B, T).
+    """
     def _ratio(pred_vals: np.ndarray, target_vals: np.ndarray) -> float:
         pred_p = np.percentile(np.abs(pred_vals), quantile * 100)
         target_p = np.percentile(np.abs(target_vals), quantile * 100)
@@ -332,6 +393,11 @@ def amplitude_calibration_per_track(
 
 
 def per_track_mse(preds: np.ndarray, targets: np.ndarray) -> dict[int, float]:
+    """Mean squared error per track (column index) between preds and targets.
+
+    Input arrays are (B, T). Each track must have at least 1 finite point; tracks
+    with no finite points return NaN. No variance requirement.
+    """
     def _mse(pred_vals: np.ndarray, target_vals: np.ndarray) -> float:
         return float(mean_squared_error(_as_tensor(pred_vals), _as_tensor(target_vals)))
 
@@ -339,6 +405,11 @@ def per_track_mse(preds: np.ndarray, targets: np.ndarray) -> dict[int, float]:
 
 
 def per_track_mae(preds: np.ndarray, targets: np.ndarray) -> dict[int, float]:
+    """Mean absolute error per track (column index) between preds and targets.
+
+    Input arrays are (B, T). Each track must have at least 1 finite point; tracks
+    with no finite points return NaN. No variance requirement.
+    """
     def _mae(pred_vals: np.ndarray, target_vals: np.ndarray) -> float:
         return float(mean_absolute_error(_as_tensor(pred_vals), _as_tensor(target_vals)))
 
