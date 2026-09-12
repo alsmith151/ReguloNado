@@ -51,7 +51,7 @@ def require_seqnado() -> Any:
             from importlib.metadata import version as _version
 
             installed = _version("seqnado")
-        except Exception:
+        except (ImportError, ModuleNotFoundError):
             installed = getattr(seqnado, "__version__", "unknown")
         # Report where the module came from: the usual cause of a SeqNado that
         # imports but has no API is a directory named 'seqnado' shadowing the

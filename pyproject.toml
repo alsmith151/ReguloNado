@@ -30,7 +30,6 @@ classifiers = [
 # this is a correction, not a loosening. pyarrow was previously undeclared at
 # runtime, arriving only transitively via `datasets` in the `test` extra.
 dependencies = [
-    "loguru>=0.7",
     "numpy>=2",
     "pandas>=2",
     "pandera>=0.33",
@@ -46,9 +45,7 @@ dependencies = [
 data = [
     "bioframe",
     "datasets>=5.0.0",
-    "psutil",
     "pybigtools",
-    "pysam>=0.23",
     "scipy",
 ]
 

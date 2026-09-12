@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import matplotlib
@@ -9,6 +10,8 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 def plot_signal_comparison(
@@ -147,7 +150,8 @@ def plot_training_curves(
             try:
                 with summary_file.open() as handle:
                     summary = json.load(handle)
-            except Exception:
+            except (OSError, json.JSONDecodeError) as e:
+                logger.warning(f"Failed to load {summary_file}: {e}")
                 continue
             for metric in metrics:
                 if metric in summary:

@@ -7,11 +7,10 @@ each answer validated as it is given. The same code path runs non-interactively
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from pathlib import Path
 from typing import Any
-
-from loguru import logger
 
 from regulonado.config.genomes import GenomeEntry, load_genome_registry
 from regulonado.config.models import (
@@ -28,6 +27,8 @@ from regulonado.config.models import (
     TrainRun,
 )
 from regulonado.config.prompts import ask, ask_int
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PRETRAINED = "johahi/flashzoi-replicate-0"
 

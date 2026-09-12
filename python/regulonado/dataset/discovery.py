@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import logging
 from pathlib import Path
 from typing import Sequence
 
 import pandas as pd
 
 from regulonado.tracks_table import bigwig_fingerprint
+
+logger = logging.getLogger(__name__)
 
 _DEDUPE_TRACK_MODES = {"none", "identity", "content"}
 
@@ -65,8 +68,6 @@ def _resolve_bigwig_tracks(
     into each surviving track record; provenance fields always win on a key
     clash, so a sheet can never overwrite dedupe bookkeeping.
     """
-    from loguru import logger
-
     if dedupe_tracks not in _DEDUPE_TRACK_MODES:
         raise ValueError(
             f"dedupe_tracks must be one of {sorted(_DEDUPE_TRACK_MODES)}, got {dedupe_tracks!r}"

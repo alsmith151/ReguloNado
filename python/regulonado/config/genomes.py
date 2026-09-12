@@ -15,11 +15,13 @@ SeqNado's own.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
-from loguru import logger
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 
 class GenomeEntry(BaseModel):

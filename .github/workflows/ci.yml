@@ -148,3 +148,49 @@ jobs:
             tests/test_attribution.py \
             tests/test_normalization_anchor.py \
             tests/test_cli.py -v
+
+  test-extras:
+    name: "Extra imports — Python ${{ matrix.python-version }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+        extra: ["core", "data", "train", "workflow"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-extras-${{ matrix.python-version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-extras-${{ matrix.python-version }}-
+            ${{ runner.os }}-cargo-extras-
+            ${{ runner.os }}-cargo-
+
+      - name: Install package with ${{ matrix.extra }} extra
+        run: |
+          if [ "${{ matrix.extra }}" = "core" ]; then
+            pip install .
+            python -c "import regulonado"
+          elif [ "${{ matrix.extra }}" = "data" ]; then
+            pip install ".[data]"
+            python -c "import regulonado, regulonado.dataset"
+          elif [ "${{ matrix.extra }}" = "train" ]; then
+            pip install ".[train]"
+            python -c "import regulonado, regulonado.training"
+          elif [ "${{ matrix.extra }}" = "workflow" ]; then
+            pip install ".[workflow]"
+            python -c "import regulonado, regulonado.workflow"
+          fi

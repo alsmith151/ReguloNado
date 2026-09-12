@@ -2494,26 +2494,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pysam"
-version = "0.24.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/09/9b/e856ad525ed0847810cca936ee551b8e0a709525fea34e0e0e723173f62d/pysam-0.24.0.tar.gz", hash = "sha256:db0f86c15532ef5dad263748324f45d9a639668e3497d8cabce54ef47a1a78d9", size = 5201690, upload-time = "2026-04-27T12:26:50.879Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/14/27/cc422d11961a00bd04aa9a8d9a63683a1083fe2e6a491c285a94998d6751/pysam-0.24.0-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:38d5cc5dff4bdaceabbb58c0700c41b132aacf783432b1d16060b46ac7d866e2", size = 6194145, upload-time = "2026-04-27T12:25:33.467Z" },
-    { url = "https://files.pythonhosted.org/packages/98/c1/37f2fcccce3f1494147e46ccc04996226defe9ccae8251a9ce61296fa599/pysam-0.24.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:4da222cf6887b272c09351381efa20bfc96e0a47a944a822785fc5b6bc8b8c9d", size = 5944098, upload-time = "2026-04-27T12:25:35.259Z" },
-    { url = "https://files.pythonhosted.org/packages/da/8a/df2be69f699b0a4360fd35a847636a2230a17dbaa02c98dc34831cdfb810/pysam-0.24.0-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:983cae779c49575de583b29fe3d0d66c18034f9c97ee4481dab7618faadcd44c", size = 22535944, upload-time = "2026-04-27T12:25:38.156Z" },
-    { url = "https://files.pythonhosted.org/packages/55/0f/e7f1ff3a1cabc6c4486a7ee1b0506aedf2f5f8329760ac1f4e8032feef2b/pysam-0.24.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4a642f18649e59817de272173e9c27c031dceaca199809e4f8b338ebfc5d6698", size = 23226776, upload-time = "2026-04-27T12:25:40.966Z" },
-    { url = "https://files.pythonhosted.org/packages/11/34/877f20c2e5416e054036f6521fc6606ced8d2819bfb84979a2632b30db11/pysam-0.24.0-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:52d2e2328ac5698cbfa34232eb17933c7835b8f61aa69f75522c7ad1ec00f4d1", size = 22390293, upload-time = "2026-04-27T12:25:43.674Z" },
-    { url = "https://files.pythonhosted.org/packages/ac/e0/5ef3228359045ee546cebd7ffa602699d4aaf9bf60dac3511afb8cbfa151/pysam-0.24.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:dc3302c2c0c0f920040d8d38cf66ccac435aebafcccf7edf2018faeaceed39ac", size = 22833439, upload-time = "2026-04-27T12:25:46.177Z" },
-    { url = "https://files.pythonhosted.org/packages/86/79/2f5151ac001d8c74fb047036bfea9e4e897939e6587d3c4d512e46c450b1/pysam-0.24.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:c30f746060a8944adaf5004652b4a25b2460a07360fb01be2b6b38f883fae8e7", size = 8681450, upload-time = "2026-04-27T12:25:48.52Z" },
-    { url = "https://files.pythonhosted.org/packages/d1/2c/fd59b47677a1df3efa64172dcd9b99fa7db437de8c663f08120ebd4db835/pysam-0.24.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:b9445a4c3be5ed4b60202690af3890a444452276372e3abb58564308cc6d5a45", size = 8432205, upload-time = "2026-04-27T12:25:50.579Z" },
-    { url = "https://files.pythonhosted.org/packages/5c/35/95ae2b839668c4fa729243f05a208afaba4a1007e7aaaabf54a409fb6cf8/pysam-0.24.0-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:37f82c603837f708cc46a29bd5819d35dbb061c90609c1088701ed3bfbce2f70", size = 24971702, upload-time = "2026-04-27T12:25:53.378Z" },
-    { url = "https://files.pythonhosted.org/packages/c4/ea/066ce356c5df3c2d42b72801f768d41bf691f58f6d2a90f6334fbed39785/pysam-0.24.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1448b3100f79bd00830c586a256ea21b1f701d937f5ad4318adffdb5b2933478", size = 25644910, upload-time = "2026-04-27T12:25:56.218Z" },
-    { url = "https://files.pythonhosted.org/packages/b2/9f/1249435f8c87c9a90c475f54c0fa1881506112ca2658356a29a8c959990a/pysam-0.24.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:aeba818c56d625de5977119788f6bb1d85280b98d5f1fbab965bd5ba6aeddf7a", size = 24846304, upload-time = "2026-04-27T12:25:58.975Z" },
-    { url = "https://files.pythonhosted.org/packages/27/9a/9b9a261366a96a298080f735a31b031df71831c1cc64d9bff7966a0fbbec/pysam-0.24.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:0cd378640c237a99a10e4658f2bb0ba368eea4463c31955064d35b842e4224a3", size = 25258539, upload-time = "2026-04-27T12:26:02.131Z" },
-]
-
-[[package]]
 name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2705,7 +2685,6 @@ name = "regulonado"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "loguru", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "numpy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pandas", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pandera", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -2728,9 +2707,7 @@ all = [
     { name = "matplotlib", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "peft", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "plotly", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "psutil", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "seaborn", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "torch", version = "2.6.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "sys_platform == 'linux'" },
@@ -2742,9 +2719,7 @@ all = [
 data = [
     { name = "bioframe", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "datasets", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "psutil", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
 dev = [
@@ -2765,9 +2740,7 @@ gpu = [
     { name = "matplotlib", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "ninja", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "peft", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "psutil", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "torch", version = "2.6.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "sys_platform == 'linux'" },
     { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
@@ -2789,10 +2762,8 @@ test = [
     { name = "bioframe", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "datasets", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pandera", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "psutil", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pyfaidx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pytest", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
@@ -2806,9 +2777,7 @@ train = [
     { name = "lightning", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "matplotlib", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "peft", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "psutil", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "torch", version = "2.6.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "sys_platform == 'linux'" },
     { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
@@ -2839,7 +2808,6 @@ requires-dist = [
     { name = "jupyter", marker = "extra == 'jupyter'" },
     { name = "jupyterlab", marker = "extra == 'jupyter'" },
     { name = "lightning", marker = "extra == 'train'", specifier = ">=2.2" },
-    { name = "loguru", specifier = ">=0.7" },
     { name = "matplotlib", marker = "extra == 'train'" },
     { name = "matplotlib", marker = "extra == 'viz'" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.0" },
@@ -2852,12 +2820,10 @@ requires-dist = [
     { name = "pandera", extras = ["strategies"], marker = "extra == 'test'" },
     { name = "peft", marker = "extra == 'train'" },
     { name = "plotly", marker = "extra == 'viz'" },
-    { name = "psutil", marker = "extra == 'data'" },
     { name = "pyarrow" },
     { name = "pybigtools", marker = "extra == 'data'" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyfaidx", marker = "extra == 'test'" },
-    { name = "pysam", marker = "extra == 'data'", specifier = ">=0.23" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.1.1" },
     { name = "pyyaml" },

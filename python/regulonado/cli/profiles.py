@@ -13,10 +13,11 @@ is a filesystem convention, so behaviour is identical either way.
 
 from __future__ import annotations
 
+import logging
 from importlib import resources
 from pathlib import Path
 
-from loguru import logger
+logger = logging.getLogger(__name__)
 
 # Presets shipped by this package, under workflow/profiles/.
 _PACKAGED_PROFILES = "regulonado.workflow.profiles"
