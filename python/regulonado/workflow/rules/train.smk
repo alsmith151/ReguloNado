@@ -58,6 +58,10 @@ rule train_phase:
         resolver=str(Path(workflow.basedir) / "scripts" / "resolve_checkpoint.py"),
     output:
         state=str(TRAIN_DIR / "{run}" / "{phase}" / "trainer_state.json"),
+    resources:
+        # One GPU per launched process, so the request always matches
+        # --nproc-per-node instead of drifting from a hardcoded count.
+        gpu=config["train"]["nproc_per_node"],
     wildcard_constraints:
         run="|".join(re.escape(name) for name in RUN_NAMES),
         phase="|".join(re.escape(name) for name in PHASE_NAMES),
