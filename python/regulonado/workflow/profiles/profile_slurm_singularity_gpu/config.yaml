@@ -48,11 +48,28 @@ set-resources:
     cpus_per_task: 8
 
   train_phase:
-    # GPU rule. slurm_extra carries the GRES request; adjust the GPU count and
-    # type to match your cluster's naming.
+    # GPU rule; the rule definition itself sets `gpu` (sized to
+    # nproc_per_node), so only site-specific placement/sizing goes here.
+    # Do NOT put --gres/--gpus in slurm_extra — the SLURM executor plugin
+    # owns that flag and refuses to submit if slurm_extra also sets it.
     slurm_partition: "CHANGEME_GPU_PARTITION"
     slurm_account: "CHANGEME_GPU_ACCOUNT"
-    slurm_extra: "'--gres=gpu:2'"
     runtime: 1440
     mem_mb: 256000
     cpus_per_task: 16
+
+  design_shard:
+    # GPU rule (in-silico mutagenesis/attribution); `gpu` is set on the rule
+    # itself, so only site-specific placement/sizing goes here.
+    slurm_partition: "CHANGEME_GPU_PARTITION"
+    slurm_account: "CHANGEME_GPU_ACCOUNT"
+    mem_mb: 64000
+    cpus_per_task: 4
+
+  attribute_shard:
+    # GPU rule (saliency/attribution scoring); `gpu` is set on the rule
+    # itself, so only site-specific placement/sizing goes here.
+    slurm_partition: "CHANGEME_GPU_PARTITION"
+    slurm_account: "CHANGEME_GPU_ACCOUNT"
+    mem_mb: 64000
+    cpus_per_task: 4
