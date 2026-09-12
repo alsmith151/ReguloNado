@@ -1,0 +1,18 @@
+                                                                                                    
+ Usage: root normalization original [OPTIONS] TRACK_TABLE                                           
+                                                                                                    
+ Infer original scale factors for every included track in a track table.                            
+                                                                                                    
+ Output rows are sorted by track_index so they can be applied directly by position.                 
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    track_table      PATH  tracks/_stages/discovered.parquet (or any tracks.parquet) [required] │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --output    -o      PATH     Output file path (default: <track_table_dir>/scale_factors.parquet) │
+│ --format    -f      TEXT     Output format: csv or parquet [default: parquet]                    │
+│ --bin-size          INTEGER  build.bin_size; scales RPKM to raw counts [default: 32]             │
+│ --workers   -w      INTEGER  Thread pool size [default: 16]                                      │
+│ --help                       Show this message and exit.                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

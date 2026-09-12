@@ -1,0 +1,29 @@
+                                                                                                    
+ Usage: root tracks qc [OPTIONS] TRACK_TABLE                                                        
+                                                                                                    
+ Compute opt-in QC metrics and a verdict; does not drop or mutate tracks.                           
+                                                                                                    
+ Dropping (``qc.drop_degenerate`` + ``qc.rules``) happens in ``tracks                               
+ assemble``, which is the step that always runs and so is the one place a                           
+ track's ``status`` is decided.                                                                     
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    track_table      PATH  tracks/_stages/discovered.parquet [required]                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --output          -o      PATH     qc_report.parquet [required]                               │
+│    --check                   TEXT     Repeatable: sparsity, interval_signal,                     │
+│                                       replicate_concordance, anchor                              │
+│    --intervals               PATH     BED for interval_signal/replicate_concordance              │
+│    --interval-means          PATH     Precomputed 'tracks interval-means' output; skips a fresh  │
+│                                       scan when given                                            │
+│    --scale-factors           PATH     Needed for --check anchor                                  │
+│    --bin-size                INTEGER  [default: 32]                                              │
+│    --n-pred-bins             INTEGER  [default: 6144]                                            │
+│    --shift-max-bp            INTEGER  [default: 0]                                               │
+│    --sample-n                INTEGER  Sample this many BED rows                                  │
+│    --rule                    TEXT     COLUMN:min=X,max=Y (repeatable)                            │
+│    --workers         -w      INTEGER  [default: 16]                                              │
+│    --help                             Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

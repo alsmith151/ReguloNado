@@ -1,0 +1,31 @@
+                                                                                                    
+ Usage: root [OPTIONS] COMMAND [ARGS]...                                                            
+                                                                                                    
+ Build datasets, train models, run inference, and manage workflows.                                 
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --version                           Show Python package and Rust extension versions.             │
+│ --log-level                   TEXT  Log level for the 'regulonado' logger. [default: INFO]       │
+│ --quiet                             Shorthand for --log-level WARNING.                           │
+│ --verbose             -v            Shorthand for --log-level DEBUG. Takes priority over         │
+│                                     --quiet.                                                     │
+│ --install-completion                Install completion for the current shell.                    │
+│ --show-completion                   Show completion for the current shell, to copy it or         │
+│                                     customize the installation.                                  │
+│ --help                              Show this message and exit.                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────────────────────────╮
+│ config              Generate a workflow config, interactively or from flags.                     │
+│ init                Install Snakemake execution presets into ~/.config/snakemake/.               │
+│ train               Train one model from a named preset.                                         │
+│ recompress-dataset  Rechunk/recompress a saved Arrow DatasetDict with ZSTD IPC compression.      │
+│ build               Build an Arrow DatasetDict from BED / FASTA / a pre-assembled track table.   │
+│ predict             Generate BigWig tracks from trained model predictions, collapsing equal      │
+│                     bins.                                                                        │
+│ design              Mutate endogenous enhancer candidates to sharpen cell-type specificity.      │
+│ attribute           Locate the high-attribution core of each candidate by in-silico mutagenesis. │
+│ pipeline            Run the packaged Snakemake workflow, optionally selecting one stage.         │
+│ normalization       Infer, correct, and apply per-track signal normalisation factors.            │
+│ tracks              Discover, QC, and assemble tracks.parquet before the dataset build.          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

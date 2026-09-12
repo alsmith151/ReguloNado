@@ -1,0 +1,16 @@
+                                                                                                    
+ Usage: root normalization infer [OPTIONS] BIGWIG_DIR                                               
+                                                                                                    
+ Infer scale factors for all bigwig files in a directory.                                           
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    bigwig_dir      PATH  Directory containing .bw / .bigwig files [required]                   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --output   -o      PATH     Output file path [required]                                       │
+│    --format   -f      TEXT     Output format: csv or parquet [default: parquet]                  │
+│    --workers  -w      INTEGER  Thread pool size [default: 16]                                    │
+│    --glob             TEXT     Glob pattern for bigwig files [default: *.bw]                     │
+│    --help                      Show this message and exit.                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

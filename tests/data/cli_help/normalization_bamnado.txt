@@ -1,0 +1,42 @@
+                                                                                                    
+ Usage: root normalization bamnado [OPTIONS] TRACK_TABLE                                            
+                                                                                                    
+ Correct scale factors using bamnado's own between-sample normalisation.                            
+                                                                                                    
+ Runs ``bamnado bam-normalize`` directly on BAM files to get a correction                           
+ factor per track, then divides the existing scale_factor (from                                     
+ 'normalization original') by that correction — same convention as                                  
+ 'normalization tmm', but the correction comes from bamnado's TMM,                                  
+ csaw-background, CPM, median-of-ratios, or spike-in estimator over the                             
+ full BAM rather than regulonado's own dataset-restricted TMM.                                      
+                                                                                                    
+ BAM files are matched to tracks by filename stem: track N's bigwig                                 
+ 'sample1.bw' must have a matching 'sample1.bam' in --bam-dir.                                      
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    track_table      PATH  tracks/_stages/discovered.parquet (or any tracks.parquet) [required] │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --bam-dir                      PATH     Directory of BAM files, one per track, named          │
+│                                            <track-stem>.bam                                      │
+│                                            [required]                                            │
+│    --method               -m      TEXT     bamnado bam-normalize method: tmm, csaw-background,   │
+│                                            cpm, median-of-ratios, spike-in                       │
+│                                            [default: csaw-background]                            │
+│    --scale-factors        -s      PATH     Scale-factors parquet from normalization original     │
+│                                            (default: <metadata_dir>/scale_factors.parquet)       │
+│    --output               -o      PATH     Output path (default: overwrites --scale-factors      │
+│                                            input)                                                │
+│    --format               -f      TEXT     Output format: csv or parquet [default: parquet]      │
+│    --bin-size-bp                  INTEGER  bamnado background bin size in bp [default: 10000]    │
+│    --exclude-top-percent          FLOAT    Drop this percentage of highest-count bins first      │
+│                                            [default: 5.0]                                        │
+│    --reference-sample             TEXT     Sample name to use as reference (default: bamnado's   │
+│                                            choice)                                               │
+│    --logratio-trim                FLOAT    TMM trim fraction for M-values [default: 0.3]         │
+│    --sum-trim                     FLOAT    TMM trim fraction for A-values [default: 0.05]        │
+│    --exogenous-prefix             TEXT     Reference-name prefix for spike-in sequences          │
+│                                            (--method spike-in)                                   │
+│    --help                                  Show this message and exit.                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

@@ -1,0 +1,16 @@
+                                                                                                    
+ Usage: root tracks targets [OPTIONS] TRACK_TABLE                                                   
+                                                                                                    
+ Export a Borzoi-format ``targets.txt`` — interop, and a diffable text view.                        
+                                                                                                    
+ ``sum_stat``/``strand_pair`` have no ReguloNado equivalent: every row gets                         
+ ``sum`` and self-pairs (``strand_pair == index``).                                                 
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    track_table      PATH  [required]                                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --output  -o      PATH  Borzoi-format targets.txt [required]                                  │
+│    --help                  Show this message and exit.                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

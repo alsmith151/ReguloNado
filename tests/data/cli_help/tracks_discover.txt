@@ -1,0 +1,24 @@
+                                                                                                    
+ Usage: root tracks discover [OPTIONS] OUTPUT                                                       
+                                                                                                    
+ Resolve raw BigWig sources into the discovery-stage track table.                                   
+                                                                                                    
+ Precedence: an explicit ``--track-sheet``/``--seqnado-project`` combination,                       
+ else ``--bigwig-dir``, else explicit ``--bigwig`` files.                                           
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    output      PATH  Where to write discovered.parquet [required]                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --bigwig           -b      PATH  BigWig file (repeat, order preserved)                           │
+│ --bigwig-dir               PATH  Directory of BigWig files (sorted by name)                      │
+│ --bigwig-glob              TEXT  Glob for --bigwig-dir (repeatable). Default: '*.bw' and         │
+│                                  '*.bigWig'.                                                     │
+│ --track-sheet              PATH  CSV mapping tracks to annotation; supplies the ordered track    │
+│                                  list.                                                           │
+│ --seqnado-project          TEXT  SeqNado output directory as PATH or NAME=PATH (repeatable).     │
+│ --drop-missing                   Drop missing BigWig paths instead of raising                    │
+│ --dedupe-tracks            TEXT  none, identity, or content [default: none]                      │
+│ --help                           Show this message and exit.                                     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

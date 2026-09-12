@@ -1,0 +1,21 @@
+                                                                                                    
+ Usage: root tracks assemble [OPTIONS] DISCOVERED                                                   
+                                                                                                    
+ Join discovery + scaling + QC into ``tracks.parquet``, the one file everything else reads.         
+                                                                                                    
+ ``tracks.parquet`` is a strict superset of every stage output: an unrun                            
+ stage leaves its columns null rather than absent, so the schema is                                 
+ identical regardless of which stages ran.                                                          
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    discovered      PATH  tracks/_stages/discovered.parquet [required]                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --output           -o      PATH  tracks.parquet [required]                                    │
+│    --scale-factors            PATH  scale_factors.parquet                                        │
+│    --qc-report                PATH  qc_report.parquet                                            │
+│    --drop-degenerate                Drop tracks with qc_verdict == 'failed'                      │
+│    --exclude-track            TEXT  track_name to force-exclude (repeatable)                     │
+│    --help                           Show this message and exit.                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

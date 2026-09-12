@@ -1,0 +1,30 @@
+                                                                                                    
+ Usage: root pipeline [OPTIONS] CONFIGFILE [STAGE]                                                  
+                                                                                                    
+ Run the packaged Snakemake workflow, optionally selecting one stage.                               
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    configfile      PATH     Workflow YAML config [required]                                    │
+│      stage           [STAGE]  Stage to run: train, recompress, or design.                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --cores           -c      INTEGER RANGE [x>=1]  Local execution cores. [default: 1]              │
+│ --jobs            -j      INTEGER RANGE [x>=1]  Maximum remote jobs.                             │
+│ --config                  TEXT                  Override config with KEY=VALUE.                  │
+│ --preset                  TEXT                  Snakemake execution preset shortcode resolved    │
+│                                                 from ~/.config/snakemake/ (shared with SeqNado). │
+│                                                 Run 'regulonado init' to install them.           │
+│ --profile                 PATH                  Snakemake profile directory or config.yaml       │
+│                                                 (overrides --preset).                            │
+│ --cluster-config          PATH                  Additional YAML resource config.                 │
+│ --executor                TEXT                  Override the executor selected by the profile    │
+│ --dry-run         -n                            Build the DAG without running jobs.              │
+│ --target          -t      TEXT                  Specific rule or output target.                  │
+│ --unlock                                        Remove a stale workflow lock.                    │
+│ --report                  PATH                  Write a Snakemake HTML report.                   │
+│ --dag                                           Print the workflow DAG and exit.                 │
+│ --rulegraph                                     Print the rule graph and exit.                   │
+│ --keep-going                                    Continue independent jobs after an error.        │
+│ --help                                          Show this message and exit.                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

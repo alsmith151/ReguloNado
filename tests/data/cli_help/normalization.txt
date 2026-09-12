@@ -1,0 +1,17 @@
+                                                                                                    
+ Usage: root normalization [OPTIONS] COMMAND [ARGS]...                                              
+                                                                                                    
+ Infer, correct, and apply per-track signal normalisation factors.                                  
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --help          Show this message and exit.                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────────────────────────╮
+│ infer     Infer scale factors for all bigwig files in a directory.                               │
+│ original  Infer original scale factors for every included track in a track table.                │
+│ anchor    Scale tracks to housekeeping-promoter anchor units.                                    │
+│ tmm       Compute edgeR-style TMM normalisation factors directly from the BigWigs.               │
+│ seqnado   Apply SeqNado's spike-in normalisation factors instead of estimating our own.          │
+│ bamnado   Correct scale factors using bamnado's own between-sample normalisation.                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

@@ -1,0 +1,19 @@
+                                                                                                    
+ Usage: root tracks [OPTIONS] COMMAND [ARGS]...                                                     
+                                                                                                    
+ Discover, QC, and assemble tracks.parquet before the dataset build.                                
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --help          Show this message and exit.                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────────────────────────╮
+│ discover        Resolve raw BigWig sources into the discovery-stage track table.                 │
+│ interval-means  One shared BigWig scan, consumed by ``tmm`` scaling and interval-based QC        │
+│                 checks.                                                                          │
+│ qc              Compute opt-in QC metrics and a verdict; does not drop or mutate tracks.         │
+│ assemble        Join discovery + scaling + QC into ``tracks.parquet``, the one file everything   │
+│                 else reads.                                                                      │
+│ show            Pretty-print a track table.                                                      │
+│ targets         Export a Borzoi-format ``targets.txt`` — interop, and a diffable text view.      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

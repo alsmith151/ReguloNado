@@ -1,0 +1,46 @@
+                                                                                                    
+ Usage: root normalization tmm [OPTIONS] TRACK_TABLE                                                
+                                                                                                    
+ Compute edgeR-style TMM normalisation factors directly from the BigWigs.                           
+                                                                                                    
+ Scans ``--intervals`` once per track (:func:`regulonado.qc.track_interval_means`,                  
+ the same scan the ``interval_signal``/``replicate_concordance`` QC checks                          
+ share), converts to pseudo-counts using library sizes from the scale-factors                       
+ parquet, and runs TMM estimation over the sampled regions.                                         
+                                                                                                    
+ The output parquet gains a ``tmm_factor`` column and the ``scale_factor``                          
+ column is updated to ``old_scale_factor / tmm_factor`` so that multiplying                         
+ any raw RPKM BigWig value by the new scale_factor yields TMM-normalised                            
+ approximate raw counts.                                                                            
+                                                                                                    
+                                                                                                    
+ Typical workflow::                                                                                 
+                                                                                                    
+ regulonado normalization original tracks/discovered.parquet                                        
+ regulonado normalization tmm tracks/discovered.parquet --intervals intervals.bed                   
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    track_table      PATH  tracks/_stages/discovered.parquet (or any tracks.parquet) [required] │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --intervals               PATH     BED of sampling regions (inputs.intervals)                    │
+│ --interval-means          PATH     Precomputed 'tracks interval-means' output; skips a fresh     │
+│                                    scan when given                                               │
+│ --scale-factors   -s      PATH     Scale-factors parquet from normalization original (default:   │
+│                                    <track_table_dir>/scale_factors.parquet)                      │
+│ --output          -o      PATH     Output path (default: overwrites --scale-factors input)       │
+│ --format          -f      TEXT     Output format: csv or parquet [default: parquet]              │
+│ --bin-size                INTEGER  build.bin_size [default: 32]                                  │
+│ --n-pred-bins             INTEGER  build.n_pred_bins [default: 6144]                             │
+│ --shift-max-bp            INTEGER  build.shift_max_bp [default: 0]                               │
+│ --sample-n                INTEGER  Sample this many BED rows instead of scanning all             │
+│ --workers         -w      INTEGER  Thread pool size [default: 16]                                │
+│ --trim-m                  FLOAT    Fraction to trim from each M-value tail (edgeR default 0.3)   │
+│                                    [default: 0.3]                                                │
+│ --trim-a                  FLOAT    Fraction to trim from each A-value tail (edgeR default 0.05)  │
+│                                    [default: 0.05]                                               │
+│ --min-count               FLOAT    Minimum pseudo-count for a region to be included              │
+│                                    [default: 1.0]                                                │
+│ --help                             Show this message and exit.                                   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

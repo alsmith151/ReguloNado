@@ -1,0 +1,36 @@
+                                                                                                    
+ Usage: root predict [OPTIONS] CHECKPOINT_DIR FASTA_FILE OUTPUT_DIR                                 
+                                                                                                    
+ Generate BigWig tracks from trained model predictions, collapsing equal bins.                      
+                                                                                                    
+ Provide exactly one of --bed (targeted regions) or --whole-genome (tiling). Only the central       
+ prediction window is written, so windows never overlap. Note: --whole-genome with all tracks       
+ produces many large files; subset with --tracks.                                                   
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    checkpoint_dir      PATH  HF RegulonadoModel directory; legacy run roots supported with     │
+│                                --dataset                                                         │
+│                                [required]                                                        │
+│ *    fasta_file          PATH  Genome FASTA (needs a .fai index) used to build model inputs      │
+│                                [required]                                                        │
+│ *    output_dir          PATH  Directory to write one BigWig per selected track [required]       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --dataset         -d      PATH     Dataset dir with tracks.parquet; required only for legacy     │
+│                                    checkpoints                                                   │
+│ --bed                     PATH     Predict the central window centred on each BED row            │
+│ --whole-genome                     Tile each chromosome into adjacent windows instead            │
+│ --chromsizes              PATH     chrom<TAB>size file selecting which chromosomes to tile and   │
+│                                    their lengths (also used for the BigWig header; default: all  │
+│                                    FASTA contigs via .fai)                                       │
+│ --tracks                  TEXT     Comma-separated track names or indices to write (default: all │
+│                                    tracks)                                                       │
+│ --rtol                    FLOAT    Relative tolerance for collapsing adjacent equal bins         │
+│                                    [default: 0.01]                                               │
+│ --batch-size              INTEGER  Windows per forward pass [default: 4]                         │
+│ --device                  TEXT     Torch device (default: cuda if available else cpu)            │
+│ --inverse-squash                   Undo the (x+1)^0.75 training squash so values approximate raw │
+│                                    counts                                                        │
+│ --help                             Show this message and exit.                                   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

@@ -1,0 +1,37 @@
+                                                                                                    
+ Usage: root train [OPTIONS] DATASET                                                                
+                                                                                                    
+ Train one model from a named preset.                                                               
+                                                                                                    
+ Use ``--set`` for less common settings, for example                                                
+ ``--set trainer.max_eval_samples=200``. Use ``regulonado pipeline`` when                           
+ several independent runs or warm-start phases should be orchestrated together.                     
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    dataset      PATH  Saved Regulonado/Hugging Face dataset directory [required]               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --output-dir                    -o      PATH     Run directory for checkpoints and diagnostics   │
+│ --preset                        -p      TEXT     Named training preset [default: head_only]      │
+│ --metadata                              PATH     tracks.parquet to use instead of the dataset    │
+│                                                  copy                                            │
+│ --nproc-per-node                        INTEGER  Use torchrun with this many local processes     │
+│                                                  when >1                                         │
+│                                                  [default: 1]                                    │
+│ --resume-from-checkpoint                TEXT     Full Trainer resume from a checkpoint dir, or   │
+│                                                  'true' for latest in output-dir                 │
+│ --init-weights-from-checkpoint          PATH     Warm start from model weights only with a fresh │
+│                                                  optimizer/scheduler                             │
+│ --max-steps                             INTEGER  Override trainer.max_steps                      │
+│ --batch-size                            INTEGER  Override per-device train batch size            │
+│ --eval-batch-size                       INTEGER  Override per-device eval batch size             │
+│ --learning-rate,--lr                    FLOAT    Override head learning rate                     │
+│ --backbone-lr                           FLOAT    Override backbone learning rate                 │
+│ --num-workers                           INTEGER  Override DataLoader worker count                │
+│ --no-wandb                                       Disable W&B reporting for this run              │
+│ --set                                   TEXT     Override one setting as KEY=VALUE (repeatable)  │
+│ --print-config                                   Print the resolved training config and exit     │
+│ --dry-run                                        Print the resolved command without running it   │
+│ --help                                           Show this message and exit.                     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

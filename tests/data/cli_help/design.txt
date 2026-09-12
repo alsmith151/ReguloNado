@@ -1,0 +1,30 @@
+                                                                                                    
+ Usage: root design [OPTIONS]                                                                       
+                                                                                                    
+ Mutate endogenous enhancer candidates to sharpen cell-type specificity.                            
+                                                                                                    
+ Optimises exactly the spans in --candidates; context for each comes from the dataset window        
+ (from --intervals) that contains it. Provide 3 --checkpoint folds to optimise against and,         
+ ideally, a 4th --holdout-checkpoint to confirm the design isn't fold-specific overfitting.         
+                                                                                                    
+ Provide `--params config.yaml` for the full set of search tuning options (rounds, AdaLead/ISM      
+ settings, the selective-activation objective, ...); the options above override anything it         
+ sets. See docs/design.md.                                                                          
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --params                    PATH  YAML/JSON file parsed as DesignConfig; explicit options below  │
+│                                   override it.                                                   │
+│ --candidates                PATH  BED of enhancer candidates to optimise.                        │
+│ --checkpoint                PATH  Design-fold checkpoint dir; repeat once per fold optimised.    │
+│ --holdout-checkpoint        PATH  Held-out fold checkpoint: scored but never optimised.          │
+│ --fasta                     PATH  Genome FASTA (needs a .fai index).                             │
+│ --target                    TEXT  Target group value in the --group-by column.                   │
+│ --group-by                  TEXT  Track annotation column defining cell-type groups.             │
+│ --method                    TEXT  'ism' or 'adalead'.                                            │
+│ --out                       PATH  Directory to write design outputs.                             │
+│ --intervals                 PATH  Build-time interval BED the folds were trained on; default:    │
+│                                   the 'bed_file' recorded in --dataset-dir's tracks.parquet.     │
+│ --dataset-dir               PATH  Dataset dir with tracks.parquet.                               │
+│ --help                            Show this message and exit.                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

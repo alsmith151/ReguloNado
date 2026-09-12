@@ -1,0 +1,26 @@
+                                                                                                    
+ Usage: root normalization seqnado [OPTIONS] TRACK_TABLE                                            
+                                                                                                    
+ Apply SeqNado's spike-in normalisation factors instead of estimating our own.                      
+                                                                                                    
+ Takes library-size factors from 'normalization original' and corrects them                         
+ with the factors SeqNado already computed, exactly as 'normalization tmm'                          
+ applies a TMM correction: ``scale_factor = old_scale_factor / factor``, with                       
+ factors normalised to a geometric mean of 1 so the overall magnitude is                            
+ unchanged.                                                                                         
+                                                                                                    
+ Only valid within a single SeqNado project — its factors are not comparable                        
+ across projects. Use 'tmm' when aggregating several.                                               
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    track_table      PATH  tracks/_stages/discovered.parquet (or any tracks.parquet) [required] │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --project                PATH  SeqNado output directory (seqnado_output/). [required]         │
+│    --scale-factors  -s      PATH  Scale-factors parquet from 'normalization original'.           │
+│    --method         -m      TEXT  Spike-in method, e.g. orlando. Default: the only one.          │
+│    --output         -o      PATH  Output path (default: overwrites --scale-factors).             │
+│    --format         -f      TEXT  Output format: csv or parquet [default: parquet]               │
+│    --help                         Show this message and exit.                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

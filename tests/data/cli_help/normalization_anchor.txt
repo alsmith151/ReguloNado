@@ -1,0 +1,28 @@
+                                                                                                    
+ Usage: root normalization anchor [OPTIONS] TRACK_TABLE                                             
+                                                                                                    
+ Scale tracks to housekeeping-promoter anchor units.                                                
+                                                                                                    
+ Degenerate tracks (``quality == "failed"``) are written as-is, not dropped                         
+ here — ``regulonado tracks qc --check anchor`` (or ``qc.rules``) decides                           
+ whether to drop them, since that decision belongs to the opt-in QC gate,                           
+ not to scaling.                                                                                    
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    track_table      PATH  tracks/_stages/discovered.parquet (or any tracks.parquet) [required] │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --anchor-regions                   PATH     High-anchor BED/parquet [required]                │
+│ *  --background-regions               PATH     Background BED/parquet [required]                 │
+│    --heldout-regions                  PATH                                                       │
+│    --output                   -o      PATH                                                       │
+│    --format                   -f      TEXT     [default: parquet]                                │
+│    --bin-size                         INTEGER  build.bin_size [default: 32]                      │
+│    --window-stat-bp                   INTEGER  [default: 1000]                                   │
+│    --window-stat-bp-by-assay          TEXT     JSON {"assay": bp}; overrides --window-stat-bp    │
+│                                                for named assays                                  │
+│    --background-sample                INTEGER  [default: 5000]                                   │
+│    --workers                  -w      INTEGER  [default: 16]                                     │
+│    --help                                      Show this message and exit.                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

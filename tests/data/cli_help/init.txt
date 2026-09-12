@@ -1,0 +1,15 @@
+                                                                                                    
+ Usage: root init [OPTIONS]                                                                         
+                                                                                                    
+ Install Snakemake execution presets into ~/.config/snakemake/.                                     
+                                                                                                    
+ Uses the same directory and naming scheme as `seqnado init`, so a machine                          
+ running both pipelines keeps one set of execution configs. Presets already                         
+ present are left alone — including SeqNado's — so this is safe to re-run.                          
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --dry-run  -n        Show what would be written.                                                 │
+│ --force              Overwrite presets that already exist.                                       │
+│ --help               Show this message and exit.                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

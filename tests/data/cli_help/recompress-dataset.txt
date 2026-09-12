@@ -1,0 +1,19 @@
+                                                                                                    
+ Usage: root recompress-dataset [OPTIONS] SRC DST                                                   
+                                                                                                    
+ Rechunk/recompress a saved Arrow DatasetDict with ZSTD IPC compression.                            
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    src      PATH  Source saved dataset directory [required]                                    │
+│ *    dst      PATH  Destination directory [required]                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --level                   INTEGER  ZSTD compression level [default: 3]                           │
+│ --workers         -w      INTEGER  Parallel shard workers [default: 4]                           │
+│ --max-batch-size          INTEGER  Split Arrow record batches into sub-batches of at most this   │
+│                                    many rows                                                     │
+│ --overwrite                        Remove destination directory first if it exists               │
+│ --remove-src                       Delete source dataset after successful recompression          │
+│ --help                             Show this message and exit.                                   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

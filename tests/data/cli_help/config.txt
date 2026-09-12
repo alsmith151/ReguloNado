@@ -1,0 +1,31 @@
+                                                                                                    
+ Usage: root config [OPTIONS]                                                                       
+                                                                                                    
+ Generate a workflow config, interactively or from flags.                                           
+                                                                                                    
+ Follows the same shape as `seqnado config`: sequential prompts with defaults                       
+ in brackets, validated as you answer. Pass --no-interactive to take every                          
+ default instead, which is the scripting and CI path.                                               
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --output              -o                      PATH  Where to write the config YAML.              │
+│ --interactive             --no-interactive          Prompt for values, or take every default     │
+│                                                     without asking.                              │
+│                                                     [default: interactive]                       │
+│ --from-seqnado                                TEXT  SeqNado output directory as PATH or          │
+│                                                     NAME=PATH (repeatable). Tracks and their     │
+│                                                     annotation are read from the project.        │
+│ --genome                                      TEXT  Genome name from the shared SeqNado genome   │
+│                                                     registry.                                    │
+│ --name                                        TEXT  Project name; seeds the results directory.   │
+│ --fill-missing                                PATH  Load an existing config and fill in what was │
+│                                                     left unset. Overwrites in place unless       │
+│                                                     -o/--output or --new-file is given.          │
+│ --new-file                                          With --fill-missing, write                   │
+│                                                     '<name>.filled.yaml' instead of overwriting. │
+│ --track-sheet-out                             PATH  Where to write the derived track sheet.      │
+│ --assume-same-genome                                Aggregate projects whose reference genome    │
+│                                                     cannot be read from their config.            │
+│ --help                                              Show this message and exit.                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

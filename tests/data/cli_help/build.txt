@@ -1,0 +1,87 @@
+                                                                                                    
+ Usage: root build [OPTIONS] BED_FILE FASTA_FILE OUTPUT_DIR                                         
+                                                                                                    
+ Build an Arrow DatasetDict from BED / FASTA / a pre-assembled track table.                         
+                                                                                                    
+ Track discovery, dedupe and QC happen before this command, via                                     
+ 'regulonado tracks discover/qc/assemble' — this is intentionally the only                          
+ place a track list can be named, so there is one way to name tracks, not                           
+ two.                                                                                               
+                                                                                                    
+                                                                                                    
+ Examples                                                                                           
+ --------                                                                                           
+ regulonado build intervals.bed genome.fa out/ \                                                    
+     --track-table results/tracks/tracks.parquet \                                                  
+     --split train:train --split validation:valid \                                                 
+     --shift-max-bp 128 --n-extract-threads 16 --stage                                              
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    bed_file        PATH  BED file; column 4 used as fold label [required]                      │
+│ *    fasta_file      PATH  Reference genome FASTA (.fai index required) [required]               │
+│ *    output_dir      PATH  Output directory for the Arrow DatasetDict [required]                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --track-table                              PATH     tracks.parquet from 'regulonado tracks    │
+│                                                        assemble' — the sole source of track      │
+│                                                        identity, order and per-track annotation. │
+│                                                        Discovery, dedupe and QC all happen       │
+│                                                        upstream of this command; see 'regulonado │
+│                                                        tracks'.                                  │
+│                                                        [required]                                │
+│    --split                -s                  TEXT     Split definition NAME:FOLD1,FOLD2 (repeat │
+│                                                        for each split). Default:                 │
+│                                                        train:fold0-2,fold5-7, validation:fold4,  │
+│                                                        test:fold3.                               │
+│    --context-length                           INTEGER  Input sequence length in bp               │
+│                                                        [default: 524288]                         │
+│    --bin-size                                 INTEGER  Signal bin size in bp [default: 32]       │
+│    --n-pred-bins                              INTEGER  Number of prediction bins [default: 6144] │
+│    --shift-max-bp                             INTEGER  Shift augmentation buffer on each side in │
+│                                                        bp (multiple of bin-size)                 │
+│                                                        [default: 0]                              │
+│    --stage                    --no-stage               Copy FASTA and BigWigs to scratch before  │
+│                                                        building                                  │
+│                                                        [default: no-stage]                       │
+│    --overwrite                                         Regenerate splits that already exist      │
+│    --profile                  --no-profile             Emit per-phase timing summary to stderr   │
+│                                                        after each split (fast path only)         │
+│                                                        [default: no-profile]                     │
+│    --n-extract-threads                        INTEGER  Rayon thread count for Phase 1 Rust       │
+│                                                        BigWig extraction (fast path only)        │
+│                                                        [default: 32]                             │
+│    --arrow-batch-size                         INTEGER  Samples per Rust-written Arrow record     │
+│                                                        batch (RAM-bounded)                       │
+│                                                        [default: 8]                              │
+│    --shard-target-mb                          INTEGER  Target on-disk size per Arrow shard file  │
+│                                                        (in_memory). Shard sample count is        │
+│                                                        derived from this and the schema; raise   │
+│                                                        it for fewer/larger shards, lower it for  │
+│                                                        more/smaller ones.                        │
+│                                                        [default: 256]                            │
+│    --shard-size                               INTEGER  Explicit samples per Arrow shard file     │
+│                                                        (in_memory); overrides --shard-target-mb  │
+│                                                        when set.                                 │
+│    --arrow-compression                        TEXT     Arrow IPC compression: zstd, lz4, or none │
+│                                                        [default: lz4]                            │
+│    --arrow-write-threads                      INTEGER  Concurrent Arrow shard writers for        │
+│                                                        in_memory. Defaults to min(8,             │
+│                                                        --n-extract-threads); lower this if       │
+│                                                        memory is tight.                          │
+│    --strategy                                 TEXT     Build strategy: 'in_memory' (default)     │
+│                                                        decodes each chromosome's binned signal   │
+│                                                        for all tracks into RAM once and slices   │
+│                                                        every window from it — ~10x fewer BigWig  │
+│                                                        seeks; 'streaming' reads each window's    │
+│                                                        interval from every BigWig per batch,     │
+│                                                        split by split — bounded memory, kept     │
+│                                                        mainly as a parity reference.             │
+│                                                        [default: in_memory]                      │
+│    --chrom                                    TEXT     Restrict each split to BED rows on this   │
+│                                                        chromosome (repeat for several). The      │
+│                                                        `index` column on every output row still  │
+│                                                        refers to the absolute row in the full    │
+│                                                        BED.                                      │
+│    --help                                              Show this message and exit.               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

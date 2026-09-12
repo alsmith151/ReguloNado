@@ -1,0 +1,27 @@
+                                                                                                    
+ Usage: root attribute [OPTIONS]                                                                    
+                                                                                                    
+ Locate the high-attribution core of each candidate by in-silico mutagenesis.                       
+                                                                                                    
+ Scores every alternative base at every position against one output track, then calls the           
+ contiguous sub-span that drives it — in practice the nucleosome-free core. The resulting           
+ core_regions.bed is designed to be fed straight back in as `regulonado design --candidates`,       
+ so that design and synthesis target only the span that matters.                                    
+                                                                                                    
+ Provide `--params config.yaml` for the full set of ISM-sweep tuning options (bin/fold              
+ reduction, smoothing, thresholds, ...); the options above override anything it sets.               
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --params             PATH  YAML/JSON file parsed as AttributionConfig; explicit options below    │
+│                            override it.                                                          │
+│ --candidates         PATH  BED of candidate regions to scan.                                     │
+│ --checkpoint         PATH  Fold checkpoint dir; repeat once per fold.                            │
+│ --fasta              PATH  Genome FASTA (needs a .fai index).                                    │
+│ --track              TEXT  Track to attribute against: name or index.                            │
+│ --out                PATH  Directory to write attribution outputs.                               │
+│ --intervals          PATH  Build-time interval BED the folds were trained on; default: the       │
+│                            'bed_file' recorded in --dataset-dir's tracks.parquet.                │
+│ --dataset-dir        PATH  Dataset dir with tracks.parquet.                                      │
+│ --help                     Show this message and exit.                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

@@ -1,0 +1,19 @@
+                                                                                                    
+ Usage: root tracks interval-means [OPTIONS] TRACK_TABLE                                            
+                                                                                                    
+ One shared BigWig scan, consumed by ``tmm`` scaling and interval-based QC checks.                  
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    track_table      PATH  tracks/_stages/discovered.parquet [required]                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --output        -o      PATH     interval_means.parquet [required]                            │
+│ *  --intervals             PATH     inputs.intervals BED [required]                              │
+│    --bin-size              INTEGER  [default: 32]                                                │
+│    --n-pred-bins           INTEGER  [default: 6144]                                              │
+│    --shift-max-bp          INTEGER  [default: 0]                                                 │
+│    --sample-n              INTEGER                                                               │
+│    --workers       -w      INTEGER  [default: 16]                                                │
+│    --help                           Show this message and exit.                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
