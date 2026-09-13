@@ -243,3 +243,4 @@ if ATTRIBUTION:
             merge_attribution_bigwig(
                 output.attributions, output.bigwig, fasta_path=params.fasta
             )
+    localrules: shard_attribution_candidates
