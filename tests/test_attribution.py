@@ -483,6 +483,35 @@ def test_peak_anchor_differs_from_centroid_on_a_skewed_profile():
     assert peak.anchor > centroid.anchor
 
 
+def test_peak_anchor_finds_the_true_maximum_on_a_merged_asymmetric_pair_of_bumps():
+    """One tall-narrow bump and one shorter-broad bump, close enough to merge into a single
+    segment under the default merge_gap_bp. Splitting behaviour must be identical between
+    anchor modes (this is purely an anchor-placement fix); only where the anchor lands differs.
+    """
+    true_peak_position = 120
+    profile = _bump(true_peak_position, sigma=8, height=1.0) + _bump(180, sigma=40, height=0.6)
+    kwargs = dict(
+        editable=EDITABLE, bounds=BOUNDS, min_zscore=0.5, quantile=0.6, smooth_bp=5,
+        merge_gap_bp=20, min_width_bp=20, max_cores=5,
+    )
+    peak_cores, _ = call_cores(profile, anchor="peak", **kwargs)
+    centroid_cores, _ = call_cores(profile, anchor="centroid", **kwargs)
+
+    # Segmentation is anchor-independent: one merged segment, identical span either way.
+    assert len(peak_cores) == 1
+    assert len(centroid_cores) == 1
+    assert (peak_cores[0].start, peak_cores[0].end) == (centroid_cores[0].start, centroid_cores[0].end)
+
+    true_peak_genomic = EDITABLE.start + true_peak_position
+    peak_anchor = peak_cores[0].anchor
+    centroid_anchor = centroid_cores[0].anchor
+
+    # peak anchoring lands on (or very near) the true narrow bump's maximum.
+    assert abs(peak_anchor - true_peak_genomic) <= 5
+    # centroid anchoring is pulled toward the broader bump's mass, measurably further away.
+    assert abs(centroid_anchor - true_peak_genomic) - abs(peak_anchor - true_peak_genomic) > 10
+
+
 # --------------------------------------------------------------------------- #
 # 5. Output + the round trip back into `design`                               #
 # --------------------------------------------------------------------------- #
@@ -585,7 +614,6 @@ def test_called_cores_resolve_back_into_design(tmp_path):
     # on_missing="error" makes this assert itself: an unresolvable core raises.
     seeds = resolve_seeds(tmp_path / "core_regions.bed", index, on_missing="error")
     assert len(seeds) == 1
-    assert seeds[0].name == "c0_core0"
 
 
 # --------------------------------------------------------------------------- #

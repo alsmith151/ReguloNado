@@ -64,6 +64,8 @@ attribution:
       track: atac_hl60        # a single track name, or its index
       settings:
         quantile: 0.92
+        anchor: peak
+        max_cores_per_candidate: 3
 
 # ── Design against the cores, not the raw candidates ─────────────────────────
 design:
