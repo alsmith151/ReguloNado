@@ -25,6 +25,11 @@ rerun-incomplete: true
 printshellcmds: true
 software-deployment-method: apptainer
 use-apptainer: true
+# Resubmit a failed job automatically rather than needing a human to notice a
+# hung/bad node and kill it manually. Does not shorten a hang by itself — pair
+# with a tight `runtime` on GPU rules below so SLURM's own time limit kills a
+# wedged job promptly instead of only at the shared 240-minute default.
+retries: 2
 
 default-resources:
   slurm_partition: "CHANGEME_CPU_PARTITION"
@@ -61,15 +66,19 @@ set-resources:
   design_shard:
     # GPU rule (in-silico mutagenesis/attribution); `gpu` is set on the rule
     # itself, so only site-specific placement/sizing goes here.
+    # runtime/mem_mb are deliberately NOT set here: the rule itself scales
+    # both with `attempt` (doubling on each retry), and a static override
+    # here would clobber that scaling.
     slurm_partition: "CHANGEME_GPU_PARTITION"
     slurm_account: "CHANGEME_GPU_ACCOUNT"
-    mem_mb: 64000
     cpus_per_task: 4
 
   attribute_shard:
     # GPU rule (saliency/attribution scoring); `gpu` is set on the rule
     # itself, so only site-specific placement/sizing goes here.
+    # runtime/mem_mb are deliberately NOT set here: the rule itself scales
+    # both with `attempt` (doubling on each retry), and a static override
+    # here would clobber that scaling.
     slurm_partition: "CHANGEME_GPU_PARTITION"
     slurm_account: "CHANGEME_GPU_ACCOUNT"
-    mem_mb: 64000
     cpus_per_task: 4

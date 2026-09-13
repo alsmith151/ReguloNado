@@ -214,7 +214,10 @@ if DESIGN:
             run_json=str(DESIGN_DIR / "{target}" / "shards" / "{shard}" / "run.json"),
         resources:
             gpu=1,
-            runtime=240,
+            # Doubles on each retry (see `retries` in the SLURM profiles) so a job that dies
+            # from hitting the cap gets more room next attempt instead of failing identically.
+            runtime=lambda wildcards, attempt: 240 * 2 ** (attempt - 1),
+            mem_mb=lambda wildcards, attempt: 64000 * 2 ** (attempt - 1),
         wildcard_constraints:
             target="|".join(re.escape(name) for name in DESIGN_TARGET_NAMES),
             shard=r"\d+",

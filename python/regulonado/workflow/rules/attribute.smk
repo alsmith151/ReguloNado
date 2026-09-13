@@ -162,7 +162,11 @@ if ATTRIBUTION:
             run_json=str(ATTRIBUTION_DIR / "{target}" / "shards" / "{shard}" / "run.json"),
         resources:
             gpu=1,
-            runtime=240,
+            # Doubles on each retry (see `retries` in the SLURM profiles) so a job that dies
+            # from hitting the cap gets more room next attempt instead of failing identically.
+            # Base sized for a full ~20-candidate shard (~15 min/candidate observed).
+            runtime=lambda wildcards, attempt: 360 * 2 ** (attempt - 1),
+            mem_mb=lambda wildcards, attempt: 64000 * 2 ** (attempt - 1),
         wildcard_constraints:
             target="|".join(re.escape(name) for name in ATTRIBUTION_TARGET_NAMES),
             shard="|".join(re.escape(s) for s in ATTRIBUTION_SHARDS),
