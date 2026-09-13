@@ -616,6 +616,74 @@ def test_called_cores_resolve_back_into_design(tmp_path):
     assert len(seeds) == 1
 
 
+def test_called_cores_with_multiple_cores_resolve_back_into_design(tmp_path):
+    """Two well-separated cores on one candidate must each survive the round trip: distinct
+    rows in cores.tsv/core_regions.bed, one summary.tsv row with the right n_cores, and two
+    independent Seeds out of resolve_seeds."""
+    seed = _seed("c0", 180, 280)
+    context = _motif_context()
+    result = ism_scan(TrackReadout(_MotifEnsemble(), [1], seed.bins), seed, context, batch_size=32)
+    # Two well-separated bumps, sized to land inside the dataset window's predicted region
+    # (160-240, derived below from the (150, 250) bed interval's midpoint).
+    profile = _bump(15, 3, height=1.0, n=100) + _bump(45, 3, height=0.8, n=100)
+    cores, diagnostics = call_cores(
+        profile,
+        editable=seed.editable,
+        smooth_bp=3,
+        quantile=0.6,
+        min_width_bp=8,
+        merge_gap_bp=3,
+        min_zscore=0.5,
+        max_cores=2,
+        bounds=(seed.window.pred_start, seed.window.pred_end),
+    )
+    assert len(cores) == 2
+    record = AttributionRecord(
+        seed=seed,
+        ism=result,
+        smoothed=_smooth(result.importance, 5),
+        cores=cores,
+        diagnostics=diagnostics,
+    )
+
+    intervals = _write_bed(tmp_path / "intervals.bed", [("chr1", 150, 250, "test")])
+    index = DatasetWindowIndex.from_bed(
+        intervals, context_length=CONTEXT, n_pred_bins=N_PRED_BINS, bin_size=BIN_SIZE
+    )
+    write_attributions(
+        tmp_path, [record], run_info={}, chrom_sizes={"chr1": CONTEXT}, bigwig=False,
+        call_cores=True,
+    )
+
+    import pandas as pd
+
+    cores_frame = pd.read_csv(tmp_path / "cores.tsv", sep="\t")
+    assert len(cores_frame) == 2
+    assert set(cores_frame["name"]) == {"c0_core0", "c0_core1"}
+
+    starts = cores_frame["start"].to_numpy()
+    ends = cores_frame["end"].to_numpy()
+    # non-overlapping spans
+    order = np.argsort(starts)
+    assert ends[order[0]] <= starts[order[1]]
+
+    bed_lines = [
+        line.split("\t")
+        for line in (tmp_path / "core_regions.bed").read_text().strip().splitlines()
+    ]
+    assert len(bed_lines) == 2
+    assert {line[3] for line in bed_lines} == {"c0_core0", "c0_core1"}
+
+    summary = pd.read_csv(tmp_path / "summary.tsv", sep="\t")
+    assert len(summary) == 1
+    assert summary.loc[0, "n_cores"] == 2
+
+    seeds = resolve_seeds(tmp_path / "core_regions.bed", index, on_missing="error")
+    assert len(seeds) == 2
+    assert seeds[0].editable != seeds[1].editable
+    assert seeds[0].name == "c0_core0"
+
+
 # --------------------------------------------------------------------------- #
 # 6. Config                                                                   #
 # --------------------------------------------------------------------------- #

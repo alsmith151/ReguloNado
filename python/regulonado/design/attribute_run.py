@@ -31,6 +31,7 @@ class AttributionResult:
     core_regions_bed: Path
     n_candidates: int
     n_cores_called: int
+    n_cores_total: int
 
 
 def _load_ensemble(config: "AttributionConfig") -> "FoldEnsemble":
@@ -280,6 +281,7 @@ def _process_candidates(
     scan_positions: list[tuple[str, int, int]] | None,
     run_info: dict,
     out_dir: Path,
+    call_cores: bool = True,
 ) -> list["AttributionRecord"]:
     from regulonado.design.attribution import write_attributions
 
@@ -294,12 +296,12 @@ def _process_candidates(
         # Checkpoint after every candidate so a long run stays inspectable and resumable.
         write_attributions(
             out_dir, records, run_info=run_info, chrom_sizes=chrom_sizes, bigwig=config.bigwig,
-            rtol=config.rtol,
+            rtol=config.rtol, call_cores=call_cores,
         )
     return records
 
 
-def run_attribution(config: "AttributionConfig") -> AttributionResult:
+def run_attribution(config: "AttributionConfig", *, call_cores: bool = True) -> AttributionResult:
     """Locate the high-attribution core of each candidate by in-silico mutagenesis.
 
     Scores every alternative base at every position against one output track (``config.targets``
@@ -346,15 +348,17 @@ def run_attribution(config: "AttributionConfig") -> AttributionResult:
     run_info = _build_run_info(config, ensemble, track_indices, len(seeds))
     records = _process_candidates(
         config, seeds, ensemble, track_indices, fasta, chrom_sizes, scan_positions, run_info,
-        out_dir,
+        out_dir, call_cores=call_cores,
     )
 
     n_called = sum(1 for record in records if record.cores)
+    n_cores_total = sum(len(record.cores) for record in records)
     run_info["status"] = "complete"
     run_info["n_cores_called"] = n_called
+    run_info["n_cores_total"] = n_cores_total
     write_attributions(
         out_dir, records, run_info=run_info, chrom_sizes=chrom_sizes, bigwig=config.bigwig,
-        rtol=config.rtol,
+        rtol=config.rtol, call_cores=call_cores,
     )
 
     return AttributionResult(
@@ -362,4 +366,5 @@ def run_attribution(config: "AttributionConfig") -> AttributionResult:
         core_regions_bed=out_dir / "core_regions.bed",
         n_candidates=len(records),
         n_cores_called=n_called,
+        n_cores_total=n_cores_total,
     )

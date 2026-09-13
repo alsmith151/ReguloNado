@@ -558,23 +558,29 @@ def write_attributions(
     chrom_sizes: dict[str, int] | None = None,
     bigwig: bool = True,
     rtol: float = 0.01,
+    call_cores: bool = True,
 ) -> None:
     """Write ``core_regions.bed``, ``cores.tsv``, ``summary.tsv``, ``attributions.tsv``,
     ``attributions.bw`` and ``run.json``.
 
     Called after every candidate so a long run is resumable/inspectable mid-flight, matching
     ``design.report.write_designs``.
+
+    When ``call_cores`` is ``False`` (score-only mode), ``cores.tsv``, ``core_regions.bed``
+    and ``summary.tsv`` are skipped; only ``attributions.tsv``, ``run.json`` and the bigwig
+    (if requested) are written.
     """
     import json
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    _core_frame(records).to_csv(out_dir / "cores.tsv", sep="\t", index=False)
-    _bed_frame(records).to_csv(
-        out_dir / "core_regions.bed", sep="\t", index=False, header=False
-    )
-    _summary_frame(records).to_csv(out_dir / "summary.tsv", sep="\t", index=False)
+    if call_cores:
+        _core_frame(records).to_csv(out_dir / "cores.tsv", sep="\t", index=False)
+        _bed_frame(records).to_csv(
+            out_dir / "core_regions.bed", sep="\t", index=False, header=False
+        )
+        _summary_frame(records).to_csv(out_dir / "summary.tsv", sep="\t", index=False)
     _attribution_frame(records).to_csv(out_dir / "attributions.tsv", sep="\t", index=False)
     (out_dir / "run.json").write_text(json.dumps(run_info, indent=2, default=str))
 
@@ -663,6 +669,7 @@ def _summary_frame(records: list[AttributionRecord]):
                 "scale": diag.get("scale", float("nan")),
                 "n_segments": diag.get("n_segments", 0),
                 "core_called": bool(diag.get("core_called", False)),
+                "n_cores": len(record.cores),
                 "reason": diag.get("reason", ""),
                 "core_chrom": seed.chrom if best else "",
                 "core_start": _to_genomic(record, best.start) if best else "",
