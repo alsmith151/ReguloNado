@@ -149,7 +149,13 @@ def _resolve_seeds(
         n_pred_bins=ensemble.n_pred_bins,
         bin_size=ensemble.bin_size,
     )
-    seeds = resolve_seeds(config.candidates, index, on_missing=config.on_missing, pad=config.pad)
+    seeds = resolve_seeds(
+        config.candidates,
+        index,
+        on_missing=config.on_missing,
+        pad=config.pad,
+        score_pad_bp=config.score_pad_bp,
+    )
     logger.info(f"Resolved {len(seeds)} candidate(s) against dataset windows")
     return seeds
 

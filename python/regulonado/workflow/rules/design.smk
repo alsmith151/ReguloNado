@@ -115,7 +115,7 @@ if DESIGN:
     # holdout_run, design_runs, checkpoint_dirs, targets, ...) is structural and handled via
     # rule wildcards / the checkpoint-resolution shell logic below instead.
     _DESIGN_SETTINGS_KEYS = {
-        "rounds", "pad", "top_k", "ism_stride", "ism_positions", "population_size",
+        "rounds", "pad", "score_pad_bp", "top_k", "ism_stride", "ism_positions", "population_size",
         "model_queries_per_batch", "top_n", "mu", "recomb_rate", "threshold", "rho",
         "on_missing", "offtarget_reduction", "objective", "offtarget_boost_weight",
         "offtarget_boost_tolerance", "offtarget_temperature", "gain_transform", "gain_pseudocount",

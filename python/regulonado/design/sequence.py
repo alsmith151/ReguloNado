@@ -227,6 +227,7 @@ def resolve_seeds(
     *,
     on_missing: Literal["error", "center", "skip"] = "error",
     pad: int = 0,
+    score_pad_bp: int = 0,
 ) -> list[Seed]:
     """Resolve a candidate BED against the dataset window index.
 
@@ -234,6 +235,10 @@ def resolve_seeds(
     windows pick the most centred one. With no containing window: ``on_missing="error"``
     (default) raises listing every offending candidate; ``"center"`` falls back to a synthetic
     window centred on the candidate; ``"skip"`` drops it.
+
+    ``pad`` widens the *editable* span the search may mutate; ``score_pad_bp`` widens only the
+    *scored* bins (e.g. to capture a nucleosome-free-region dip flanking a narrow candidate)
+    without letting the search edit that flanking sequence.
     """
     from regulonado.genomics import read_intervals
 
@@ -271,7 +276,9 @@ def resolve_seeds(
                 f"the least trustworthy."
             )
         seeds.append(
-            _build_seed(name, chrom, start, end, best.window, best.fold_label, index, pad)
+            _build_seed(
+                name, chrom, start, end, best.window, best.fold_label, index, pad, score_pad_bp
+            )
         )
 
     if missing:
@@ -295,7 +302,9 @@ def resolve_seeds(
                     n_pred_bins=index.n_pred_bins,
                     bin_size=index.bin_size,
                 )
-                seeds.append(_build_seed(name, chrom, start, end, window, None, index, pad))
+                seeds.append(
+                    _build_seed(name, chrom, start, end, window, None, index, pad, score_pad_bp)
+                )
         else:
             raise ValueError(f"Unknown on_missing={on_missing!r}")
 
@@ -311,10 +320,11 @@ def _build_seed(
     fold_label: str | None,
     index: DatasetWindowIndex,
     pad: int,
+    score_pad_bp: int,
 ) -> Seed:
     bins = context_bp_to_pred_bins(
-        start - window.ctx_start,
-        end - window.ctx_start,
+        start - window.ctx_start - score_pad_bp,
+        end - window.ctx_start + score_pad_bp,
         context_length=index.context_length,
         n_pred_bins=index.n_pred_bins,
         bin_size=index.bin_size,

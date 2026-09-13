@@ -439,6 +439,11 @@ $defs:
         minimum: 0
         title: Pad
         type: integer
+      score_pad_bp:
+        default: 0
+        minimum: 0
+        title: Score Pad Bp
+        type: integer
       top_k:
         default: 1
         minimum: 1

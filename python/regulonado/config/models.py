@@ -283,6 +283,10 @@ class DesignConfig(BaseModel):
     # `targets[i].settings`.
     rounds: int = Field(default=20, ge=1)
     pad: int = Field(default=0, ge=0)
+    # Widens only the scored bins (e.g. to pick up a nucleosome-free-region dip flanking a
+    # narrow candidate); `pad` above widens the editable span instead, which the search may
+    # actually mutate. The two are independent — set either, both, or neither.
+    score_pad_bp: int = Field(default=0, ge=0)
     top_k: int = Field(default=1, ge=1)
     ism_stride: int = Field(default=1, ge=1)
     ism_positions: str | None = None
