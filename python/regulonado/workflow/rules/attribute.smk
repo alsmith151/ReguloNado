@@ -92,7 +92,7 @@ if ATTRIBUTION:
     def _attr_settings_json(wildcards):
         """Merge shared then per-target ISM-sweep settings into one JSON blob for --params.
 
-        ``regulonado attribute`` only takes the handful of I/O flags below directly; everything
+        ``regulonado attribute find-cores`` only takes the handful of I/O flags below directly; everything
         else (bin/fold reduction, smoothing, thresholds, ...) reaches it as a validated
         AttributionConfig loaded from this file.
         """
@@ -186,7 +186,7 @@ if ATTRIBUTION:
             trap 'rm -f "$PARAMS_FILE"' EXIT
             printf '%s' {params.settings_json:q} > "$PARAMS_FILE"
 
-            regulonado attribute \
+            regulonado attribute find-cores \
                 --params "$PARAMS_FILE" \
                 --candidates {input.shard:q} \
                 --intervals {input.intervals:q} \

@@ -63,7 +63,129 @@ def _apply_cli_overrides(
     return data
 
 
-def attribute(
+attribute_app = typer.Typer(
+    help="Score attribution profiles and/or call cores from in-silico mutagenesis."
+)
+
+
+def _run(data: dict[str, Any], *, call_cores: bool) -> None:
+    from regulonado.config.models import AttributionConfig
+    from regulonado.design.attribute_run import run_attribution
+
+    try:
+        config = AttributionConfig.model_validate(data)
+        result = run_attribution(config, call_cores=call_cores)
+    except ValidationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+
+    if call_cores:
+        typer.echo(
+            f"Called {result.n_cores_total} core(s) across "
+            f"{result.n_cores_called}/{result.n_candidates} candidate(s); "
+            f"wrote {result.core_regions_bed}"
+        )
+    else:
+        typer.echo(
+            f"Wrote attribution profile for {result.n_candidates} candidate(s) to "
+            f"{result.out_dir}"
+        )
+
+
+@attribute_app.command("score")
+def score(
+    params: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--params",
+            help="YAML/JSON file parsed as AttributionConfig; explicit options below override it.",
+        ),
+    ] = None,
+    candidates: Annotated[
+        Optional[Path], typer.Option("--candidates", help="BED of candidate regions to scan.")
+    ] = None,
+    checkpoint: Annotated[
+        Optional[list[Path]],
+        typer.Option("--checkpoint", help="Fold checkpoint dir; repeat once per fold."),
+    ] = None,
+    fasta_file: Annotated[
+        Optional[Path], typer.Option("--fasta", help="Genome FASTA (needs a .fai index).")
+    ] = None,
+    track: Annotated[
+        Optional[str], typer.Option("--track", help="Track to attribute against: name or index.")
+    ] = None,
+    target: Annotated[
+        Optional[str],
+        typer.Option(
+            "--target",
+            help="Group value to attribute against (e.g. a cell type), averaged over every "
+            "track whose --group-by column matches. Alternative to --track.",
+        ),
+    ] = None,
+    group_by: Annotated[
+        Optional[str],
+        typer.Option(
+            "--group-by",
+            help="Track-sheet/tracks.parquet column --target is matched against (default "
+            "'source' when --target is set).",
+        ),
+    ] = None,
+    track_sheet: Annotated[
+        Optional[Path],
+        typer.Option("--track-sheet", help="CSV to resolve --target's group from, if not relying "
+                     "on --dataset-dir's tracks.parquet."),
+    ] = None,
+    exclude_track: Annotated[
+        Optional[list[str]],
+        typer.Option("--exclude-track", help="track_name to exclude from --target's group "
+                     "(repeatable)."),
+    ] = None,
+    out_dir: Annotated[
+        Optional[Path], typer.Option("--out", help="Directory to write attribution outputs.")
+    ] = None,
+    intervals: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--intervals",
+            help="Build-time interval BED the folds were trained on; default: the 'bed_file' "
+            "recorded in --dataset-dir's tracks.parquet.",
+        ),
+    ] = None,
+    dataset_dir: Annotated[
+        Optional[Path],
+        typer.Option("--dataset-dir", help="Dataset dir with tracks.parquet."),
+    ] = None,
+) -> None:
+    """Compute the attribution profile for each candidate by in-silico mutagenesis.
+
+    Scores every alternative base at every position against one output track and writes the
+    resulting profile (attributions.tsv/attributions.bw) without calling cores — e.g. for
+    visualizing a locus in IGV.
+
+    Provide `--params config.yaml` for the full set of ISM-sweep tuning options (bin/fold
+    reduction, smoothing, thresholds, ...); the options above override anything it sets.
+    """
+    data = _apply_cli_overrides(
+        _load_params_mapping(params),
+        candidates=candidates,
+        checkpoint=checkpoint,
+        fasta_file=fasta_file,
+        out_dir=out_dir,
+        intervals=intervals,
+        dataset_dir=dataset_dir,
+        track=track,
+        target=target,
+        group_by=group_by,
+        track_sheet=track_sheet,
+        exclude_track=exclude_track,
+    )
+    _run(data, call_cores=False)
+
+
+@attribute_app.command("find-cores")
+def find_cores(
     params: Annotated[
         Optional[Path],
         typer.Option(
@@ -136,9 +258,6 @@ def attribute(
     Provide `--params config.yaml` for the full set of ISM-sweep tuning options (bin/fold
     reduction, smoothing, thresholds, ...); the options above override anything it sets.
     """
-    from regulonado.config.models import AttributionConfig
-    from regulonado.design.attribute_run import run_attribution
-
     data = _apply_cli_overrides(
         _load_params_mapping(params),
         candidates=candidates,
@@ -153,17 +272,4 @@ def attribute(
         track_sheet=track_sheet,
         exclude_track=exclude_track,
     )
-
-    try:
-        config = AttributionConfig.model_validate(data)
-        result = run_attribution(config)
-    except ValidationError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(2) from exc
-
-    typer.echo(
-        f"Called cores for {result.n_cores_called}/{result.n_candidates} candidate(s); "
-        f"wrote {result.core_regions_bed}"
-    )
+    _run(data, call_cores=True)

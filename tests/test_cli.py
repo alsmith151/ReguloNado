@@ -133,6 +133,7 @@ def test_tracks_assemble_joins_scale_factors_by_track_name(tmp_path):
 def _attribute_args(tmp_path, **extra):
     args = [
         "attribute",
+        "find-cores",
         "--candidates",
         str(tmp_path / "candidates.bed"),
         "--checkpoint",
@@ -152,13 +153,15 @@ def _attribute_args(tmp_path, **extra):
 def _patch_run_attribution(monkeypatch, captured):
     import regulonado.design.attribute_run as attribute_run
 
-    def fake_run_attribution(config):
+    def fake_run_attribution(config, *, call_cores=True):
         captured["config"] = config
+        captured["call_cores"] = call_cores
         return attribute_run.AttributionResult(
             out_dir=Path("out"),
             core_regions_bed=Path("out/core_regions.bed"),
             n_candidates=2,
             n_cores_called=1,
+            n_cores_total=1,
         )
 
     monkeypatch.setattr(attribute_run, "run_attribution", fake_run_attribution)
@@ -198,6 +201,20 @@ def test_attribute_cli_flags_override_params(tmp_path, monkeypatch):
     config = captured["config"]
     assert config.candidates == str(tmp_path / "candidates.bed")  # CLI flag, not from_params.bed
     assert config.targets[0].track == "from_cli_track"
+
+
+def test_attribute_score_calls_run_attribution_with_call_cores_false(tmp_path, monkeypatch):
+    """`attribute score` computes the profile only, without calling cores."""
+    captured: dict = {}
+    _patch_run_attribution(monkeypatch, captured)
+
+    args = _attribute_args(tmp_path, track="atac_hl60")
+    args[1] = "score"  # reuse the find-cores arg builder, swapping the subcommand
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 0, result.output
+    assert captured["call_cores"] is False
 
 
 def test_attribute_rejects_an_invalid_option_combination(tmp_path):

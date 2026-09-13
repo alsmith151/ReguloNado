@@ -2,7 +2,7 @@
 
 `regulonado design` optimises the span you hand it, and it optimises *every* base in that span.
 For synthesis that is usually the wrong span: a called enhancer is often 500–1000 bp of which only
-a couple of hundred actually drive anything. `regulonado attribute` is the pre-selection step that
+a couple of hundred actually drive anything. `regulonado attribute find-cores` is the pre-selection step that
 finds that part.
 
 It runs one saturation-mutagenesis sweep against **one** output track, scores every base by how far
@@ -11,7 +11,7 @@ the nucleosome-free core. The `core_regions.bed` it writes is designed to be han
 to `regulonado design --candidates`.
 
 ```
-candidates.bed ──▶ regulonado attribute ──▶ core_regions.bed ──▶ regulonado design ──▶ synthesis
+candidates.bed ──▶ regulonado attribute find-cores ──▶ core_regions.bed ──▶ regulonado design ──▶ synthesis
 ```
 
 ## Why the 32 bp bin is not the resolution limit
@@ -106,7 +106,7 @@ To cut it down:
 
 ## Run it
 
-`regulonado attribute` takes only the I/O and target-selection flags directly — candidates,
+`regulonado attribute find-cores` takes only the I/O and target-selection flags directly — candidates,
 checkpoints, fasta, track (or target/group-by/track-sheet/exclude-track), intervals/dataset-dir
 and out. Everything else (bin/fold reduction, smoothing,
 thresholds, ...) comes from `--params`, a YAML or JSON file parsed as
@@ -120,7 +120,7 @@ min_zscore: 1.5
 ```
 
 ```bash
-regulonado attribute \
+regulonado attribute find-cores \
   --params attribute_params.yaml \
   --candidates enhancer_shortlist.bed \
   --fasta genome.fa \
@@ -151,7 +151,7 @@ together first, the same grouping `regulonado design`'s `--target`/`--group-by` 
 `--group-by` defaults to `source` when `--target` is set.
 
 ```bash
-regulonado attribute \
+regulonado attribute find-cores \
   --params attribute_params.yaml \
   --candidates enhancer_shortlist.bed \
   --fasta genome.fa \
