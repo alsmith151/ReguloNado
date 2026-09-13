@@ -352,6 +352,30 @@ class DesignConfig(BaseModel):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _adalead_budget_covers_initial_population(self) -> "DesignConfig":
+        """AdaLead spends its first ``population_size`` model queries just scoring the initial
+        population, before it can propose a single mutated/recombined child. A budget that
+        doesn't exceed that cost runs zero search rounds and raises deep inside `search.py`
+        ("No sequences generated...") only after the shard job has already spun up and paid for
+        a checkpoint load — catch it here instead, at config-validation time.
+        """
+        for target in self.targets:
+            if target.method != "adalead":
+                continue
+            population_size = target.settings.get("population_size", self.population_size)
+            model_queries_per_batch = target.settings.get(
+                "model_queries_per_batch", self.model_queries_per_batch
+            )
+            if model_queries_per_batch is not None and model_queries_per_batch <= population_size:
+                raise ValueError(
+                    f"design target {target.name!r}: model_queries_per_batch "
+                    f"({model_queries_per_batch}) must exceed population_size "
+                    f"({population_size}) — the first population_size queries just score the "
+                    "initial population, leaving none for AdaLead to actually search with"
+                )
+        return self
+
 
 class AttributionTarget(BaseModel):
     """One attribution readout: either an exact ``track``, or a track ``group``.
