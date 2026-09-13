@@ -96,6 +96,46 @@ class SequencePredictor:
         self.dtype = next(self.model.parameters()).dtype
         return self
 
+    def gradient(
+        self,
+        one_hot_context,
+        track_indices: Sequence[int],
+        bins,
+        reduction: Literal["mean", "max", "topk"] = "mean",
+        topk_bins: int = 10,
+    ):
+        """d(readout)/d(input) for one context, in one forward+backward pass.
+
+        Unlike ``__call__``, this runs with autograd enabled (no ``inference_mode``) — the
+        gradient-x-input stand-in for ISM needs it. ``one_hot_context`` is a single ``(4, L)``
+        array/tensor, not a batch: the backward pass is the expensive part, so batching contexts
+        together would just delay rather than avoid it.
+
+        Returns ``(grad (4, L) float32 numpy, score float)``.
+        """
+        import numpy as np
+        import torch
+
+        if isinstance(one_hot_context, np.ndarray):
+            one_hot_context = torch.from_numpy(one_hot_context)
+        x = one_hot_context.to(device=self.device, dtype=self.dtype).unsqueeze(0)
+        x.requires_grad_(True)
+        with torch.enable_grad():
+            out = self.model(x, **self.track_metadata)  # (1, T, N)
+            windowed = out[:, list(track_indices), bins].mean(dim=1)  # (1, W)
+            if reduction == "mean":
+                score = windowed.mean(dim=-1)
+            elif reduction == "max":
+                score = windowed.max(dim=-1).values
+            elif reduction == "topk":
+                k = min(topk_bins, windowed.shape[-1])
+                score = torch.topk(windowed, k, dim=-1).values.mean(dim=-1)
+            else:
+                raise ValueError(f"Unknown reduction {reduction!r}")
+            score.backward()
+        grad = x.grad[0].detach().to(torch.float32).cpu().numpy()
+        return grad, float(score.detach().to(torch.float32).cpu())
+
 
 class FoldEnsemble:
     """Runs the same one-hot batch through several independently trained folds."""
@@ -163,6 +203,36 @@ class FoldEnsemble:
     @property
     def track_names(self) -> list[str]:
         return self._track_names
+
+    def gradient(
+        self,
+        one_hot_context,
+        track_indices: Sequence[int],
+        bins,
+        reduction: Literal["mean", "max", "topk"] = "mean",
+        topk_bins: int = 10,
+    ):
+        """Per-fold gradients and scores for one context: ``(grads (F, 4, L), scores (F,))``.
+
+        Folds are independent models, so each needs its own forward+backward pass — there is no
+        way to batch them the way ``predict()`` batches contexts.
+        """
+        import numpy as np
+
+        grads, scores = [], []
+        for predictor in self._predictors:
+            if self.mode == "sequential":
+                predictor.to(self.device)
+            grad, score = predictor.gradient(one_hot_context, track_indices, bins, reduction, topk_bins)
+            grads.append(grad)
+            scores.append(score)
+            if self.mode == "sequential":
+                predictor.to("cpu")
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        return np.stack(grads), np.array(scores)
 
     def predict(self, one_hot_batch):
         """Predict all folds: returns ``(n_folds, B, n_tracks, n_bins)``."""

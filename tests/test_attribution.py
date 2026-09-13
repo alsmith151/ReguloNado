@@ -12,6 +12,7 @@ from regulonado.design.attribution import (
     TrackReadout,
     _smooth,
     call_cores,
+    grad_scan,
     ism_scan,
     write_attributions,
 )
@@ -202,6 +203,105 @@ def test_ism_scan_does_not_mutate_the_caller_context():
     seed, context = _seed(), _motif_context()
     before = context.copy()
     ism_scan(TrackReadout(_MotifEnsemble(), [1], seed.bins), seed, context, batch_size=8)
+    assert np.array_equal(context, before)
+
+
+# --------------------------------------------------------------------------- #
+# 2b. grad_scan                                                               #
+# --------------------------------------------------------------------------- #
+class _GradMotifEnsemble:
+    """Autograd counterpart of ``_MotifEnsemble``: same score (A-count inside MOTIF), so a
+    linear model whose gradient-based importance is exact, not merely approximate — that lets
+    these tests assert the same numbers as the equivalent ``ism_scan`` tests above.
+    """
+
+    track_names = ["t0", "t1", "t2"]
+
+    def __init__(self, n_folds: int = 2, fold_scale: list[float] | None = None) -> None:
+        self.fold_scale = fold_scale or [1.0] * n_folds
+
+    def gradient(self, one_hot_context, track_indices, bins, reduction="mean", topk_bins=10):
+        x = torch.as_tensor(np.asarray(one_hot_context)).float().unsqueeze(0)
+        x.requires_grad_(True)
+        signal = x[:, 0, MOTIF].sum()
+        grads, scores = [], []
+        for scale in self.fold_scale:
+            score = signal * scale
+            (grad,) = torch.autograd.grad(score, x, retain_graph=True)
+            grads.append(grad[0].detach().numpy())
+            scores.append(float(score.detach()))
+        return np.stack(grads), np.array(scores)
+
+
+def test_grad_scan_recovers_the_planted_motif():
+    seed, context = _seed(), _motif_context()
+    result = grad_scan(_GradMotifEnsemble(), seed, context, track_indices=[1], bins=seed.bins)
+
+    assert result.effect.shape == (4, 100)
+    assert result.importance.shape == (100,)
+    assert result.per_fold_importance.shape == (2, 100)
+    assert result.ref_score == pytest.approx(40.0)
+
+    inside = result.importance[MOTIF.start - 180 : MOTIF.stop - 180]
+    outside = np.r_[result.importance[: MOTIF.start - 180], result.importance[MOTIF.stop - 180 :]]
+    assert np.allclose(inside, 1.0)
+    assert np.allclose(outside, 0.0)
+
+
+def test_grad_scan_zeroes_the_reference_row_and_fills_all_alternates():
+    seed, context = _seed(), _motif_context()
+    result = grad_scan(_GradMotifEnsemble(), seed, context, track_indices=[1], bins=seed.bins)
+    for column, ref_base in enumerate(result.ref_bases):
+        assert result.effect[ref_base, column] == 0.0
+        alts = [b for b in range(4) if b != ref_base]
+        assert np.isfinite(result.effect[alts, column]).all()
+
+
+def test_grad_scan_scores_all_four_bases_at_an_n():
+    seed = _seed()
+    context = _motif_context()
+    context[:, 250] = 0
+    result = grad_scan(_GradMotifEnsemble(), seed, context, track_indices=[1], bins=seed.bins)
+    column = 250 - seed.editable.start
+    assert result.ref_bases[column] == -1
+    assert np.isfinite(result.effect[:, column]).all()
+
+
+def test_grad_scan_respects_stride_and_leaves_unscanned_positions_nan():
+    seed, context = _seed(), _motif_context()
+    result = grad_scan(
+        _GradMotifEnsemble(), seed, context, track_indices=[1], bins=seed.bins, stride=5
+    )
+    assert list(result.positions) == list(range(180, 280, 5))
+    scanned = result.positions - seed.editable.start
+    assert np.isfinite(result.importance[scanned]).all()
+    unscanned = np.setdiff1d(np.arange(100), scanned)
+    assert np.isnan(result.importance[unscanned]).all()
+
+
+def test_grad_scan_restricted_to_explicit_positions_stays_inside_editable():
+    seed, context = _seed(), _motif_context()
+    result = grad_scan(
+        _GradMotifEnsemble(),
+        seed,
+        context,
+        track_indices=[1],
+        bins=seed.bins,
+        positions=[100, 205, 210, 999],
+    )
+    assert list(result.positions) == [205, 210]
+
+
+def test_grad_scan_without_scannable_positions_raises():
+    seed, context = _seed(), _motif_context()
+    with pytest.raises(ValueError, match="No positions to scan"):
+        grad_scan(_GradMotifEnsemble(), seed, context, track_indices=[1], bins=seed.bins, positions=[])
+
+
+def test_grad_scan_does_not_mutate_the_caller_context():
+    seed, context = _seed(), _motif_context()
+    before = context.copy()
+    grad_scan(_GradMotifEnsemble(), seed, context, track_indices=[1], bins=seed.bins)
     assert np.array_equal(context, before)
 
 

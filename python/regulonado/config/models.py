@@ -424,6 +424,12 @@ class AttributionConfig(BaseModel):
     track_sheet: str | None = None
     exclude_tracks: list[str] = Field(default_factory=list)
 
+    # 'gradient' trades ISM's per-position, per-alt-base re-scoring (one forward+backward pass
+    # per fold total, instead of ~positions x 3 x folds forward passes) for a first-order Taylor
+    # approximation of the same quantity — much cheaper, but can misjudge positions where the
+    # true effect saturates or depends on other edits (see design.attribution.grad_scan).
+    method: Literal["ism", "gradient"] = "ism"
+
     # ISM-sweep tuning, shared by every target; a target's own `settings` can override any of
     # these per-target. Defaults match the sweep's previous CLI defaults.
     bin_reduction: Literal["mean", "topk", "max"] = "mean"

@@ -19,6 +19,7 @@ candidate's worth of bins, which is why ``reduction`` is exposed.
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
@@ -36,6 +37,7 @@ __all__ = [
     "IsmResult",
     "TrackReadout",
     "call_cores",
+    "grad_scan",
     "ism_scan",
     "merge_attribution_bigwig",
     "write_attributions",
@@ -200,6 +202,109 @@ def ism_scan(
 
     effect = alt.copy()
     for column in scanned:
+        ref_base = ref_bases[column]
+        if ref_base >= 0:
+            effect[ref_base, column] = 0.0
+
+    return IsmResult(
+        ref_score=ref_score,
+        per_fold_ref=per_fold_ref,
+        effect=effect,
+        importance=importance,
+        per_fold_importance=per_fold_importance,
+        positions=np.array(scan, dtype=int),
+        editable=editable,
+        ref_bases=ref_bases,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Gradient x input — a cheap ISM stand-in                                     #
+# --------------------------------------------------------------------------- #
+def grad_scan(
+    ensemble: Any,  # design.predictor.FoldEnsemble, or any object with .gradient()
+    seed: Seed,
+    context: np.ndarray,
+    *,
+    track_indices: Sequence[int],
+    bins: slice,
+    reduction: Literal["mean", "topk", "max"] = "mean",
+    topk_bins: int = 10,
+    fold_reduction: Literal["mean", "median"] = "mean",
+    positions: Sequence[int] | None = None,
+    stride: int = 1,
+) -> IsmResult:
+    """First-order approximation to :func:`ism_scan`: one forward+backward pass per fold total,
+    instead of ~positions x 3 alt bases x folds forward passes.
+
+    Where ISM actually substitutes each alt base and re-scores, this takes the gradient of the
+    readout w.r.t. the input one-hot and uses the linear (Taylor) approximation
+    ``score(alt) - score(ref) ~= grad . (onehot_alt - onehot_ref) = grad[alt] - grad[ref]`` in its
+    place. That is exact for a locally linear model and can be badly wrong where the true effect
+    saturates or depends on other edits nearby — treat this as a fast prefilter/ranking signal,
+    not a substitute for ISM on candidates you will actually act on.
+
+    Returns an :class:`IsmResult` with the same fields and NaN-outside-scan contract as
+    ``ism_scan``, so ``call_cores``/``write_attributions`` need no method-specific handling.
+    ``stride``/``positions`` only restrict which columns are reported — the underlying pass
+    already computes every position in the editable span for free.
+    """
+    editable = seed.editable
+    width = editable.stop - editable.start
+    if positions is not None:
+        wanted = sorted(set(int(p) for p in positions))
+        scan = [p for p in wanted if editable.start <= p < editable.stop]
+    else:
+        scan = list(range(editable.start, editable.stop, stride))
+    if not scan:
+        raise ValueError(
+            f"No positions to scan for candidate {seed.name!r}: editable span "
+            f"[{editable.start},{editable.stop}) yielded nothing at stride={stride}"
+        )
+    scan_cols = np.array([p - editable.start for p in scan], dtype=int)
+
+    grads, scores = ensemble.gradient(
+        context, track_indices, bins, reduction=reduction, topk_bins=topk_bins
+    )  # (F, 4, ctx_len), (F,)
+    n_folds = grads.shape[0]
+    per_fold_ref = scores.astype(float)
+    ref_score = float(per_fold_ref.mean() if fold_reduction == "mean" else np.median(per_fold_ref))
+
+    span_grads = grads[:, :, editable.start : editable.stop]  # (F, 4, L)
+
+    ref_bases = np.full(width, -1, dtype=np.int8)
+    for column in scan:
+        col = context[:, column]
+        if int((col == 1).sum()) == 1 and int(col.sum()) == 1:
+            ref_bases[column - editable.start] = int(col.argmax())
+
+    base_axis = np.arange(4)[None, :, None]
+    is_ref_channel = (base_axis == ref_bases[None, None, :]) & (ref_bases[None, None, :] >= 0)
+    ref_bases_safe = np.where(ref_bases >= 0, ref_bases, 0)
+    ref_grad = np.take_along_axis(span_grads, ref_bases_safe[None, None, :], axis=1)[:, 0, :]
+    # No clean reference base (an N): fall back to the mean over all four channels as "ref".
+    ref_grad = np.where(ref_bases[None, :] >= 0, ref_grad, span_grads.mean(axis=1))
+
+    alt_effect = np.where(is_ref_channel, np.nan, span_grads - ref_grad[:, None, :])  # (F, 4, L)
+
+    per_fold_importance = np.full((n_folds, width), np.nan)
+    per_fold_importance[:, scan_cols] = -np.nanmean(alt_effect[:, :, scan_cols], axis=1)
+    importance = np.full(width, np.nan)
+    importance[scan_cols] = (
+        per_fold_importance[:, scan_cols].mean(axis=0)
+        if fold_reduction == "mean"
+        else np.median(per_fold_importance[:, scan_cols], axis=0)
+    )
+
+    fold_reducer = np.nanmean if fold_reduction == "mean" else np.nanmedian
+    effect = np.full((4, width), np.nan)
+    with warnings.catch_warnings():
+        # The ref channel is all-NaN across every fold at each scanned column (masked above) —
+        # an expected all-NaN reduction, overwritten with 0.0 below, not a real warning.
+        warnings.filterwarnings("ignore", message="Mean of empty slice")
+        warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+        effect[:, scan_cols] = fold_reducer(alt_effect[:, :, scan_cols], axis=0)
+    for column in scan_cols:
         ref_base = ref_bases[column]
         if ref_base >= 0:
             effect[ref_base, column] = 0.0

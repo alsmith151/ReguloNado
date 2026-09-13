@@ -120,10 +120,16 @@ def _prepare_fasta(config: "AttributionConfig"):
 
 
 def _log_projected_passes(seeds: list["Seed"], config: "AttributionConfig") -> None:
+    n_folds = len(config.checkpoint_dirs or [])
+    if config.method == "gradient":
+        logger.info(
+            f"Projected forward+backward passes: {len(seeds) * n_folds:,} "
+            f"({len(seeds)} candidate(s) x {n_folds} fold(s), 1 pass each)"
+        )
+        return
     total_positions = sum(
         len(range(seed.editable.start, seed.editable.stop, config.stride)) for seed in seeds
     )
-    n_folds = len(config.checkpoint_dirs or [])
     logger.info(
         f"Projected forward passes: ~{total_positions * 3 * n_folds:,} "
         f"({total_positions} position(s) x 3 alt bases x {n_folds} fold(s))"
@@ -191,6 +197,7 @@ def _score_one_candidate(
         TrackReadout,
         _smooth,
         call_cores,
+        grad_scan,
         ism_scan,
     )
     from regulonado.genomics import one_hot_context
@@ -201,21 +208,35 @@ def _score_one_candidate(
         raise ValueError(f"Chromosome {seed.chrom!r} not present in {config.fasta}")
     context = one_hot_context(fasta, seed.window, ensemble.context_length, chrom_length)
 
-    result = ism_scan(
-        TrackReadout(
+    if config.method == "gradient":
+        result = grad_scan(
             ensemble,
+            seed,
+            context,
             track_indices=track_indices,
             bins=seed.bins,
             reduction=config.bin_reduction,
             topk_bins=config.topk_bins,
             fold_reduction=config.fold_reduction,
-        ),
-        seed,
-        context,
-        positions=_seed_scan_positions(seed, scan_positions),
-        stride=config.stride,
-        batch_size=config.batch_size,
-    )
+            positions=_seed_scan_positions(seed, scan_positions),
+            stride=config.stride,
+        )
+    else:
+        result = ism_scan(
+            TrackReadout(
+                ensemble,
+                track_indices=track_indices,
+                bins=seed.bins,
+                reduction=config.bin_reduction,
+                topk_bins=config.topk_bins,
+                fold_reduction=config.fold_reduction,
+            ),
+            seed,
+            context,
+            positions=_seed_scan_positions(seed, scan_positions),
+            stride=config.stride,
+            batch_size=config.batch_size,
+        )
     cores, diagnostics = call_cores(
         result.importance,
         editable=seed.editable,

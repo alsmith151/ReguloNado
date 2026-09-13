@@ -83,7 +83,7 @@ if ATTRIBUTION:
     # ISM-sweep tuning fields of AttributionConfig; everything else in ATTRIBUTION (candidates,
     # shards, runs, checkpoint_dirs, targets, ...) is structural and handled via rule wildcards.
     _ATTR_SETTINGS_KEYS = {
-        "bin_reduction", "topk_bins", "fold_reduction", "pad", "stride", "positions",
+        "method", "bin_reduction", "topk_bins", "fold_reduction", "pad", "stride", "positions",
         "on_missing", "smooth_bp", "quantile", "min_width_bp", "merge_gap_bp", "min_zscore",
         "max_cores_per_candidate", "anchor", "fix_width", "bigwig", "rtol", "fold_mode",
         "batch_size", "device", "exclude_tracks",
