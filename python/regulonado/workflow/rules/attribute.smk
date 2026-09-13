@@ -101,6 +101,12 @@ if ATTRIBUTION:
         target = ATTRIBUTION_TARGET_BY_NAME[wildcards.target]
         merged = {k: v for k, v in ATTRIBUTION.items() if k in _ATTR_SETTINGS_KEYS}
         merged.update(_flatten_settings(target.get("settings", {})))
+        # snakemake's schema validate() fills unset fields with their schema default, so
+        # topk_bins=10 ends up explicitly present here even when nobody asked for top-k
+        # reduction; AttributionConfig rejects topk_bins being set unless bin_reduction='topk',
+        # so drop it rather than let every non-topk target fail validation.
+        if merged.get("bin_reduction") != "topk":
+            merged.pop("topk_bins", None)
         # track_sheet is not one of attribute's own CLI flags (unlike --dataset-dir), so it has
         # to reach the run through --params too; inputs.track_sheet is the fallback default.
         if config["inputs"].get("track_sheet"):
