@@ -122,6 +122,16 @@ if DESIGN:
         "target_alpha", "bending_factor", "bin_reduction", "topk_bins", "fold_mode", "batch_size",
         "device", "exclude_tracks", "wandb", "wandb_project", "wandb_group",
     }
+    # DesignConfig rejects an ISM-only/AdaLead-only key that doesn't match a target's own
+    # method (regulonado/config/models.py:_method_specific_settings_are_consistent). The
+    # schema's `validate(..., set_default=True)` back-fills every design:-level default
+    # (top_k, ism_stride, ...) into `config["design"]` regardless of which methods are in
+    # play, so the shared-settings merge below must drop the other method's keys per target
+    # rather than passing all of `_DESIGN_SETTINGS_KEYS` through unconditionally.
+    _DESIGN_ISM_ONLY_KEYS = {"top_k", "ism_stride", "ism_positions"}
+    _DESIGN_ADALEAD_ONLY_KEYS = {
+        "population_size", "model_queries_per_batch", "mu", "recomb_rate", "threshold", "rho",
+    }
 
     def _design_settings_json(wildcards):
         """Merge shared then per-target search-tuning settings into one JSON blob for --params.
@@ -134,7 +144,10 @@ if DESIGN:
         import json
 
         target = DESIGN_TARGET_BY_NAME[wildcards.target]
-        merged = {k: v for k, v in DESIGN.items() if k in _DESIGN_SETTINGS_KEYS}
+        method = target.get("method", "ism")
+        irrelevant = _DESIGN_ADALEAD_ONLY_KEYS if method == "ism" else _DESIGN_ISM_ONLY_KEYS
+        shared_keys = _DESIGN_SETTINGS_KEYS - irrelevant
+        merged = {k: v for k, v in DESIGN.items() if k in shared_keys}
         merged.update(_flatten_settings(target.get("settings", {})))
         # Keep each configured design target in its own W&B project/group by default. An
         # explicit wandb_project/wandb_group above or in the target's own settings wins.
