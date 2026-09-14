@@ -47,6 +47,9 @@ parameter_sweep:
   sweep_config: {sweep}
   agents: 2
   trials_per_agent: 1
+  cpus_per_agent: 4
+  mem_mb_per_agent: 64000
+  runtime_minutes_per_agent: 240
 """
     )
 
@@ -76,6 +79,8 @@ parameter_sweep:
     assert "wandb agent" in output
     assert "--count 1" in output
     assert "--forward-signals" in output
+    assert "mem_mb=64000" in output
+    assert "runtime=240" in output
 
     all_result = subprocess.run(
         [

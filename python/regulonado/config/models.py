@@ -223,6 +223,9 @@ class ParameterSweepConfig(BaseModel):
     sweep_config: str = Field(min_length=1)
     agents: int = Field(default=1, ge=1)
     trials_per_agent: int = Field(default=1, ge=1)
+    cpus_per_agent: int = Field(default=4, ge=1)
+    mem_mb_per_agent: int = Field(default=64_000, ge=1)
+    runtime_minutes_per_agent: int = Field(default=240, ge=1)
     wandb_project: str = Field(default="regulonado-parameter-sweep", min_length=1)
 
 

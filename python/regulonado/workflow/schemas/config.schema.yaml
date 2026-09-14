@@ -723,6 +723,21 @@ $defs:
         minimum: 1
         title: Trials Per Agent
         type: integer
+      cpus_per_agent:
+        default: 4
+        minimum: 1
+        title: Cpus Per Agent
+        type: integer
+      mem_mb_per_agent:
+        default: 64000
+        minimum: 1
+        title: Mem Mb Per Agent
+        type: integer
+      runtime_minutes_per_agent:
+        default: 240
+        minimum: 1
+        title: Runtime Minutes Per Agent
+        type: integer
       wandb_project:
         default: regulonado-parameter-sweep
         minLength: 1

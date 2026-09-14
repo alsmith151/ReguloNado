@@ -60,6 +60,9 @@ def test_parameter_sweep_does_not_require_training_matrix() -> None:
             "sweep_config": "sweep.yaml",
             "agents": 4,
             "trials_per_agent": 2,
+            "cpus_per_agent": 4,
+            "mem_mb_per_agent": 64_000,
+            "runtime_minutes_per_agent": 240,
         },
     )
 

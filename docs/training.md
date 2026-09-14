@@ -115,6 +115,9 @@ parameter_sweep:
   sweep_config: examples/hl60_parameter_sweep_wandb.yaml
   agents: 24
   trials_per_agent: 1
+  cpus_per_agent: 4
+  mem_mb_per_agent: 64000
+  runtime_minutes_per_agent: 240
   wandb_project: regulonado-parameter-sweep
 ```
 

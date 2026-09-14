@@ -35,8 +35,12 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
             trials=int(PARAMETER_SWEEP.get("trials_per_agent", 1)),
             agent_dir=str(_SWEEP_DIR / "agents"),
             project=str(PARAMETER_SWEEP.get("wandb_project", "regulonado-parameter-sweep")),
+        threads:
+            int(PARAMETER_SWEEP.get("cpus_per_agent", 4))
         resources:
             gpu=1,
+            mem_mb=int(PARAMETER_SWEEP.get("mem_mb_per_agent", 64000)),
+            runtime=int(PARAMETER_SWEEP.get("runtime_minutes_per_agent", 240)),
         wildcard_constraints:
             agent="|".join(_SWEEP_AGENT_IDS),
         log:
