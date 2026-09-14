@@ -1494,10 +1494,16 @@ def run_training(
     dataset_dict = _prepare_dataset_splits(
         dataset_dict, cfg["data"], trainer_cfg, metadata, streaming=streaming, seed=seed
     )
+
+    # Resolve empirical head initialization from the raw dataset examples.
+    # Streaming datasets are transformed with ``IterableDataset.map`` below;
+    # depending on the datasets backend/version that can expose a projected
+    # example without the original ``labels`` field.  Head initialization must
+    # happen before that projection, while labels are guaranteed to be present.
+    _resolve_empirical_output_bias(cfg, dataset_dict, len(records))
+
     dataset_dict = _apply_dataset_transforms(dataset_dict, metadata, records, cfg["data"])
     logger.info(f"[rank {rank}] dataset transforms applied")
-
-    _resolve_empirical_output_bias(cfg, dataset_dict, len(records))
 
     model = _build_model_with_logging(cfg, metadata, records, adapter_builder, rank=rank)
     collate_fn, loss_fn, scale_factors, background = _build_collate_and_loss(cfg, records)
