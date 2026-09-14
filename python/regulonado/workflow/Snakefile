@@ -96,6 +96,7 @@ def training_dataset_dir():
 
 DESIGN = config.get("design")
 ATTRIBUTION = config.get("attribution")
+CALIBRATION_SWEEP = config.get("calibration_sweep")
 _QC_ENABLED = bool((config.get("qc") or {}).get("checks"))
 
 
@@ -115,6 +116,11 @@ rule all:
             else []
         ),
         *(
+            str(RESULTS / "calibration-sweep" / "sweep.done")
+            if CALIBRATION_SWEEP and CALIBRATION_SWEEP.get("enabled", False)
+            else []
+        ),
+        *(
             expand(
                 str(RESULTS / "attribution" / "{target}" / "core_regions.bed"),
                 target=[target["name"] for target in ATTRIBUTION["targets"]],
@@ -128,5 +134,6 @@ include: "rules/tracks.smk"
 include: "rules/dataset.smk"
 include: "rules/scaling.smk"
 include: "rules/train.smk"
+include: "rules/calibration_sweep.smk"
 include: "rules/attribute.smk"
 include: "rules/design.smk"

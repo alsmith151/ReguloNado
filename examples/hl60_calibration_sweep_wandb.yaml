@@ -1,0 +1,41 @@
+program: regulonado
+method: grid
+metric:
+  name: eval_total_ratio_median
+  goal: minimize
+parameters:
+  dataset_dir:
+    value: /path/to/results/dataset
+  metadata:
+    value: /path/to/results/dataset/tracks.parquet
+  pretrained_model:
+    value: johahi/flashzoi-replicate-0
+  loss:
+    values: [poisson_multinomial, poisson_multinomial_binwise, poisson_nll, transfer_calibration]
+  poisson_weight:
+    values: [0.2, 1.0, 5.0, 20.0]
+  learning_rate:
+    values: [0.0001, 0.001, 0.01]
+  max_steps:
+    value: 500
+command:
+  - ${env}
+  - ${program}
+  - train
+  - ${dataset_dir}
+  - --preset
+  - head_only
+  - --metadata
+  - ${metadata}
+  - --set
+  - backbone.pretrained_name=${pretrained_model}
+  - --set
+  - loss.name=${loss}
+  - --set
+  - loss.poisson_weight=${poisson_weight}
+  - --set
+  - trainer.learning_rate=${learning_rate}
+  - --set
+  - trainer.max_steps=${max_steps}
+  - --set
+  - trainer.report_to=[wandb]

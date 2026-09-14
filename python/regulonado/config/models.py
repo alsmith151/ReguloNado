@@ -214,6 +214,17 @@ class TrainConfig(BaseModel):
         return self
 
 
+class CalibrationSweepConfig(BaseModel):
+    """Optional W&B-managed GPU calibration sweep."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    sweep_config: str = Field(min_length=1)
+    agent_count: int = Field(default=1, ge=1)
+    runs: list[str] | None = None
+
+
 class DesignTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -519,6 +530,7 @@ class RegulonadoConfig(BaseModel):
     scaling: ScalingConfig = Field(default_factory=ScalingConfig)
     qc: QCConfig = Field(default_factory=QCConfig)
     train: TrainConfig
+    calibration_sweep: CalibrationSweepConfig | None = None
     design: DesignConfig | None = None
     attribution: AttributionConfig | None = None
 
@@ -537,6 +549,19 @@ class RegulonadoConfig(BaseModel):
                     f"design.{label} names train.runs entries that don't exist: "
                     f"{', '.join(unknown)}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _calibration_runs_are_known(self) -> "RegulonadoConfig":
+        if self.calibration_sweep is None or self.calibration_sweep.runs is None:
+            return self
+        known = {run.name for run in self.train.runs}
+        unknown = sorted(set(self.calibration_sweep.runs) - known)
+        if unknown:
+            raise ValueError(
+                "calibration_sweep.runs names train.runs entries that don't exist: "
+                + ", ".join(unknown)
+            )
         return self
 
     @model_validator(mode="after")

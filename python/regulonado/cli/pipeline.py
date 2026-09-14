@@ -190,13 +190,40 @@ def _validate_training_matrix(configfile: Path) -> None:
                     f"Invalid training settings for {label}: {exc}", param_hint="CONFIGFILE"
                 ) from exc
 
+    calibration = raw.get("calibration_sweep") or {}
+    if calibration.get("enabled"):
+        selected_run_names = set(calibration.get("runs") or [r.get("name") for r in runs])
+        selected_runs = [r for r in runs if isinstance(r, dict) and r.get("name") in selected_run_names]
+        for variant in calibration.get("variants", []):
+            if not isinstance(variant, dict):
+                continue
+            for run in selected_runs:
+                settings = {}
+                for layer in (train.get("common", {}), variant.get("settings", {}), run.get("settings", {})):
+                    if isinstance(layer, dict):
+                        settings.update(_flatten_settings(layer))
+                settings["seed"] = run["seed"]
+                settings["backbone.pretrained_name"] = run["pretrained_model"]
+                overrides = [
+                    "data.path=/config-validation",
+                    "output_dir=/config-validation",
+                    *(f"{key}={json.dumps(value, separators=(',', ':'))}" for key, value in settings.items()),
+                ]
+                try:
+                    resolved_training_config("head_only", overrides)
+                except Exception as exc:
+                    raise typer.BadParameter(
+                        f"Invalid calibration settings for {run.get('name')}/{variant.get('name')}: {exc}",
+                        param_hint="CONFIGFILE",
+                    ) from exc
+
 
 def pipeline(
     configfile: Annotated[
         Path, typer.Argument(help="Workflow YAML config")
     ],
     stage: Annotated[
-        Optional[str], typer.Argument(help="Stage to run: train, recompress, or design.")
+        Optional[str], typer.Argument(help="Stage to run: train, calibration, recompress, or design.")
     ] = None,
     cores: Annotated[int, typer.Option("--cores", "-c", min=1, help="Local execution cores.")] = 1,
     jobs: Annotated[
@@ -257,7 +284,7 @@ def pipeline(
         )
     _validate_training_matrix(configfile)
     if stage is not None and stage not in ("train", "recompress", "design"):
-        raise typer.BadParameter("Expected one of: train, recompress, design", param_hint="stage")
+        raise typer.BadParameter("Expected one of: train, calibration, recompress, design", param_hint="stage")
     if stage is not None and target is not None:
         raise typer.BadParameter("Use either a stage argument or --target, not both")
 
@@ -350,6 +377,13 @@ def pipeline(
                 str(results / "train" / run["name"] / final_phase / "trainer_state.json")
                 for run in runs
             )
+        elif stage == "calibration":
+            calibration = raw.get("calibration_sweep") or {}
+            if not calibration.get("enabled"):
+                raise typer.BadParameter(
+                    "Config has no enabled calibration_sweep stage", param_hint="stage"
+                )
+            selected_targets.add(str(results / "calibration-sweep" / "sweep.done"))
         else:
             design = raw.get("design") or {}
             targets = design.get("targets") or []
