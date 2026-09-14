@@ -142,6 +142,8 @@ def _build_head(config: RegulonadoConfig) -> nn.Module:
         head_kwargs["mlp_hidden"] = config.mlp_hidden
     if config.head_type == "transfer_mlp" and config.output_bias_init is not None:
         head_kwargs["output_bias_init"] = config.output_bias_init
+    if config.head_type == "transfer_mlp":
+        head_kwargs["zero_output_weights"] = config.zero_output_weights
     return build_transfer_learning_head(
         head_type=config.head_type,
         activation_type=config.activation_type,

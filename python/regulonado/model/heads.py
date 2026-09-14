@@ -1037,6 +1037,7 @@ class TransferMLPPerturbHead(nn.Module):
         dropout: float = 0.0,
         activation_type: ActivationType = "softplus",
         output_bias_init: float | list[float] | None = None,
+        zero_output_weights: bool = False,
         **_: object,
     ):
         super().__init__()
@@ -1060,6 +1061,9 @@ class TransferMLPPerturbHead(nn.Module):
                 raise ValueError("output_bias_init must be scalar or contain one value per track")
             with torch.no_grad():
                 bias.copy_(values.reshape_as(bias))
+        if zero_output_weights:
+            with torch.no_grad():
+                self.proj[-1].weight.zero_()
         if activation_type == "softplus_beta2":
             self.activation: nn.Module = nn.Softplus(beta=2)
         elif activation_type == "exp":

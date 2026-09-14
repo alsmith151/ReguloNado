@@ -6,8 +6,8 @@ hidden: 512
 dropout: 0.0
 # Intermediate width used by the metadata-free transfer MLP.
 mlp_hidden: 1024
-# null keeps the framework default. "empirical_mean" estimates each track's
-# transformed training-label mean and initializes the output bias through the
-# inverse output activation. A scalar or one value per track is also accepted.
-output_bias_init: null
-output_bias_init_samples: 256
+# default uses the framework initialization. empirical_mean_bias initializes
+# only the final bias; empirical_mean_constant also zeros the final weights so
+# every track starts exactly at its transformed training-label mean.
+output_init: default
+output_init_samples: 256

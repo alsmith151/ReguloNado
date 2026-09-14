@@ -620,7 +620,8 @@ def _build_regulonado_config(
         head_dropout=float(head_cfg.get("dropout", 0.0)),
         refinement_kernel=int(head_cfg.get("refinement_kernel", 9)),
         mlp_hidden=int(head_cfg["mlp_hidden"]) if head_cfg.get("mlp_hidden") is not None else None,
-        output_bias_init=head_cfg.get("output_bias_init"),
+        output_bias_init=head_cfg.get("resolved_output_bias"),
+        zero_output_weights=bool(head_cfg.get("zero_output_weights", False)),
         n_tracks=len(records),
         feature_dim=int(getattr(backbone, "feature_dim", 1920)),
         use_track_metadata=use_track_metadata,
@@ -666,7 +667,7 @@ def _empirical_track_output_bias(
 ) -> list[float]:
     """Estimate per-track transformed-label means without materializing the dataset."""
     if max_samples < 1:
-        raise ValueError("head.output_bias_init_samples must be at least 1")
+        raise ValueError("head.output_init_samples must be at least 1")
     totals = np.zeros(n_tracks, dtype=np.float64)
     count = 0
     for example in train_dataset:
@@ -694,19 +695,23 @@ def _resolve_empirical_output_bias(
 ) -> None:
     """Replace the declarative empirical-mean mode with checkpoint-safe numeric biases."""
     head_cfg = cfg["head"]
-    mode = head_cfg.get("output_bias_init")
-    if mode != "empirical_mean":
+    mode = str(head_cfg.get("output_init", "default"))
+    allowed = {"default", "empirical_mean_bias", "empirical_mean_constant"}
+    if mode not in allowed:
+        raise ValueError(f"head.output_init must be one of {sorted(allowed)}, got {mode!r}")
+    if mode == "default":
         return
     values = _empirical_track_output_bias(
         dataset_dict["train"],
         n_tracks=n_tracks,
         activation_type=str(cfg["model"].get("activation_type", "softplus")),
-        max_samples=int(head_cfg.get("output_bias_init_samples", 256)),
+        max_samples=int(head_cfg.get("output_init_samples", 256)),
     )
-    head_cfg["output_bias_init"] = values
+    head_cfg["resolved_output_bias"] = values
+    head_cfg["zero_output_weights"] = mode == "empirical_mean_constant"
     logger.info(
         "Initialized transfer-head output bias from %d transformed training-label samples",
-        int(head_cfg.get("output_bias_init_samples", 256)),
+        int(head_cfg.get("output_init_samples", 256)),
     )
 
 

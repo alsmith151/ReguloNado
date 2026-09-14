@@ -125,6 +125,21 @@ def test_transfer_head_accepts_per_track_output_bias_initialization():
     torch.testing.assert_close(head.proj[-1].bias, torch.tensor([-1.5, 0.75]))
 
 
+def test_transfer_head_can_start_as_empirical_mean_constant():
+    means = torch.tensor([0.25, 1.5])
+    bias = torch.log(torch.expm1(means))
+    head = TransferMLPPerturbHead(
+        in_ch=8,
+        hidden=4,
+        n_tracks=2,
+        output_bias_init=bias.tolist(),
+        zero_output_weights=True,
+    )
+
+    output = head(torch.randn(3, 8, 7))
+    torch.testing.assert_close(output, means.view(1, 2, 1).expand(3, 2, 7))
+
+
 def test_freeze_policy_unfreezes_last_block_only():
     backbone = DummyBackbone()
     model = RegulonadoModel(

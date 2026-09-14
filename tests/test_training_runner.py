@@ -19,6 +19,7 @@ from regulonado.training.runner import (
     _empirical_track_output_bias,
     _finalize_trainer_outputs,
     _guard_streaming_persistent_workers,
+    _resolve_empirical_output_bias,
     _resolve_trainer_config,
 )
 
@@ -56,6 +57,24 @@ def test_empirical_track_output_bias_respects_sample_limit_and_transposed_labels
     bias = _empirical_track_output_bias(dataset, n_tracks=2, activation_type="exp", max_samples=1)
 
     torch.testing.assert_close(torch.exp(torch.tensor(bias)), torch.tensor([3.0, 4.0]))
+
+
+@pytest.mark.parametrize(
+    ("mode", "zero_weights"),
+    [("empirical_mean_bias", False), ("empirical_mean_constant", True)],
+)
+def test_resolve_empirical_output_initialization(mode: str, zero_weights: bool) -> None:
+    cfg = {
+        "head": {"output_init": mode, "output_init_samples": 1},
+        "model": {"activation_type": "softplus"},
+    }
+    dataset = {"train": [{"labels": np.array([[1.0, 3.0], [2.0, 4.0]])}]}
+
+    _resolve_empirical_output_bias(cfg, dataset, n_tracks=2)
+
+    assert cfg["head"]["zero_output_weights"] is zero_weights
+    resolved = torch.tensor(cfg["head"]["resolved_output_bias"])
+    torch.testing.assert_close(torch.nn.functional.softplus(resolved), torch.tensor([2.0, 3.0]))
 
 
 class TestResolveTrainerConfig:

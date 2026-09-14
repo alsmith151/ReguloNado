@@ -19,8 +19,8 @@ parameters:
     values: [0.0001, 0.001, 0.01]
   activation_type:
     values: [softplus, softplus_beta2, exp]
-  output_bias_init:
-    values: ["null", empirical_mean]
+  output_init:
+    values: [default, empirical_mean_bias, empirical_mean_constant]
   max_steps:
     value: 500
 command:
@@ -41,7 +41,7 @@ command:
   - --set
   - model.activation_type=${activation_type}
   - --set
-  - head.output_bias_init=${output_bias_init}
+  - head.output_init=${output_init}
   - --set
   - trainer.learning_rate=${learning_rate}
   - --set
