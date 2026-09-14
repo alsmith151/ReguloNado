@@ -36,7 +36,7 @@ trainer:
   # with larger allocations can override this explicitly.
   num_workers: 4
   persistent_workers: true
-  prefetch_factor: 2
+  prefetch_factor: 1
 
   # Optimisation
   learning_rate: 1.0e-3

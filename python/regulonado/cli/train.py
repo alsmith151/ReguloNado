@@ -33,6 +33,14 @@ def sweep_train(
     preset = str(values.pop("preset", "head_only"))
     dataset = Path(str(values.pop("data.path")))
     configured_output = values.pop("output_dir", None)
+    # Sweep agents run inside a fixed CPU allocation and handle unusually large
+    # sequence examples. Avoid inheriting a workstation-oriented worker count
+    # or holding two prefetched batches per worker, either of which can cause
+    # the scheduler/OOM killer to terminate DataLoader workers mid-run.
+    allocated_cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", "4"))
+    sweep_workers = max(0, min(4, allocated_cpus))
+    values.setdefault("trainer.num_workers", sweep_workers)
+    values.setdefault("trainer.prefetch_factor", 1 if sweep_workers > 0 else None)
     settings = []
     for key, value in values.items():
         # A sweep can select a config-group option and then tune a field that is

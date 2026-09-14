@@ -1060,13 +1060,17 @@ class RegulonadoTrainer(Trainer):
 def _estimate_shuffle_buffer(
     data_cfg: Mapping[str, Any],
     metadata: Mapping[str, Any],
+    *,
+    num_workers: int = 0,
 ) -> int:
+    """Size each worker's shuffle buffer within one total RAM budget."""
     ram_gb = float(data_cfg.get("shuffle_buffer_ram_gb", 4.0))
     context_length = int(metadata.get("context_length", data_cfg.get("context_length", 524_288)))
     n_pred_bins = int(metadata.get("n_pred_bins", data_cfg.get("n_pred_bins", 6_144)))
     n_tracks = int(metadata.get("n_final_tracks") or metadata.get("n_tracks") or 1)
     bytes_per_sample = (context_length * 4 + n_tracks * n_pred_bins) * 4  # float32
-    return max(10, int(ram_gb * 1e9 / bytes_per_sample))
+    worker_copies = max(1, num_workers)
+    return max(10, int(ram_gb * 1e9 / bytes_per_sample / worker_copies))
 
 
 def _resolve_trainer_config(cfg: Mapping[str, Any]) -> TrainerConfig:
@@ -1186,7 +1190,9 @@ def _prepare_dataset_splits(
 ) -> DatasetDict | dict[str, Any]:
     """Apply streaming shuffle and eval-sample capping, ahead of transform application."""
     if streaming and "train" in dataset_dict:
-        shuffle_buffer = _estimate_shuffle_buffer(data_cfg, metadata)
+        shuffle_buffer = _estimate_shuffle_buffer(
+            data_cfg, metadata, num_workers=trainer_cfg.num_workers
+        )
         dataset_dict["train"] = dataset_dict["train"].shuffle(buffer_size=shuffle_buffer, seed=seed)
 
     max_eval_samples = (

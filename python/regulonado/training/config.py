@@ -133,7 +133,7 @@ class TrainerConfig:
     # Keep DataLoader workers alive between iterations instead of respawning each epoch.
     persistent_workers: bool = True
     # Number of batches each worker prefetches ahead; None uses PyTorch's default (2).
-    prefetch_factor: int | None = 2
+    prefetch_factor: int | None = 1
     # Logging backends passed to TrainingArguments report_to. Use ["wandb"] to enable W&B.
     report_to: list[str] = field(default_factory=list)
     wandb_project: str = "regulonado-training"

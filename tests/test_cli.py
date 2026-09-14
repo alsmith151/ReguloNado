@@ -34,6 +34,7 @@ def test_sweep_train_maps_wandb_json_to_training_settings(tmp_path, monkeypatch)
     captured = {}
     monkeypatch.setattr(train_module, "train", lambda **kwargs: captured.update(kwargs))
     monkeypatch.setenv("WANDB_RUN_ID", "abc123")
+    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "2")
 
     train_module.sweep_train(config_file)
 
@@ -43,6 +44,8 @@ def test_sweep_train_maps_wandb_json_to_training_settings(tmp_path, monkeypatch)
     assert 'loss="poisson_nll"' in captured["settings"]
     assert "++loss.poisson_weight=0.2" in captured["settings"]
     assert '++head.output_init="empirical_mean_constant"' in captured["settings"]
+    assert "++trainer.num_workers=2" in captured["settings"]
+    assert "++trainer.prefetch_factor=1" in captured["settings"]
 
 
 def test_train_builds_a_readable_preset_command(tmp_path):

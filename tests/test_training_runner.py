@@ -17,6 +17,7 @@ from regulonado.training.runner import (
     _build_collate_and_loss,
     _build_training_summary,
     _empirical_track_output_bias,
+    _estimate_shuffle_buffer,
     _finalize_trainer_outputs,
     _guard_streaming_persistent_workers,
     _resolve_empirical_output_bias,
@@ -48,6 +49,16 @@ def test_validate_dataset_schema_accepts_model_inputs() -> None:
 def test_validate_dataset_schema_rejects_missing_input_ids() -> None:
     with pytest.raises(ValueError, match="missing required column.*input_ids"):
         _validate_dataset_schema({"train": _DatasetColumns("labels", "interval")})
+
+
+def test_streaming_shuffle_ram_budget_is_divided_across_workers() -> None:
+    data_cfg = {"shuffle_buffer_ram_gb": 8.0, "context_length": 100, "n_pred_bins": 10}
+    metadata = {"n_tracks": 2}
+
+    single_process = _estimate_shuffle_buffer(data_cfg, metadata, num_workers=0)
+    four_workers = _estimate_shuffle_buffer(data_cfg, metadata, num_workers=4)
+
+    assert four_workers == single_process // 4
 
 
 def test_empirical_track_output_bias_matches_track_means_through_softplus() -> None:
