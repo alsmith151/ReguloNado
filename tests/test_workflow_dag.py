@@ -12,6 +12,67 @@ import pytest
 WORKFLOW = Path(__file__).parents[1] / "python" / "regulonado" / "workflow" / "Snakefile"
 
 
+def test_recompressed_dataset_survives_dag_rebuild_without_raw_source(tmp_path):
+    """A cleaned temp source must not cause rebuilding after the DAG is reconstructed."""
+    snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
+    if snakemake is None:
+        pytest.skip("Snakemake is an optional workflow dependency")
+
+    intervals = tmp_path / "intervals.bed"
+    fasta = tmp_path / "genome.fa"
+    intervals.touch()
+    fasta.touch()
+    results = tmp_path / "results"
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"""
+results_dir: {results}
+inputs:
+  intervals: {intervals}
+  fasta: {fasta}
+  bigwig_dir: {tmp_path / "bigwigs"}
+dataset:
+  context_length: 100
+  bin_size: 10
+  n_pred_bins: 4
+  shift_max_bp: 0
+recompress:
+  enabled: true
+scaling:
+  method: tmm
+"""
+    )
+    target_dir = results / "dataset_rechunked"
+    target_dir.mkdir(parents=True)
+    target = target_dir / "dataset_dict.json"
+    target.touch()
+    (target_dir / "tracks.parquet").touch()
+
+    result = subprocess.run(
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            "--dry-run",
+            "--printshellcmds",
+            str(target),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "Nothing to be done" in output
+    assert "Execute 1 jobs" not in output
+
+
 def test_parameter_sweep_stage_does_not_require_train_config(tmp_path):
     """A sweep builds its dataset dependency without requiring a training matrix."""
     snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))

@@ -101,5 +101,6 @@ rule recompress_dataset:
             --max-batch-size {params.max_batch_size} \
             --workers {params.workers} \
             --overwrite \
+            --remove-src \
             > {log} 2>&1
         """

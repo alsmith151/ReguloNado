@@ -68,8 +68,8 @@ regulonado recompress-dataset dataset/ dataset_rechunked/ \
 
 The destination must not already exist. `tracks.parquet` is copied alongside the Arrow shards. The
 workflow can perform this step automatically when `recompress.enabled` is true — in which case the
-raw `dataset/` build output is a pure intermediate and Snakemake removes it once recompression has
-consumed it.
+raw `dataset/` build output is a pure intermediate and is removed after successful recompression to
+save disk space.
 
 Use `regulonado dataset --help` for geometry, compression, shard sizing, and chromosome filtering
 options; use `regulonado tracks --help` for discovery, dedupe, and QC options.

@@ -52,6 +52,19 @@ def test_recompress_overwrite_preserves_source(tmp_path):
     assert table.column("value").to_pylist() == [1, 2, 3]
 
 
+def test_recompress_remove_src_deletes_source_after_success(tmp_path):
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    _make_dataset(source, [1, 2, 3])
+
+    recompress_dataset(source, destination, remove_src=True)
+
+    assert not source.exists()
+    with (destination / "train" / "data.arrow").open("rb") as fh:
+        table = pa.Table.from_batches(list(ipc.open_stream(fh)))
+    assert table.column("value").to_pylist() == [1, 2, 3]
+
+
 def test_recompress_failure_preserves_existing_destination(tmp_path, monkeypatch):
     source = tmp_path / "source"
     destination = tmp_path / "destination"
@@ -64,8 +77,9 @@ def test_recompress_failure_preserves_existing_destination(tmp_path, monkeypatch
     monkeypatch.setattr("regulonado.recompress.recompress_split", fail)
 
     with pytest.raises(RuntimeError, match="injected failure"):
-        recompress_dataset(source, destination, overwrite=True)
+        recompress_dataset(source, destination, overwrite=True, remove_src=True)
 
+    assert (source / "train" / "data.arrow").exists()
     with (destination / "train" / "data.arrow").open("rb") as fh:
         table = pa.Table.from_batches(list(ipc.open_stream(fh)))
     assert table.column("value").to_pylist() == [99]
