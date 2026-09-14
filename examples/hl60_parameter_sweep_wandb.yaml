@@ -25,8 +25,11 @@ parameters:
     values: [softplus, softplus_beta2, exp]
   head.output_init:
     values: [default, empirical_mean_bias, empirical_mean_constant]
+  # Short ranking trials: a fixed step budget, evaluated (and checkpointed) twice.
   trainer.max_steps:
     value: 500
+  trainer.eval_every_n_steps:
+    value: 250
   trainer.report_to:
     value: [wandb]
 command:

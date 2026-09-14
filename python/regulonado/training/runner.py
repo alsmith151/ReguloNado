@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 import random
 from collections.abc import Callable, Mapping, Sequence
 from os import environ
@@ -38,9 +39,11 @@ from regulonado.model import (
 from regulonado.training.callbacks import (
     EvalExampleDiagnostics,
     LRLogCallback,
+    StreamingEpochProgressCallback,
     WandbConfigCallback,
 )
 from regulonado.training.config import TrainerConfig
+from regulonado.training.data import count_arrow_split_rows
 from regulonado.training.losses import (
     log1p_huber_loss,
     poisson_multinomial_binwise_loss,
@@ -63,6 +66,11 @@ logger = logging.getLogger(__name__)
 def _rank() -> int:
     """Process rank under torchrun/DDP (0 when launched single-process)."""
     return int(environ.get("RANK") or environ.get("LOCAL_RANK") or 0)
+
+
+def _world_size() -> int:
+    """Number of training processes under torchrun/DDP (1 when launched single-process)."""
+    return int(environ.get("WORLD_SIZE") or 1)
 
 
 def _normalise_checkpoint_mode(value: Any) -> str | bool | None:
@@ -817,9 +825,78 @@ def _build_optimizer(model: RegulonadoModel, trainer_cfg: TrainerConfig) -> torc
     return AdamW(param_groups)
 
 
+@dataclasses.dataclass(frozen=True)
+class StepBudget:
+    """Optimizer-update counts shared by the scheduler, TrainingArguments, and logging."""
+
+    # None when the training split size cannot be determined (remote streaming source).
+    steps_per_epoch: int | None
+    max_steps: int
+
+
+def _resolve_step_budget(
+    trainer_cfg: TrainerConfig,
+    *,
+    train_rows: int | None,
+    world_size: int,
+) -> StepBudget:
+    """Size an epoch in optimizer updates, matching HF Trainer's own accounting.
+
+    Batches are dropped when incomplete (``dataloader_drop_last=True``) and each
+    epoch's trailing partial accumulation still counts as one update. An explicit
+    ``max_steps`` wins; otherwise the budget is ``max_epochs`` whole epochs.
+
+    Raises
+    ------
+    ValueError
+        If the split size is unknown and ``max_steps`` is unset, or the split is
+        smaller than one global batch.
+    """
+    if train_rows is None:
+        if trainer_cfg.max_steps is None:
+            raise ValueError(
+                "trainer.max_steps must be set when the training split size is unknown "
+                "(streaming from a source without local Arrow shards)"
+            )
+        return StepBudget(steps_per_epoch=None, max_steps=trainer_cfg.max_steps)
+
+    global_batch = max(trainer_cfg.batch_size, 1) * max(world_size, 1)
+    batches_per_epoch = train_rows // global_batch
+    if batches_per_epoch == 0:
+        raise ValueError(
+            f"Training split has {train_rows} rows, fewer than one global batch "
+            f"({global_batch} = batch_size x world_size)"
+        )
+    accumulation = max(trainer_cfg.gradient_accumulation_steps, 1)
+    steps_per_epoch = math.ceil(batches_per_epoch / accumulation)
+    max_steps = trainer_cfg.max_steps or math.ceil(trainer_cfg.max_epochs * steps_per_epoch)
+    return StepBudget(steps_per_epoch=steps_per_epoch, max_steps=max_steps)
+
+
+def _count_train_rows(
+    data_path: Path,
+    dataset_dict: DatasetDict | dict[str, Any],
+    *,
+    streaming: bool,
+) -> int | None:
+    """Training split size; streaming reads local Arrow batch headers without decompressing."""
+    if not streaming:
+        return len(dataset_dict["train"])
+    return _count_local_split_rows(data_path, "train")
+
+
+def _count_local_split_rows(data_path: Path, split: str) -> int | None:
+    """Row count of a locally saved Arrow split, or None for a remote streaming source."""
+    split_dir = data_path / split
+    if not (split_dir / "state.json").is_file():
+        return None
+    return count_arrow_split_rows(split_dir)
+
+
 def _build_training_arguments(
     output_dir: Path,
     trainer_cfg: TrainerConfig,
+    budget: StepBudget,
     *,
     has_eval: bool,
 ) -> TrainingArguments:
@@ -830,12 +907,32 @@ def _build_training_arguments(
             environ["WANDB_RUN_GROUP"] = trainer_cfg.wandb_group
         if trainer_cfg.wandb_tags:
             environ["WANDB_TAGS"] = ",".join(trainer_cfg.wandb_tags)
-    save_steps = trainer_cfg.checkpoint_every_n_steps or trainer_cfg.log_every_n_steps
-    eval_strategy = "epoch" if has_eval and trainer_cfg.max_steps is None else "steps"
+    eval_strategy = "steps" if has_eval else "no"
     if not has_eval:
-        eval_strategy = "no"
+        eval_steps = None
+    elif trainer_cfg.eval_every_n_steps:
+        eval_steps = trainer_cfg.eval_every_n_steps
+    elif trainer_cfg.evals_per_epoch:
+        if budget.steps_per_epoch is None:
+            raise ValueError(
+                "trainer.evals_per_epoch needs a countable training split; "
+                "set trainer.eval_every_n_steps instead"
+            )
+        eval_steps = max(budget.steps_per_epoch // trainer_cfg.evals_per_epoch, 1)
+    elif trainer_cfg.max_steps is None:
+        # Epoch-driven run: evaluate once per epoch. Counted in steps because HF's
+        # "epoch" strategy sees a streaming run's whole budget as one epoch.
+        eval_steps = budget.steps_per_epoch
+    else:
+        eval_steps = trainer_cfg.checkpoint_every_n_steps or trainer_cfg.log_every_n_steps
 
-    save_strategy = "steps" if trainer_cfg.checkpoint_every_n_steps else "no"
+    # Under evals_per_epoch, checkpoint at every evaluation so early stopping and
+    # load_best_model_at_end always have the best checkpoint on disk.
+    checkpoint_steps = trainer_cfg.checkpoint_every_n_steps or (
+        eval_steps if trainer_cfg.evals_per_epoch else None
+    )
+    save_steps = checkpoint_steps or trainer_cfg.log_every_n_steps
+    save_strategy = "steps" if checkpoint_steps else "no"
     logging_strategy = "steps"
     metric_for_best_model = trainer_cfg.metric_for_best_model if has_eval else None
     load_best_model_at_end = has_eval and save_strategy != "no"
@@ -858,7 +955,7 @@ def _build_training_arguments(
         learning_rate=trainer_cfg.learning_rate,
         weight_decay=trainer_cfg.weight_decay,
         num_train_epochs=float(trainer_cfg.max_epochs),
-        max_steps=trainer_cfg.max_steps or -1,
+        max_steps=budget.max_steps,
         warmup_steps=trainer_cfg.warmup_steps,
         gradient_accumulation_steps=trainer_cfg.gradient_accumulation_steps,
         bf16=trainer_cfg.mixed_precision == "bf16",
@@ -866,13 +963,7 @@ def _build_training_arguments(
         logging_strategy=logging_strategy,
         logging_steps=trainer_cfg.log_every_n_steps,
         eval_strategy=eval_strategy,
-        eval_steps=(
-            trainer_cfg.eval_every_n_steps
-            or trainer_cfg.checkpoint_every_n_steps
-            or trainer_cfg.log_every_n_steps
-        )
-        if has_eval
-        else None,
+        eval_steps=eval_steps,
         save_strategy=save_strategy,
         save_steps=save_steps if save_strategy == "steps" else None,
         save_total_limit=2 if save_strategy == "steps" else None,
@@ -895,32 +986,13 @@ def _build_training_arguments(
 def _build_scheduler_for_trainer(
     optimizer: torch.optim.Optimizer,
     trainer_cfg: TrainerConfig,
-    *,
-    train_dataset_size: int | None,
+    budget: StepBudget,
 ) -> torch.optim.lr_scheduler.LRScheduler:
-    if train_dataset_size is None:
-        if trainer_cfg.max_steps is None:
-            raise ValueError(
-                "trainer.max_steps must be set when data.streaming=true "
-                "(dataset size is not known ahead of time)"
-            )
-        total_train_steps = trainer_cfg.max_steps
-    else:
-        steps_per_epoch = max(
-            train_dataset_size // max(trainer_cfg.batch_size, 1),
-            1,
-        )
-        total_train_steps = trainer_cfg.max_steps or max(
-            steps_per_epoch
-            * trainer_cfg.max_epochs
-            // max(trainer_cfg.gradient_accumulation_steps, 1),
-            1,
-        )
     return get_scheduler(
         trainer_cfg.scheduler,
         optimizer=optimizer,
         num_warmup_steps=trainer_cfg.warmup_steps,
-        num_training_steps=total_train_steps,
+        num_training_steps=budget.max_steps,
     )
 
 
@@ -1068,7 +1140,9 @@ def _estimate_shuffle_buffer(
     context_length = int(metadata.get("context_length", data_cfg.get("context_length", 524_288)))
     n_pred_bins = int(metadata.get("n_pred_bins", data_cfg.get("n_pred_bins", 6_144)))
     n_tracks = int(metadata.get("n_final_tracks") or metadata.get("n_tracks") or 1)
-    bytes_per_sample = (context_length * 4 + n_tracks * n_pred_bins) * 4  # float32
+    # Buffered examples are numpy copies (see _copy_examples_out_of_arrow): int8 one-hot
+    # sequence plus float32 labels, matching the stored Arrow dtypes.
+    bytes_per_sample = context_length * 4 + n_tracks * n_pred_bins * 4
     worker_copies = max(1, num_workers)
     return max(10, int(ram_gb * 1e9 / bytes_per_sample / worker_copies))
 
@@ -1179,12 +1253,34 @@ def _load_metadata_and_records(
     return metadata, records
 
 
+def _copy_example_arrays(example: dict[str, Any]) -> dict[str, np.ndarray]:
+    # The numpy formatter widens int8 to int64 (8x the one-hot sequence); restore the
+    # stored dtypes from regulonado.dataset.build._build_features.
+    return {
+        "input_ids": np.array(example["input_ids"], dtype=np.int8),
+        "labels": np.array(example["labels"], dtype=np.float32),
+    }
+
+
+def _copy_examples_out_of_arrow(dataset: HFIterableDataset) -> HFIterableDataset:
+    """Give each streamed example its own numpy arrays before it enters the shuffle buffer.
+
+    Unformatted streaming examples are zero-copy slices of their decompressed Arrow
+    record batch, so every buffered example keeps that whole batch (512 examples,
+    ~2.6 GB for the standard build) alive. Copying bounds the buffer to the
+    examples it actually holds. The format is cleared afterwards so the copied int8
+    arrays are yielded as-is rather than re-widened by the numpy formatter.
+    """
+    return dataset.with_format("numpy").map(_copy_example_arrays).with_format(None)
+
+
 def _prepare_dataset_splits(
     dataset_dict: DatasetDict | dict[str, Any],
     data_cfg: Mapping[str, Any],
     trainer_cfg: TrainerConfig,
     metadata: Mapping[str, Any],
     *,
+    data_path: Path,
     streaming: bool,
     seed: int,
 ) -> DatasetDict | dict[str, Any]:
@@ -1193,7 +1289,9 @@ def _prepare_dataset_splits(
         shuffle_buffer = _estimate_shuffle_buffer(
             data_cfg, metadata, num_workers=trainer_cfg.num_workers
         )
-        dataset_dict["train"] = dataset_dict["train"].shuffle(buffer_size=shuffle_buffer, seed=seed)
+        dataset_dict["train"] = _copy_examples_out_of_arrow(dataset_dict["train"]).shuffle(
+            buffer_size=shuffle_buffer, seed=seed
+        )
 
     max_eval_samples = (
         int(trainer_cfg.max_eval_samples) if trainer_cfg.max_eval_samples is not None else None
@@ -1203,11 +1301,9 @@ def _prepare_dataset_splits(
         if isinstance(val, HFIterableDataset):
             # Stride-filter is memory-free and gives uniform coverage across all chromosomes,
             # which is statistically equivalent for an unbiased Pearson estimate.
-            n_val = (
-                val.info.splits["validation"].num_examples
-                if val.info and val.info.splits and "validation" in val.info.splits
-                else None
-            )
+            # Streaming split metadata carries no row count, so count the local shards;
+            # without it, take() would evaluate only the first (single-chromosome) shard.
+            n_val = _count_local_split_rows(data_path, "validation")
             if n_val and n_val > max_eval_samples:
                 stride = n_val // max_eval_samples
                 dataset_dict["validation"] = val.filter(
@@ -1331,23 +1427,19 @@ def _prepare_model_for_training(
 def _setup_optimization(
     model: RegulonadoModel,
     trainer_cfg: TrainerConfig,
-    dataset_dict: DatasetDict | dict[str, Any],
+    budget: StepBudget,
     *,
-    streaming: bool,
+    has_eval: bool,
     output_dir: Path,
 ) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler, TrainingArguments]:
     """Build the optimizer, LR scheduler, and HF ``TrainingArguments`` together."""
     optimizer = _build_optimizer(model, trainer_cfg)
-    train_size = None if streaming else len(dataset_dict["train"])
-    scheduler = _build_scheduler_for_trainer(
-        optimizer,
-        trainer_cfg,
-        train_dataset_size=train_size,
-    )
+    scheduler = _build_scheduler_for_trainer(optimizer, trainer_cfg, budget)
     training_args = _build_training_arguments(
         output_dir,
         trainer_cfg,
-        has_eval="validation" in dataset_dict,
+        budget,
+        has_eval=has_eval,
     )
     return optimizer, scheduler, training_args
 
@@ -1392,13 +1484,18 @@ def _build_training_callbacks(
 def _run_training_loop(
     trainer: "RegulonadoTrainer",
     trainer_cfg: TrainerConfig,
+    budget: StepBudget,
     *,
     rank: int,
 ) -> None:
     """Log start-of-training context and run ``trainer.train()``."""
+    epochs = (
+        f"{budget.max_steps / budget.steps_per_epoch:.3f}" if budget.steps_per_epoch else "unknown"
+    )
     logger.info(
         f"[rank {rank}] starting trainer.train() | "
-        f"max_steps={trainer_cfg.max_steps} max_epochs={trainer_cfg.max_epochs} "
+        f"max_steps={budget.max_steps} steps_per_epoch={budget.steps_per_epoch} "
+        f"epochs={epochs} "
         f"batch_size={trainer_cfg.batch_size} grad_accum={trainer_cfg.gradient_accumulation_steps} "
         f"resume={trainer_cfg.resume_from_checkpoint} eval_on_start={trainer_cfg.eval_on_start}"
     )
@@ -1522,7 +1619,13 @@ def run_training(
     )
 
     dataset_dict = _prepare_dataset_splits(
-        dataset_dict, cfg["data"], trainer_cfg, metadata, streaming=streaming, seed=seed
+        dataset_dict,
+        cfg["data"],
+        trainer_cfg,
+        metadata,
+        data_path=data_path,
+        streaming=streaming,
+        seed=seed,
     )
 
     # Resolve empirical head initialization from the raw dataset examples.
@@ -1561,13 +1664,25 @@ def run_training(
         trainer_cfg=trainer_cfg,
     )
 
+    train_rows = _count_train_rows(data_path, dataset_dict, streaming=streaming)
+    budget = _resolve_step_budget(trainer_cfg, train_rows=train_rows, world_size=_world_size())
+    logger.info(
+        f"[rank {rank}] step budget | train_rows={train_rows} world_size={_world_size()} "
+        f"steps_per_epoch={budget.steps_per_epoch} max_steps={budget.max_steps}"
+    )
     optimizer, scheduler, training_args = _setup_optimization(
-        model, trainer_cfg, dataset_dict, streaming=streaming, output_dir=output_dir
+        model,
+        trainer_cfg,
+        budget,
+        has_eval="validation" in dataset_dict,
+        output_dir=output_dir,
     )
     val_dataset = dataset_dict.get("validation")
     callbacks = _build_training_callbacks(
         cfg, trainer_cfg, val_dataset, collate_fn, scale_factors, background, records, output_dir
     )
+    if streaming and budget.steps_per_epoch:
+        callbacks.append(StreamingEpochProgressCallback(budget.steps_per_epoch))
     topk_bins = int(cfg["trainer"].get("topk_bins", 256))
     trainer = RegulonadoTrainer(
         model=model,
@@ -1582,7 +1697,7 @@ def run_training(
         preprocess_logits_for_metrics=make_preprocess_logits_for_metrics(topk_bins),
     )
 
-    _run_training_loop(trainer, trainer_cfg, rank=rank)
+    _run_training_loop(trainer, trainer_cfg, budget, rank=rank)
     history = _finalize_trainer_outputs(trainer, output_dir)
 
     return _build_training_summary(

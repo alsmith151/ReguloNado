@@ -53,6 +53,8 @@ trainer:
   # Logging, evaluation, and checkpoints
   log_every_n_steps: 50
   eval_every_n_steps: null
+  # Evaluations (and checkpoints) per epoch; 4 = every ~25% of an epoch.
+  evals_per_epoch: null
   checkpoint_every_n_steps: null
   metric_for_best_model: eval_loss
   greater_is_better: false

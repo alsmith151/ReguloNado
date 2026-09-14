@@ -107,9 +107,11 @@ class TrainerConfig:
     scheduler: str = "linear"
     # Scheduler warmup steps counted in optimizer-update steps.
     warmup_steps: int = 0
-    # Number of full passes over the training split when max_steps is unset.
+    # Number of full passes over the training split when max_steps is unset. Streaming
+    # runs size an epoch from the local Arrow shard headers.
     max_epochs: int = 1
-    # Explicit optimizer-update budget; overrides max_epochs when set.
+    # Explicit optimizer-update budget; overrides max_epochs when set. Required only when
+    # streaming from a source whose split size cannot be counted.
     max_steps: int | None = None
     # Number of forward passes to accumulate before each optimizer step.
     gradient_accumulation_steps: int = 1
@@ -119,9 +121,13 @@ class TrainerConfig:
     gradient_clip_norm: float | None = 1.0
     # Frequency of Trainer logging events in optimizer-update steps.
     log_every_n_steps: int = 50
-    # Frequency of validation evaluation in optimizer-update steps; falls back to
-    # checkpoint_every_n_steps, then log_every_n_steps when None.
+    # Frequency of validation evaluation in optimizer-update steps. When None, falls back
+    # to evals_per_epoch, then once per epoch for epoch-driven runs, then
+    # checkpoint_every_n_steps, then log_every_n_steps.
     eval_every_n_steps: int | None = None
+    # Evaluations per training epoch (4 = every ~25% of an epoch). Checkpoints follow
+    # the evaluation cadence unless checkpoint_every_n_steps is set.
+    evals_per_epoch: int | None = None
     # Save checkpoints every N optimizer-update steps; disabled when None.
     checkpoint_every_n_steps: int | None = None
     # Freeze all backbone parameters before optional selective unfreezing.
