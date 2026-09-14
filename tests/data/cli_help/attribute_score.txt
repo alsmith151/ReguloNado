@@ -1,0 +1,34 @@
+                                                                                                    
+ Usage: root attribute score [OPTIONS]                                                              
+                                                                                                    
+ Compute the attribution profile for each candidate by in-silico mutagenesis.                       
+                                                                                                    
+ Scores every alternative base at every position against one output track and writes the            
+ resulting profile (attributions.tsv/attributions.bw) without calling cores — e.g. for              
+ visualizing a locus in IGV.                                                                        
+                                                                                                    
+ Provide `--params config.yaml` for the full set of ISM-sweep tuning options (bin/fold              
+ reduction, smoothing, thresholds, ...); the options above override anything it sets.               
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --params               PATH  YAML/JSON file parsed as AttributionConfig; explicit options below  │
+│                              override it.                                                        │
+│ --candidates           PATH  BED of candidate regions to scan.                                   │
+│ --checkpoint           PATH  Fold checkpoint dir; repeat once per fold.                          │
+│ --fasta                PATH  Genome FASTA (needs a .fai index).                                  │
+│ --track                TEXT  Track to attribute against: name or index.                          │
+│ --target               TEXT  Group value to attribute against (e.g. a cell type), averaged over  │
+│                              every track whose --group-by column matches. Alternative to         │
+│                              --track.                                                            │
+│ --group-by             TEXT  Track-sheet/tracks.parquet column --target is matched against       │
+│                              (default 'source' when --target is set).                            │
+│ --track-sheet          PATH  CSV to resolve --target's group from, if not relying on             │
+│                              --dataset-dir's tracks.parquet.                                     │
+│ --exclude-track        TEXT  track_name to exclude from --target's group (repeatable).           │
+│ --out                  PATH  Directory to write attribution outputs.                             │
+│ --intervals            PATH  Build-time interval BED the folds were trained on; default: the     │
+│                              'bed_file' recorded in --dataset-dir's tracks.parquet.              │
+│ --dataset-dir          PATH  Dataset dir with tracks.parquet.                                    │
+│ --help                       Show this message and exit.                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

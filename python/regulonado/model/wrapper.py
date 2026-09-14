@@ -13,6 +13,16 @@ if TYPE_CHECKING:
     pass
 
 
+def one_hot_sequence_tokens(tokens: torch.Tensor) -> torch.Tensor:
+    """One-hot encode uint8 sequence tokens (A0 C1 G2 T3, N/pad>=4) to shape [B, 4, L].
+
+    Bases 4 and above (N and out-of-contig padding) have no set bit — an all-zero
+    column, matching the one-hot padding convention the backbone already expects.
+    """
+    bases = torch.arange(4, device=tokens.device).view(1, 4, 1)
+    return (tokens.unsqueeze(1) == bases).float()
+
+
 class BackboneAdapter(Iterable):
     """Protocol satisfied by BorzoiBackboneAdapter and EnformerBackboneAdapter."""
 
@@ -86,6 +96,11 @@ class RegulonadoModel(PreTrainedModel):
         self.post_init()
 
     def forward(self, input_ids: torch.Tensor, **head_kwargs: torch.Tensor | None) -> torch.Tensor:
+        # Workers hand off uint8 tokens (A0 C1 G2 T3, N/pad>=4); one-hot encoding happens
+        # here, on the GPU. A float input is already one-hot (attribution/design/predict
+        # passes construct it directly) and passes through unchanged.
+        if input_ids.dtype == torch.uint8:
+            input_ids = one_hot_sequence_tokens(input_ids)
         features = self.backbone.forward_features(input_ids)
         # Match the head's parameter dtype rather than hardcoding float32: under
         # autocast training the head's master weights are float32 (so this is a

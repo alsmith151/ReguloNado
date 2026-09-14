@@ -9,45 +9,6 @@ import typer
 logger = logging.getLogger(__name__)
 
 
-def recompress_dataset(
-    src: Annotated[Path, typer.Argument(help="Source saved dataset directory")],
-    dst: Annotated[Path, typer.Argument(help="Destination directory")],
-    level: Annotated[int, typer.Option("--level", help="ZSTD compression level")] = 3,
-    workers: Annotated[int, typer.Option("--workers", "-w", help="Parallel shard workers")] = 4,
-    max_batch_size: Annotated[
-        Optional[int],
-        typer.Option(
-            "--max-batch-size",
-            help="Split Arrow record batches into sub-batches of at most this many rows",
-        ),
-    ] = None,
-    overwrite: Annotated[
-        bool,
-        typer.Option("--overwrite", help="Remove destination directory first if it exists"),
-    ] = False,
-    remove_src: Annotated[
-        bool,
-        typer.Option("--remove-src", help="Delete source dataset after successful recompression"),
-    ] = False,
-) -> None:
-    """Rechunk/recompress a saved Arrow DatasetDict with ZSTD IPC compression."""
-    from regulonado.recompress import recompress_dataset as _recompress_dataset
-
-    try:
-        _recompress_dataset(
-            src,
-            dst,
-            level=level,
-            workers=workers,
-            max_batch_size=max_batch_size,
-            overwrite=overwrite,
-            remove_src=remove_src,
-        )
-    except (FileNotFoundError, ValueError) as e:
-        logger.error(str(e))
-        raise typer.Exit(code=1)
-
-
 def dataset(
     bed_file: Annotated[Path, typer.Argument(help="BED file; column 4 used as fold label")],
     fasta_file: Annotated[
@@ -113,13 +74,6 @@ def dataset(
             help="Rayon thread count for Phase 1 Rust BigWig extraction (fast path only)",
         ),
     ] = 32,
-    arrow_batch_size: Annotated[
-        int,
-        typer.Option(
-            "--arrow-batch-size",
-            help="Samples per Rust-written Arrow record batch (RAM-bounded)",
-        ),
-    ] = 8,
     shard_target_mb: Annotated[
         int,
         typer.Option(
@@ -141,23 +95,30 @@ def dataset(
             ),
         ),
     ] = None,
-    arrow_compression: Annotated[
-        str,
+    zstd_level: Annotated[
+        int,
         typer.Option(
-            "--arrow-compression",
-            help="Arrow IPC compression: zstd, lz4, or none",
+            "--zstd-level",
+            help="ZSTD compression level (default 3)",
         ),
-    ] = "lz4",
-    arrow_write_threads: Annotated[
+    ] = 3,
+    write_threads: Annotated[
         Optional[int],
         typer.Option(
-            "--arrow-write-threads",
+            "--write-threads",
             help=(
-                "Concurrent Arrow shard writers for in_memory. Defaults to "
+                "Concurrent Parquet shard writers. Defaults to "
                 "min(8, --n-extract-threads); lower this if memory is tight."
             ),
         ),
     ] = None,
+    rows_per_row_group: Annotated[
+        int,
+        typer.Option(
+            "--rows-per-row-group",
+            help="Rows per Parquet row group (default 1)",
+        ),
+    ] = 1,
     strategy: Annotated[
         str,
         typer.Option(
@@ -228,15 +189,14 @@ def dataset(
         n_pred_bins=n_pred_bins,
         shift_max_bp=shift_max_bp,
         n_extract_threads=n_extract_threads,
-        arrow_batch_size=arrow_batch_size,
         shard_size=shard_size,
         shard_target_mb=shard_target_mb,
-        arrow_compression=arrow_compression,
-        arrow_write_threads=arrow_write_threads,
+        zstd_level=zstd_level,
+        write_threads=write_threads,
+        rows_per_row_group=rows_per_row_group,
         stage_to_scratch=stage,
         overwrite=overwrite,
         profile=profile,
         strategy=strategy,
         chrom_filter=list(chrom) if chrom else None,
-        return_dataset=False,
     )

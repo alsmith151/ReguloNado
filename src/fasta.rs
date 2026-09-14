@@ -58,23 +58,22 @@ pub(crate) fn fasta_file_offset(rec: &FastaIndexRecord, pos: u64) -> u64 {
     rec.offset + (pos / rec.line_bases) * rec.line_width + (pos % rec.line_bases)
 }
 
-/// Read a centered FASTA interval and return one-hot sequence as `(4, context_len)`.
+/// Read a centered FASTA interval and return sequence tokens of length `context_len`.
 ///
-/// Rows are A, C, G, T. Out-of-bounds sequence and ambiguous bases remain zero.
-/// The vector is laid out row-major so it can be wrapped directly as an Arrow
-/// Array2D field.
-pub(crate) fn read_one_hot_sequence(
+/// Tokens are A0 C1 G2 T3 (case-insensitive); N, any other ambiguous base, and
+/// out-of-contig padding are all 4.
+pub(crate) fn read_sequence_tokens(
     fasta: &std::fs::File,
     fai: &HashMap<String, FastaIndexRecord>,
     chrom: &str,
     bed_start: u32,
     bed_end: u32,
     context_len: usize,
-) -> Result<Vec<i8>, String> {
+) -> Result<Vec<u8>, String> {
     #[cfg(unix)]
     use std::os::unix::fs::FileExt;
 
-    let mut out = vec![0i8; 4 * context_len];
+    let mut out = vec![4u8; context_len];
     // A contig present in the BED but absent from the FASTA index used to yield an
     // all-zero one-hot, so a misspelled or mismatched contig name silently produced blank
     // training rows instead of failing. Treat it as an error: a caller that genuinely
@@ -118,22 +117,96 @@ pub(crate) fn read_one_hot_sequence(
 
     let mut seq_idx = (read_start as i64 - seq_start) as usize;
     for base in raw {
-        let channel = match base {
-            b'A' | b'a' => Some(0usize),
-            b'C' | b'c' => Some(1usize),
-            b'G' | b'g' => Some(2usize),
-            b'T' | b't' => Some(3usize),
+        let token = match base {
+            b'A' | b'a' => 0u8,
+            b'C' | b'c' => 1u8,
+            b'G' | b'g' => 2u8,
+            b'T' | b't' => 3u8,
             b'\n' | b'\r' => continue,
-            _ => None,
+            _ => 4u8,
         };
         if seq_idx >= context_len {
             break;
         }
-        if let Some(c) = channel {
-            out[c * context_len + seq_idx] = 1;
-        }
+        out[seq_idx] = token;
         seq_idx += 1;
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Write a minimal FASTA + `.fai` pair for one contig and return the open
+    /// FASTA handle plus its index, for exercising `read_sequence_tokens`.
+    fn make_fasta(
+        dir: &std::path::Path,
+        name: &str,
+        seq: &str,
+    ) -> (std::fs::File, HashMap<String, FastaIndexRecord>) {
+        let fasta_path = dir.join(format!("{name}.fa"));
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">{name}").unwrap();
+        writeln!(f, "{seq}").unwrap();
+        drop(f);
+
+        let line_bases = seq.len() as u64;
+        let mut fai = HashMap::new();
+        fai.insert(
+            name.to_string(),
+            FastaIndexRecord {
+                len: seq.len() as u64,
+                offset: (name.len() + 2) as u64, // ">name\n"
+                line_bases,
+                line_width: line_bases + 1,
+            },
+        );
+        (std::fs::File::open(&fasta_path).unwrap(), fai)
+    }
+
+    #[test]
+    fn encodes_bases_case_insensitively() {
+        let dir = tempfile_dir();
+        let (fasta, fai) = make_fasta(&dir, "chr1", "acgtACGT");
+        let tokens = read_sequence_tokens(&fasta, &fai, "chr1", 0, 8, 8).unwrap();
+        assert_eq!(tokens, vec![0, 1, 2, 3, 0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn n_and_other_bases_are_token_four() {
+        let dir = tempfile_dir();
+        let (fasta, fai) = make_fasta(&dir, "chr1", "ANGTn");
+        let tokens = read_sequence_tokens(&fasta, &fai, "chr1", 0, 5, 5).unwrap();
+        assert_eq!(tokens, vec![0, 4, 2, 3, 4]);
+    }
+
+    #[test]
+    fn out_of_contig_padding_is_token_four() {
+        let dir = tempfile_dir();
+        let (fasta, fai) = make_fasta(&dir, "chr1", "ACGT");
+        // Centered window wider than the contig: context extends past both ends.
+        let tokens = read_sequence_tokens(&fasta, &fai, "chr1", 0, 4, 10).unwrap();
+        assert_eq!(tokens.len(), 10);
+        assert_eq!(tokens.iter().filter(|&&t| t == 4).count() >= 6, true);
+        // The in-bounds bases still decode correctly wherever they land.
+        assert!(tokens.contains(&0));
+        assert!(tokens.contains(&1));
+        assert!(tokens.contains(&2));
+        assert!(tokens.contains(&3));
+    }
+
+    fn tempfile_dir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "regulonado_rs_fasta_test_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 }

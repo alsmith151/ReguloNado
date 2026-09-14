@@ -15,17 +15,15 @@
 │ --help                              Show this message and exit.                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ───────────────────────────────────────────────────────────────────────────────────────╮
-│ config              Generate a workflow config, interactively or from flags.                     │
-│ init                Install Snakemake execution presets into ~/.config/snakemake/.               │
-│ train               Train one model from a named preset.                                         │
-│ recompress-dataset  Rechunk/recompress a saved Arrow DatasetDict with ZSTD IPC compression.      │
-│ dataset             Build an Arrow DatasetDict from BED / FASTA / a pre-assembled track table.   │
-│ predict             Generate BigWig tracks from trained model predictions, collapsing equal      │
-│                     bins.                                                                        │
-│ design              Mutate endogenous enhancer candidates to sharpen cell-type specificity.      │
-│ attribute           Locate the high-attribution core of each candidate by in-silico mutagenesis. │
-│ pipeline            Run the packaged Snakemake workflow, optionally selecting one stage.         │
-│ normalization       Infer, correct, and apply per-track signal normalisation factors.            │
-│ tracks              Discover, QC, and assemble tracks.parquet before the dataset build.          │
+│ config         Generate a workflow config, interactively or from flags.                          │
+│ init           Install Snakemake execution presets into ~/.config/snakemake/.                    │
+│ train          Train one model from a named preset.                                              │
+│ dataset        Build an Arrow DatasetDict from BED / FASTA / a pre-assembled track table.        │
+│ predict        Generate BigWig tracks from trained model predictions, collapsing equal bins.     │
+│ design         Mutate endogenous enhancer candidates to sharpen cell-type specificity.           │
+│ pipeline       Run the packaged Snakemake workflow, optionally selecting one stage.              │
+│ normalization  Infer, correct, and apply per-track signal normalisation factors.                 │
+│ tracks         Discover, QC, and assemble tracks.parquet before the dataset build.               │
+│ attribute      Score attribution profiles and/or call cores from in-silico mutagenesis.          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 

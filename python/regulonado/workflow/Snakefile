@@ -57,7 +57,6 @@ def _require_unique_names(items, section):
 
 RESULTS = Path(config["results_dir"])
 DATASET_DIR = RESULTS / "dataset"
-RAW_DATASET_DIR = RESULTS / "dataset_raw"
 TRAIN_DIR = RESULTS / "train"
 
 TRAIN = config.get("train")

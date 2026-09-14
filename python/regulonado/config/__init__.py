@@ -4,7 +4,6 @@ from regulonado.config.genomes import GenomeEntry, genome_config_path, load_geno
 from regulonado.config.models import (
     DatasetConfig,
     InputsConfig,
-    RecompressConfig,
     RegulonadoConfig,
     ScalingConfig,
     SeqNadoProjectRef,
@@ -17,7 +16,6 @@ __all__ = [
     "DatasetConfig",
     "GenomeEntry",
     "InputsConfig",
-    "RecompressConfig",
     "RegulonadoConfig",
     "ScalingConfig",
     "SeqNadoProjectRef",

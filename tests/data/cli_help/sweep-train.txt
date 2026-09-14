@@ -1,0 +1,12 @@
+                                                                                                    
+ Usage: root sweep-train [OPTIONS] CONFIG_FILE                                                      
+                                                                                                    
+ Bridge one W&B trial into Hydra's normal training configuration.                                   
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    config_file      PATH  W&B-generated JSON file containing one sweep trial [required]        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --help          Show this message and exit.                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

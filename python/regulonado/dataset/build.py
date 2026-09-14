@@ -1,28 +1,37 @@
-"""HuggingFace Arrow dataset builder for sequence-to-function model training.
+"""HuggingFace-native Parquet dataset builder for sequence-to-function model training.
 
 Builds datasets directly from BED + FASTA + BigWig with no intermediate format.
-Sequences stored as int8 one-hot (4, L), signals as float32 raw coverage (T, B).
+Sequences are stored as uint8 tokens (A0 C1 G2 T3, 4=N/pad), one-hot encoded on
+the GPU at train time; signals are stored as float32 raw coverage (T, B).
 
 Stochastic shift augmentation is supported by storing slightly wider arrays
 (``shift_max_bp`` extra context on each side) and cropping at read time.
 Transforms (scale / squash / clip / RC augmentation / shift crop) are all
-applied via a transform function returned by ``make_transform`` and attached
-to the HF dataset with ``dataset.set_transform(fn)``.
+applied via a transform function returned by ``make_transform``, used by
+``WindowParquetDataset`` (see ``regulonado.training.data``).
+
+The output is a Hugging Face Hub-layout Parquet dataset: a ``README.md``
+dataset card (written last, as the completion sentinel), ``tracks.parquet``,
+and one ``data/`` directory holding every split's Parquet shards
+(``data/{split}-NNNNN-of-MMMMM.parquet``). Anyone can ``load_dataset(path)``
+or ``load_dataset(path, streaming=True)`` against it, or upload the directory
+to the Hub as is; training reads Parquet row groups directly with pyarrow
+instead.
 
 Example::
 
-    from regulonado.dataset import build_dataset, make_transform
+    from regulonado.dataset import build_dataset
 
     build_dataset(
-        "intervals.bed", "genome.fa", ["plus.bw", "minus.bw"],
-        output_dir="dataset/hf-v1",
+        "intervals.bed", "genome.fa", "tracks.parquet",
+        output_dir="dataset/v1",
         splits={"train": ["train"], "validation": ["valid"]},
         shift_max_bp=128,
         n_extract_threads=16,
     )
 
-    ds = datasets.load_from_disk("dataset/hf-v1")
-    ds["train"].set_transform(make_transform(scale_factors, clip_soft, clip_hard))
+    from datasets import load_dataset
+    ds = load_dataset("dataset/v1", streaming=True)
 """
 
 from __future__ import annotations
@@ -55,20 +64,20 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CONTEXT = 524_288
 _DEFAULT_PRED_BINS = 6_144
 _DEFAULT_BIN_SIZE = 32
-_DEFAULT_ARROW_BATCH_SIZE = 8
-_DEFAULT_ARROW_COMPRESSION = "lz4"
+_DEFAULT_ZSTD_LEVEL = 3
+_DEFAULT_ROWS_PER_ROW_GROUP = 1
 
-# Target on-disk size per Arrow shard file. The in_memory writer groups whole
-# record batches into shard files to hit roughly this size, decoupling the
-# shard count from the (RAM-bounded) record-batch size. ~256 MB keeps shard
-# counts in the low hundreds while staying comfortably under the ~500 MB the
+# Target on-disk size per Parquet shard file. Chosen to keep shard counts in
+# the low hundreds while staying comfortably under the ~500 MB the
 # HuggingFace/Arrow ecosystem recommends per shard.
 _DEFAULT_SHARD_TARGET_MB = 256
-# Rough on-disk compression ratio (compressed / uncompressed) per IPC codec,
-# used only to size shards. One-hot sequence compresses very well; float32
-# labels much less, so these are deliberately conservative (over-estimate the
-# compressed size, i.e. under-fill shards rather than overshoot the target).
-_SHARD_COMPRESSION_RATIO = {"zstd": 0.5, "lz4": 0.65, "none": 1.0}
+# Rough on-disk compression ratio (compressed / uncompressed) for zstd level 3
+# with dictionary encoding on, used only to size shards. Measured on a real
+# train shard:
+# ~0.41 MB compressed vs ~3.5 MB decoded per example, i.e. ratio ~0.12. 0.15 is
+# used here to stay conservative (over-estimate the compressed size, i.e.
+# under-fill shards rather than overshoot the target).
+_PARQUET_COMPRESSION_RATIO = 0.15
 
 
 def _recommend_shard_size(
@@ -76,30 +85,22 @@ def _recommend_shard_size(
     n_tracks: int,
     stored_n_bins: int,
     stored_context: int,
-    compression: str,
     target_mb: int,
-    batch_size: int,
 ) -> int:
     """Samples per shard file to hit ~``target_mb`` on disk.
 
-    Estimates the per-sample on-disk footprint from the schema (float32 labels +
-    int8 one-hot sequence + small per-row overhead) and divides the target byte
-    budget by it. The result is rounded up to a whole number of record batches
-    so every shard is a clean sequence of ``batch_size`` batches, and clamped to
-    at least one batch.
+    Estimates the per-sample on-disk footprint from the schema (float32 labels
+    + uint8 sequence tokens + small per-row overhead) and divides the target
+    byte budget by it. Clamped to at least one sample per shard.
     """
     label_bytes = n_tracks * stored_n_bins * 4
-    seq_bytes = 4 * stored_context  # int8 one-hot, 4 channels
-    row_overhead = 128  # interval string + index/local_index + Arrow framing
+    seq_bytes = stored_context  # uint8 tokens, 1 byte/base
+    row_overhead = 128  # interval string + index/local_index + Parquet framing
     per_sample_uncompressed = label_bytes + seq_bytes + row_overhead
-    ratio = _SHARD_COMPRESSION_RATIO.get(compression.lower(), 0.65)
-    per_sample_on_disk = max(1, int(per_sample_uncompressed * ratio))
+    per_sample_on_disk = max(1, int(per_sample_uncompressed * _PARQUET_COMPRESSION_RATIO))
 
     target_bytes = max(1, target_mb) * 1_000_000
-    est_samples = max(1, target_bytes // per_sample_on_disk)
-    # Round up to a whole number of record batches, but never below one batch.
-    n_batches = max(1, -(-est_samples // batch_size))
-    return n_batches * batch_size
+    return max(1, target_bytes // per_sample_on_disk)
 
 
 def _regulonado_version() -> str:
@@ -193,46 +194,6 @@ def _same_filesystem(a: Path, b: Path) -> bool:
         return _existing_dev(a) == _existing_dev(b)
     except OSError:
         return False
-
-
-def _publish_tree(src: Path, dest: Path) -> None:
-    """Publish a freshly built directory tree from scratch to its final location.
-
-    Replaces an earlier ``rsync -a --delete``-based implementation: rsync is
-    not guaranteed to be present in minimal containers (it is absent from
-    ``python:3.12-slim`` and most Apptainer base images), and its absence used
-    to surface only at the very end of a multi-hour build, after all compute
-    was done and before anything was published.
-
-    Same filesystem as ``dest``: ``src`` is swapped into place with
-    :func:`os.replace` — no bytes are copied. Cross filesystem: ``src`` is
-    first copied into a temporary sibling of ``dest`` (so the final swap is
-    still a same-filesystem :func:`os.replace`), then swapped in the same way.
-
-    Either way the result is *exactly* ``src``'s contents — anything that was
-    only present in a previous ``dest`` is discarded, matching the
-    ``rsync --delete`` semantics this replaces.
-    """
-    src = Path(src)
-    dest = Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-
-    if _same_filesystem(src, dest.parent):
-        staged = src
-    else:
-        staged = dest.with_name(dest.name + ".staging")
-        if staged.exists():
-            shutil.rmtree(staged)
-        shutil.copytree(src, staged, dirs_exist_ok=True)
-
-    old = dest.with_name(dest.name + ".old")
-    if old.exists():
-        shutil.rmtree(old)
-    if dest.exists():
-        os.replace(dest, old)
-    os.replace(staged, dest)
-    if old.exists():
-        shutil.rmtree(old)
 
 
 def _stage_files(
@@ -393,31 +354,46 @@ def _is_remote_fs(path: Path) -> bool:
     return best_is_network
 
 
-def _write_hf_split_metadata(
-    split_dir: Path,
+def _write_dataset_card(
+    output_dir: Path,
     *,
     features: Features,
-    arrow_filenames: list[str],
+    split_counts: dict[str, int],
 ) -> None:
-    split_dir.mkdir(parents=True, exist_ok=True)
-    info = {
-        "citation": "",
-        "description": "",
-        "features": features.to_dict(),
-        "homepage": "",
-        "license": "",
-    }
-    state = {
-        "_data_files": [{"filename": f} for f in arrow_filenames],
-        "_fingerprint": "regulonado-rust-arrow",
-        "_format_columns": None,
-        "_format_kwargs": {},
-        "_format_type": None,
-        "_output_all_columns": False,
-        "_split": None,
-    }
-    (split_dir / "dataset_info.json").write_text(json.dumps(info, indent=2))
-    (split_dir / "state.json").write_text(json.dumps(state, indent=2))
+    """Write ``README.md``, the dataset card that makes ``output_dir`` HF-loadable.
+
+    Uses the same ``DatasetInfosDict``/``MetadataConfigs`` card-building helpers
+    ``datasets`` itself uses in ``push_to_hub``, so the emitted YAML front
+    matter is exactly what ``load_dataset_builder(output_dir).info.splits`` and
+    streaming's ``info.splits`` expect.
+
+    Written *last*, after every split's Parquet shards are published: its
+    presence is the build's completion sentinel, so a directory with
+    ``data/*.parquet`` but no ``README.md`` means an interrupted build.
+    """
+    from datasets.info import DatasetInfo, DatasetInfosDict  # noqa: PLC0415
+    from datasets.splits import SplitDict, SplitInfo  # noqa: PLC0415
+    from datasets.utils.metadata import MetadataConfigs  # noqa: PLC0415
+    from huggingface_hub import DatasetCard, DatasetCardData  # noqa: PLC0415
+
+    splits = SplitDict()
+    for split, num_examples in split_counts.items():
+        splits.add(SplitInfo(name=split, num_examples=num_examples))
+    info = DatasetInfo(features=features, splits=splits)
+
+    card_data = DatasetCardData()
+    DatasetInfosDict({"default": info}).to_dataset_card_data(card_data)
+    MetadataConfigs(
+        {
+            "default": {
+                "data_files": [
+                    {"split": split, "path": f"data/{split}-*"} for split in split_counts
+                ]
+            }
+        }
+    ).to_dataset_card_data(card_data)
+    card = DatasetCard(f"---\n{card_data}\n---\n")
+    card.save(output_dir / "README.md")
 
 
 _STRATEGIES = frozenset({"in_memory", "streaming"})
@@ -445,11 +421,10 @@ class _Geometry:
 
 @dataclass(frozen=True)
 class _WriterSettings:
-    """Arrow writer knobs after i32-overflow capping and shard sizing."""
+    """Parquet writer knobs after shard sizing."""
 
-    effective_arrow_batch: int
     effective_shard_size: int
-    effective_arrow_write_threads: int
+    effective_write_threads: int
 
 
 @dataclass(frozen=True)
@@ -471,9 +446,10 @@ class BuildPlan:
     scratch_out: Path
     split_indices: dict[str, list[int]]
     splits_to_build: list[str]
-    effective_arrow_batch: int
     effective_shard_size: int
-    effective_arrow_write_threads: int
+    effective_write_threads: int
+    zstd_level: int
+    rows_per_row_group: int
     edge_dropped_indices: tuple[int, ...]
     edge_dropped_examples: tuple[str, ...]
 
@@ -579,17 +555,21 @@ def _log_ram_estimate(
     n_tracks: int,
     bin_size: int,
     geometry: _Geometry,
-    effective_arrow_batch: int,
-    effective_arrow_write_threads: int,
+    effective_write_threads: int,
     n_extract_threads: int,
     active_fasta: str,
     bed_rows: list[tuple[str, int, int, str]],
 ) -> None:
-    """Log an approximate peak-RAM estimate for the chosen batch/thread settings."""
+    """Log an approximate peak-RAM estimate for the chosen thread settings.
+
+    The Parquet writer holds at most one example per writer thread at a time
+    (rows are appended one at a time; see chromosome_scan_writer.rs), so
+    writer RAM scales with ``effective_write_threads``, not a batch size.
+    """
     stored_context, stored_n_bins = geometry.stored_context, geometry.stored_n_bins
-    label_batch_gb = effective_arrow_batch * n_tracks * stored_n_bins * 4 / 1e9
-    seq_batch_gb = effective_arrow_batch * 4 * stored_context / 1e9
-    in_memory_writer_peak_gb = effective_arrow_write_threads * (label_batch_gb + seq_batch_gb)
+    label_example_gb = n_tracks * stored_n_bins * 4 / 1e9
+    seq_example_gb = stored_context / 1e9  # uint8 tokens, 1 byte/base
+    writer_peak_gb = effective_write_threads * (label_example_gb + seq_example_gb)
 
     chrom_lengths: dict[str, int] = {}
     fai_path = Path(str(active_fasta) + ".fai")
@@ -608,91 +588,67 @@ def _log_ram_estimate(
     else:
         chrom_matrix_gb = 0.0
         binning_scratch_gb = 0.0
-    in_memory_peak_gb = chrom_matrix_gb + binning_scratch_gb + in_memory_writer_peak_gb
+    in_memory_peak_gb = chrom_matrix_gb + binning_scratch_gb + writer_peak_gb
     logger.info(
-        f"Approx per-batch RAM: labels={label_batch_gb:.1f} GB, "
-        f"direct-extract peak≈{2 * label_batch_gb + seq_batch_gb:.1f} GB, "
+        f"Approx per-example RAM: labels={label_example_gb * 1000:.2f} MB, "
         f"in-memory matrix≈{chrom_matrix_gb:.1f} GB, "
         f"binning scratch≈{binning_scratch_gb:.1f} GB, "
-        f"writer peak≈{in_memory_writer_peak_gb:.1f} GB, "
+        f"writer peak≈{writer_peak_gb * 1000:.1f} MB, "
         f"combined in-memory peak≈{in_memory_peak_gb:.1f} GB "
-        f"(batch_size={effective_arrow_batch}, n_extract_threads={n_extract_threads}, "
-        f"arrow_write_threads={effective_arrow_write_threads})"
+        f"(n_extract_threads={n_extract_threads}, write_threads={effective_write_threads})"
     )
 
 
-def _plan_arrow_writer_settings(
+def _plan_writer_settings(
     *,
     n_tracks: int,
     bin_size: int,
     geometry: _Geometry,
-    arrow_batch_size: int,
     shard_size: int | None,
     shard_target_mb: int,
-    arrow_compression: str,
-    arrow_write_threads: int | None,
+    write_threads: int | None,
     n_extract_threads: int,
     active_fasta: str,
     bed_rows: list[tuple[str, int, int, str]],
 ) -> _WriterSettings:
-    """Cap batch size for the Arrow i32 offset limit, size shards, log a RAM estimate."""
+    """Size shards and writer thread count, and log a RAM estimate."""
     stored_context, stored_n_bins = geometry.stored_context, geometry.stored_n_bins
 
-    # Arrow ListArray uses i32 offsets; batch * n_tracks * n_bins must fit.
-    i32_max = 2_147_483_647
-    max_safe_batch = max(1, i32_max // max(1, n_tracks * stored_n_bins))
-    effective_arrow_batch = max(1, min(arrow_batch_size, max_safe_batch))
-    if effective_arrow_batch < arrow_batch_size:
-        logger.warning(
-            f"Capping arrow_batch_size from {arrow_batch_size} to {effective_arrow_batch} "
-            f"to avoid Arrow i32 offset overflow ({n_tracks} tracks × {stored_n_bins} bins)"
-        )
-
-    # Shard files group whole record batches up to a target on-disk size. An
-    # explicit shard_size wins; otherwise derive it from shard_target_mb.
+    # An explicit shard_size wins; otherwise derive it from shard_target_mb.
     if shard_size is not None:
-        effective_shard_size = max(effective_arrow_batch, shard_size)
+        effective_shard_size = max(1, shard_size)
     else:
         effective_shard_size = _recommend_shard_size(
             n_tracks=n_tracks,
             stored_n_bins=stored_n_bins,
             stored_context=stored_context,
-            compression=arrow_compression,
             target_mb=shard_target_mb,
-            batch_size=effective_arrow_batch,
         )
     logger.info(
-        f"Shard sizing: {effective_shard_size} samples/shard "
-        f"({effective_shard_size // effective_arrow_batch} record batch(es) of "
-        f"{effective_arrow_batch}), target≈{shard_target_mb} MB on disk, "
-        f"compression={arrow_compression}"
+        f"Shard sizing: {effective_shard_size} samples/shard, "
+        f"target≈{shard_target_mb} MB on disk (zstd)"
     )
 
-    effective_arrow_write_threads = (
-        4 if arrow_write_threads is None else max(1, arrow_write_threads)
-    )
+    effective_write_threads = 4 if write_threads is None else max(1, write_threads)
     _log_ram_estimate(
         n_tracks=n_tracks,
         bin_size=bin_size,
         geometry=geometry,
-        effective_arrow_batch=effective_arrow_batch,
-        effective_arrow_write_threads=effective_arrow_write_threads,
+        effective_write_threads=effective_write_threads,
         n_extract_threads=n_extract_threads,
         active_fasta=active_fasta,
         bed_rows=bed_rows,
     )
-    return _WriterSettings(
-        effective_arrow_batch, effective_shard_size, effective_arrow_write_threads
-    )
+    return _WriterSettings(effective_shard_size, effective_write_threads)
 
 
 def _build_features(n_tracks: int, geometry: _Geometry) -> Features:
-    from datasets import Array2D, Features, Value  # noqa: PLC0415
+    from datasets import Features, List, Value  # noqa: PLC0415
 
     return Features(
         {
-            "input_ids": Array2D(dtype="int8", shape=(4, geometry.stored_context)),
-            "labels": Array2D(dtype="float32", shape=(n_tracks, geometry.stored_n_bins)),
+            "sequence_tokens": List(Value("uint8"), length=geometry.stored_context),
+            "signal": List(List(Value("float32"), length=geometry.stored_n_bins), length=n_tracks),
             "interval": Value(dtype="string"),
             "index": Value(dtype="int64"),
             "local_index": Value(dtype="int64"),
@@ -716,12 +672,12 @@ def _compute_split_indices(
     """
     n_all_samples = len(bed_rows)
     chrom_filter_set = set(chrom_filter) if chrom_filter else None
+    data_dir = output_dir / "data"
 
     split_indices: dict[str, list[int]] = {}
     splits_to_build: list[str] = []
     for split, folds in splits.items():
-        split_out = output_dir / split
-        if not overwrite and (split_out / "dataset_info.json").exists():
+        if not overwrite and any(data_dir.glob(f"{split}-*.parquet")):
             continue
         if folds:
             folds_set = set(folds)
@@ -756,11 +712,11 @@ def _plan_build(
     stage_to_scratch: bool,
     overwrite: bool,
     chrom_filter: list[str] | None,
-    arrow_batch_size: int,
     shard_size: int | None,
     shard_target_mb: int,
-    arrow_compression: str,
-    arrow_write_threads: int | None,
+    zstd_level: int,
+    rows_per_row_group: int,
+    write_threads: int | None,
     n_extract_threads: int,
 ) -> BuildPlan:
     """Resolve every path, shape and row index the writer/publish steps need."""
@@ -798,15 +754,13 @@ def _plan_build(
     )
     _log_remote_fs_warnings(scratch_out, output_dir)
 
-    writer = _plan_arrow_writer_settings(
+    writer = _plan_writer_settings(
         n_tracks=n_tracks,
         bin_size=bin_size,
         geometry=geometry,
-        arrow_batch_size=arrow_batch_size,
         shard_size=shard_size,
         shard_target_mb=shard_target_mb,
-        arrow_compression=arrow_compression,
-        arrow_write_threads=arrow_write_threads,
+        write_threads=write_threads,
         n_extract_threads=n_extract_threads,
         active_fasta=active_fasta,
         bed_rows=bed_rows,
@@ -833,31 +787,20 @@ def _plan_build(
         scratch_out=scratch_out,
         split_indices=split_indices,
         splits_to_build=splits_to_build,
-        effective_arrow_batch=writer.effective_arrow_batch,
         effective_shard_size=writer.effective_shard_size,
-        effective_arrow_write_threads=writer.effective_arrow_write_threads,
+        effective_write_threads=writer.effective_write_threads,
+        zstd_level=zstd_level,
+        rows_per_row_group=rows_per_row_group,
         edge_dropped_indices=tuple(edge_dropped),
         edge_dropped_examples=edge_dropped_examples,
     )
 
 
-def _load_existing_splits(
-    output_dir: Path, splits: dict[str, list[str]], return_dataset: bool
-) -> object | None:
-    from datasets import Dataset, DatasetDict  # noqa: PLC0415
-
-    if not return_dataset:
-        logger.info("All splits already exist; skipping load because return_dataset=False")
-        return None
-    logger.info("All splits already exist; loading from disk")
-    return DatasetDict({split: Dataset.load_from_disk(str(output_dir / split)) for split in splits})
-
-
 # ---------------------------------------------------------------------------
-# Strategy runners — extract from BigWig/FASTA and write Arrow shards to
-# scratch. Both accept a BuildPlan and iterate every *requested* split (not
-# just ``splits_to_build``) so an already-built split can still be loaded
-# into the returned dict when ``return_dataset`` is set.
+# Strategy runners — extract from BigWig/FASTA and write Parquet shards to
+# scratch. Both accept a BuildPlan and iterate only ``splits_to_build``,
+# writing into one shared ``scratch_out / "data"`` directory (all splits'
+# shards side by side, matching the published HF-Hub layout).
 # ---------------------------------------------------------------------------
 
 
@@ -865,147 +808,107 @@ def _run_in_memory_strategy(
     plan: BuildPlan,
     *,
     n_extract_threads: int,
-    arrow_compression: str,
     profile: bool,
-    return_dataset: bool,
-) -> dict[str, object]:
+) -> dict[str, int]:
     """Shared chromosome-pass strategy: one scan per chromosome, shared by all splits."""
-    from datasets import Dataset  # noqa: PLC0415
-
     from regulonado._rs import (
-        write_arrow_splits_chrom_pass,  # type: ignore[import]  # noqa: PLC0415
+        write_parquet_splits_chrom_pass,  # type: ignore[import]  # noqa: PLC0415
     )
 
-    split_datasets: dict[str, object] = {}
-    chrom_split_names: list[str] = []
-    chrom_split_out_dirs: list[str] = []
-    chrom_split_indices: list[list[int]] = []
-    for split in plan.splits:
-        split_out = plan.output_dir / split
-        if split not in plan.split_indices:
-            if (split_out / "dataset_info.json").exists():
-                logger.info(f"Split '{split}' exists; skipping rebuild")
-                if return_dataset:
-                    split_datasets[split] = Dataset.load_from_disk(str(split_out))
-            continue
+    if not plan.splits_to_build:
+        return {}
 
-        sample_indices = plan.split_indices[split]
-        logger.info(
-            f"Queueing '{split}' shard(s) [in_memory shared-scan]: "
-            f"{len(sample_indices)} samples, {plan.n_tracks} tracks, "
-            f"stored_context={plan.geometry.stored_context} bp, "
-            f"stored_n_bins={plan.geometry.stored_n_bins}, "
-            f"batch_size={plan.effective_arrow_batch}, compression={arrow_compression}, "
-            f"arrow_write_threads={plan.effective_arrow_write_threads}"
-        )
-        split_scratch = plan.scratch_out / split
-        if split_scratch.exists():
-            shutil.rmtree(split_scratch)
-        split_scratch.mkdir(parents=True, exist_ok=True)
-        chrom_split_names.append(split)
-        chrom_split_out_dirs.append(str(split_scratch))
-        chrom_split_indices.append(sample_indices)
+    scratch_data = plan.scratch_out / "data"
+    scratch_data.mkdir(parents=True, exist_ok=True)
 
-    if chrom_split_names:
-        write_arrow_splits_chrom_pass(
-            plan.active_bw_paths,
-            plan.minus_flags,
-            plan.signal_regions,
-            chrom_split_names,
-            chrom_split_out_dirs,
-            chrom_split_indices,
-            plan.bed_rows,
-            plan.active_fasta,
-            plan.geometry.stored_n_bins,
-            plan.geometry.stored_context,
-            plan.bin_size,
-            batch_size=plan.effective_arrow_batch,
-            shard_size=plan.effective_shard_size,
-            n_threads=n_extract_threads,
-            arrow_write_threads=plan.effective_arrow_write_threads,
-            compression=arrow_compression,
-            profile=profile,
-        )
+    split_names = list(plan.splits_to_build)
+    split_sample_indices = [plan.split_indices[split] for split in split_names]
+    logger.info(
+        f"Queueing {split_names} shard(s) [in_memory shared-scan]: "
+        f"{plan.n_tracks} tracks, stored_context={plan.geometry.stored_context} bp, "
+        f"stored_n_bins={plan.geometry.stored_n_bins}, "
+        f"shard_size={plan.effective_shard_size}, zstd_level={plan.zstd_level}, "
+        f"rows_per_row_group={plan.rows_per_row_group}, "
+        f"write_threads={plan.effective_write_threads}"
+    )
 
-    for split, split_scratch_str in zip(chrom_split_names, chrom_split_out_dirs, strict=True):
-        split_scratch = Path(split_scratch_str)
-        arrow_filenames = sorted(p.name for p in split_scratch.glob("data-*-of-*.arrow"))
-        if not arrow_filenames:
+    row_counts = write_parquet_splits_chrom_pass(
+        plan.active_bw_paths,
+        plan.minus_flags,
+        plan.signal_regions,
+        split_names,
+        str(scratch_data),
+        split_sample_indices,
+        plan.bed_rows,
+        plan.active_fasta,
+        plan.geometry.stored_n_bins,
+        plan.geometry.stored_context,
+        plan.bin_size,
+        json.dumps(plan.features.to_dict()),
+        shard_size=plan.effective_shard_size,
+        rows_per_row_group=plan.rows_per_row_group,
+        zstd_level=plan.zstd_level,
+        n_threads=n_extract_threads,
+        write_threads=plan.effective_write_threads,
+        profile=profile,
+    )
+
+    for split in split_names:
+        n_files = len(list(scratch_data.glob(f"{split}-*-of-*.parquet")))
+        if n_files == 0:
             raise RuntimeError(
-                f"in_memory produced no shards in {split_scratch}; "
+                f"in_memory produced no shards for split '{split}' in {scratch_data}; "
                 f"check that the FASTA contains the BED chromosomes"
             )
-        logger.info(f"Arrow shard(s) for '{split}' written ({len(arrow_filenames)} file(s))")
-        _write_hf_split_metadata(
-            split_scratch, features=plan.features, arrow_filenames=arrow_filenames
-        )
-        if return_dataset:
-            split_datasets[split] = Dataset.load_from_disk(str(split_scratch))
-    return split_datasets
+        logger.info(f"Parquet shard(s) for '{split}' written ({n_files} file(s))")
+    return row_counts
 
 
 def _run_streaming_strategy(
     plan: BuildPlan,
     *,
     n_extract_threads: int,
-    arrow_compression: str,
-    return_dataset: bool,
-) -> dict[str, object]:
+) -> dict[str, int]:
     """Per-split direct-BigWig strategy: bounded memory, random seeks."""
-    from datasets import Dataset  # noqa: PLC0415
-
     from regulonado._rs import (
-        write_arrow_split_from_bigwigs,  # type: ignore[import]  # noqa: PLC0415
+        write_parquet_split_from_bigwigs,  # type: ignore[import]  # noqa: PLC0415
     )
 
-    split_datasets: dict[str, object] = {}
-    for split in plan.splits:
-        split_out = plan.output_dir / split
-        if split not in plan.split_indices:
-            if (split_out / "dataset_info.json").exists():
-                logger.info(f"Split '{split}' exists; skipping rebuild")
-                if return_dataset:
-                    split_datasets[split] = Dataset.load_from_disk(str(split_out))
-            continue
+    scratch_data = plan.scratch_out / "data"
+    scratch_data.mkdir(parents=True, exist_ok=True)
+    hf_features_json = json.dumps(plan.features.to_dict())
 
+    row_counts: dict[str, int] = {}
+    for split in plan.splits_to_build:
         sample_indices = plan.split_indices[split]
         logger.info(
-            f"Writing '{split}' shard(s) [streaming]: {len(sample_indices)} samples, "
+            f"Writing '{split}' shard [streaming]: {len(sample_indices)} samples, "
             f"{plan.n_tracks} tracks, stored_context={plan.geometry.stored_context} bp, "
-            f"stored_n_bins={plan.geometry.stored_n_bins}, "
-            f"batch_size={plan.effective_arrow_batch}, compression={arrow_compression}"
+            f"stored_n_bins={plan.geometry.stored_n_bins}, zstd_level={plan.zstd_level}"
         )
-        split_scratch = plan.scratch_out / split
-        if split_scratch.exists():
-            shutil.rmtree(split_scratch)
-        split_scratch.mkdir(parents=True, exist_ok=True)
-
-        t_split_arrow = time.perf_counter()
-        arrow_filenames = ["data-00000-of-00001.arrow"]
-        write_arrow_split_from_bigwigs(
+        t_split = time.perf_counter()
+        shard_path = scratch_data / f"{split}-00000-of-00001.parquet"
+        n_rows = write_parquet_split_from_bigwigs(
             plan.active_bw_paths,
             plan.minus_flags,
             plan.signal_regions,
-            str(split_scratch / arrow_filenames[0]),
+            str(shard_path),
             sample_indices,
             plan.bed_rows,
             plan.active_fasta,
             plan.geometry.stored_n_bins,
             plan.geometry.stored_context,
-            batch_size=plan.effective_arrow_batch,
+            hf_features_json,
+            rows_per_row_group=plan.rows_per_row_group,
+            zstd_level=plan.zstd_level,
             n_threads=n_extract_threads,
-            compression=arrow_compression,
         )
         logger.info(
-            f"Arrow shard(s) for '{split}' written in "
-            f"{time.perf_counter() - t_split_arrow:.1f}s ({len(arrow_filenames)} file(s))"
+            f"Parquet shard for '{split}' written in "
+            f"{time.perf_counter() - t_split:.1f}s ({n_rows} rows)"
         )
-        _write_hf_split_metadata(
-            split_scratch, features=plan.features, arrow_filenames=arrow_filenames
-        )
-        if return_dataset:
-            split_datasets[split] = Dataset.load_from_disk(str(split_scratch))
-    return split_datasets
+        row_counts[split] = n_rows
+    return row_counts
 
 
 def _run_strategy(
@@ -1013,40 +916,65 @@ def _run_strategy(
     *,
     strategy: str,
     n_extract_threads: int,
-    arrow_compression: str,
     profile: bool,
-    return_dataset: bool,
-) -> dict[str, object]:
-    t_arrow_total = time.perf_counter()
+) -> dict[str, int]:
+    t_total = time.perf_counter()
     if strategy == "in_memory":
-        split_datasets = _run_in_memory_strategy(
-            plan,
-            n_extract_threads=n_extract_threads,
-            arrow_compression=arrow_compression,
-            profile=profile,
-            return_dataset=return_dataset,
+        row_counts = _run_in_memory_strategy(
+            plan, n_extract_threads=n_extract_threads, profile=profile
         )
     else:
-        split_datasets = _run_streaming_strategy(
-            plan,
-            n_extract_threads=n_extract_threads,
-            arrow_compression=arrow_compression,
-            return_dataset=return_dataset,
-        )
-    logger.info(f"Arrow writing completed in {time.perf_counter() - t_arrow_total:.1f}s")
-    return split_datasets
+        row_counts = _run_streaming_strategy(plan, n_extract_threads=n_extract_threads)
+    logger.info(f"Parquet writing completed in {time.perf_counter() - t_total:.1f}s")
+    return row_counts
+
+
+def _publish_split_shards(scratch_data: Path, data_dir: Path, split: str) -> None:
+    """Publish one split's freshly written shard files into the dataset's data dir.
+
+    One ``data/`` directory now holds every split's shards side by side, so
+    publishing can no longer swap a whole per-split directory into place (that
+    would delete other splits' files). Instead, only ``split``'s
+    ``{split}-*.parquet`` files are touched: any of the split's stale shards
+    already in ``data_dir`` (e.g. left over from a previous build with a
+    different shard count) are removed, and the freshly written ones are moved
+    in — same-filesystem via `os.replace` (atomic, no bytes copied),
+    cross-filesystem via copy-then-delete.
+    """
+    data_dir.mkdir(parents=True, exist_ok=True)
+    for stale in data_dir.glob(f"{split}-*.parquet"):
+        stale.unlink()
+    new_shards = sorted(scratch_data.glob(f"{split}-*.parquet"))
+    if not new_shards:
+        raise RuntimeError(f"no Parquet shards produced for split {split!r} in {scratch_data}")
+    same_fs = _same_filesystem(scratch_data, data_dir)
+    for shard in new_shards:
+        dest = data_dir / shard.name
+        if same_fs:
+            os.replace(shard, dest)
+        else:
+            shutil.copyfile(shard, dest)
+            shard.unlink()
 
 
 def _publish_splits(plan: BuildPlan) -> None:
     logger.info(f"Publishing rebuilt splits to {plan.output_dir}")
     t_publish = time.perf_counter()
-    plan.output_dir.mkdir(parents=True, exist_ok=True)
+    scratch_data = plan.scratch_out / "data"
+    data_dir = plan.output_dir / "data"
     for split in plan.splits_to_build:
-        _publish_tree(plan.scratch_out / split, plan.output_dir / split)
-    (plan.output_dir / "dataset_dict.json").write_text(
-        json.dumps({"splits": list(plan.splits)}, indent=2)
-    )
+        _publish_split_shards(scratch_data, data_dir, split)
     logger.info(f"Publication completed in {time.perf_counter() - t_publish:.1f}s")
+
+
+def _split_row_count(data_dir: Path, split: str) -> int:
+    """Sum ``num_rows`` across an existing split's Parquet shard footers."""
+    import pyarrow.parquet as pq  # noqa: PLC0415
+
+    return sum(
+        pq.ParquetFile(shard).metadata.num_rows
+        for shard in sorted(data_dir.glob(f"{split}-*.parquet"))
+    )
 
 
 def _write_output_track_table(
@@ -1074,7 +1002,9 @@ def _write_output_track_table(
         shift_max_bp=shift_max_bp,
         splits=plan.splits,
         build_strategy=strategy,
-        arrow_write_threads=plan.effective_arrow_write_threads,
+        write_threads=plan.effective_write_threads,
+        zstd_level=plan.zstd_level,
+        rows_per_row_group=plan.rows_per_row_group,
         created_at=datetime.now(timezone.utc).isoformat(),
         regulonado_version=_regulonado_version(),
         command=" ".join(sys.argv),
@@ -1095,23 +1025,27 @@ def build_dataset(
     n_pred_bins: int = _DEFAULT_PRED_BINS,
     shift_max_bp: int = 0,
     n_extract_threads: int = 32,
-    arrow_batch_size: int = _DEFAULT_ARROW_BATCH_SIZE,
     shard_size: int | None = None,
     shard_target_mb: int = _DEFAULT_SHARD_TARGET_MB,
-    arrow_compression: str = _DEFAULT_ARROW_COMPRESSION,
-    arrow_write_threads: int | None = None,
+    zstd_level: int = _DEFAULT_ZSTD_LEVEL,
+    write_threads: int | None = None,
+    rows_per_row_group: int = _DEFAULT_ROWS_PER_ROW_GROUP,
     stage_to_scratch: bool = False,
     overwrite: bool = False,
     profile: bool = False,
     strategy: str = "in_memory",
     chrom_filter: list[str] | None = None,
-    return_dataset: bool = True,
-) -> object | None:
+) -> None:
     """Fast low-scratch dataset build using the Rust extension.
 
-    Each split is written directly from BigWig + FASTA sources into compressed
-    Arrow shards. Peak scratch is the current Arrow output plus one in-memory
-    record batch, not a full dense `(tracks, samples, bins)` signal file.
+    Writes a Hugging Face Hub-layout Parquet dataset: ``output_dir/README.md``
+    (the dataset card, written last as the completion sentinel),
+    ``output_dir/tracks.parquet``, and ``output_dir/data/`` holding every
+    split's Parquet shards (``data/{split}-NNNNN-of-MMMMM.parquet``). Load it
+    with ``datasets.load_dataset(output_dir)`` or
+    ``load_dataset(output_dir, streaming=True)``. Peak scratch is the current
+    Parquet output plus one in-memory example per writer thread, not a full
+    dense ``(tracks, samples, bins)`` signal file.
 
     Track identity, dedupe and QC are already settled by the time this runs —
     ``track_table`` is ``tracks.parquet`` from ``regulonado tracks assemble``,
@@ -1129,20 +1063,16 @@ def build_dataset(
           yields ``ceil(samples / shard_size)`` shard files sized to
           ~``shard_target_mb`` on disk. Rows within each shard are in
           original BED order. Sequential reads, higher memory (the
-          per-batch RAM estimate logged below applies to this strategy);
+          per-example RAM estimate logged below applies to this strategy);
           ~10× fewer BigWig seeks than "streaming".
         - "streaming": reads each sample window's interval from every
-          BigWig per batch, split by split. Bounded memory, random seeks;
-          kept mainly as the parity reference for "in_memory".
+          BigWig, split by split. Bounded memory, random seeks; kept mainly
+          as the parity reference for "in_memory".
     chrom_filter : list[str] | None
         If given, restrict each split to BED rows on these chromosomes.
         ``bed_rows`` is *not* renumbered — the ``index`` column on every
         output row remains the absolute row position in the input BED
         file. Useful for smoke tests on a single chromosome.
-    return_dataset : bool
-        If False, skip reopening the saved DatasetDict from ``output_dir``.
-        This avoids an expensive post-build reload when the caller only
-        needs the on-disk dataset.
 
     Rows whose signal window would start before contig position 0 are
     dropped from every split (see ``_edge_unsafe_row_indices``) rather than
@@ -1168,27 +1098,23 @@ def build_dataset(
         stage_to_scratch=stage_to_scratch,
         overwrite=overwrite,
         chrom_filter=chrom_filter,
-        arrow_batch_size=arrow_batch_size,
         shard_size=shard_size,
         shard_target_mb=shard_target_mb,
-        arrow_compression=arrow_compression,
-        arrow_write_threads=arrow_write_threads,
+        zstd_level=zstd_level,
+        rows_per_row_group=rows_per_row_group,
+        write_threads=write_threads,
         n_extract_threads=n_extract_threads,
     )
 
-    if not plan.splits_to_build:
-        return _load_existing_splits(output_dir, plan.splits, return_dataset)
-
-    _run_strategy(
-        plan,
-        strategy=strategy,
-        n_extract_threads=n_extract_threads,
-        arrow_compression=arrow_compression,
-        profile=profile,
-        return_dataset=return_dataset,
-    )
-    _publish_splits(plan)
-    shutil.rmtree(plan.scratch_out)
+    if plan.splits_to_build:
+        row_counts = _run_strategy(
+            plan, strategy=strategy, n_extract_threads=n_extract_threads, profile=profile
+        )
+        _publish_splits(plan)
+    else:
+        logger.info("All splits already exist; skipping rebuild")
+        row_counts = {}
+    shutil.rmtree(plan.scratch_out, ignore_errors=True)
 
     _write_output_track_table(
         plan,
@@ -1200,15 +1126,14 @@ def build_dataset(
         strategy=strategy,
     )
 
-    logger.info(f"Dataset saved to {output_dir}")
-    if not return_dataset:
-        logger.info(
-            "Skipping final DatasetDict.load_from_disk(); caller can reopen output_dir if needed"
-        )
-        return None
-    from datasets import DatasetDict  # noqa: PLC0415
+    data_dir = output_dir / "data"
+    all_row_counts = {
+        split: row_counts.get(split, _split_row_count(data_dir, split)) for split in plan.splits
+    }
+    _write_dataset_card(output_dir, features=plan.features, split_counts=all_row_counts)
 
-    return DatasetDict.load_from_disk(str(output_dir))
+    logger.info(f"Dataset saved to {output_dir}")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1345,6 +1270,11 @@ def inverse_transform_signal(
     return out
 
 
+# Reverse-complement lookup for token bases: A0 C1 G2 T3, 4 = N/pad (maps to itself).
+# Applied to an already-reversed token array, so index i holds the complement of base i.
+_COMPLEMENT = np.array([3, 2, 1, 0, 4], dtype=np.uint8)
+
+
 def make_transform(
     scale_factors: np.ndarray,
     clip_soft: np.ndarray | float,
@@ -1362,14 +1292,18 @@ def make_transform(
     bin_size: int = _DEFAULT_BIN_SIZE,
     center_crop: bool = False,
 ) -> Callable[[dict], dict]:
-    """Return a transform compatible with ``dataset.set_transform()``.
+    """Return a per-example transform for ``WindowParquetDataset``.
 
-    Applied per batch:
+    Applied to one example, keyed by the stored Parquet columns
+    ``sequence_tokens`` (uint8, shape ``(stored_context,)``, A0 C1 G2 T3, 4=N/pad) and
+    ``signal`` (float32, shape ``(n_tracks, stored_n_bins)``):
         1. Shift crop: random offset when center_crop=False, center offset when center_crop=True.
            Always applied when shift_max_bins > 0.
         2. RC augmentation    (if enable_rc_aug)
         3. Signal transform   (scale → squash → clip)
-        4. Cast input_ids to float32
+
+    Writes ``input_ids`` (uint8 tokens; one-hot encoding happens on the GPU in
+    ``RegulonadoModel.forward``) and ``labels`` (float32) into the example.
 
     Args:
         scale_factors: Per-track scale factors, shape (T,).
@@ -1393,15 +1327,33 @@ def make_transform(
         else np.broadcast_to(np.asarray(background, dtype=np.float32), (n_tracks,)).copy()
     )
 
-    def _transform_signal(
-        labels: np.ndarray,
-        _sf: np.ndarray,
-        _cs: np.ndarray,
-        _ch: np.ndarray,
-        _bg: np.ndarray | None,
-    ) -> np.ndarray:
-        return transform_signal(
-            labels,
+    def transform_example(example: dict) -> dict:
+        example = dict(example)
+        seq = np.asarray(example.pop("sequence_tokens"), dtype=np.uint8)
+        sig = np.asarray(example.pop("signal"), dtype=np.float32)
+        _sf, _cs, _ch, _bg = sf, cs, ch, bg
+
+        # --- shift crop (always applied when shift buffer was stored)
+        if shift_max_bins > 0:
+            s = shift_max_bins if center_crop else int(np.random.randint(0, 2 * shift_max_bins + 1))
+            seq = seq[s * bin_size : s * bin_size + context_length]
+            sig = sig[:, s : s + n_pred_bins]
+
+        # --- RC augmentation
+        if enable_rc_aug and np.random.rand() < 0.5:
+            seq = _COMPLEMENT[seq[::-1]]
+            sig = np.flip(sig, axis=-1)
+            if rc_permutation is not None:
+                sig = np.take(sig, rc_permutation, axis=-2)
+                _sf = sf[rc_permutation]
+                _cs = cs[rc_permutation]
+                _ch = ch[rc_permutation]
+                _bg = None if bg is None else bg[rc_permutation]
+            sig = sig.copy()
+
+        example["input_ids"] = seq.astype(np.uint8, copy=False)
+        example["labels"] = transform_signal(
+            sig,
             _sf,
             _cs,
             _ch,
@@ -1410,65 +1362,6 @@ def make_transform(
             apply_squash=apply_squash,
             apply_clip=apply_clip,
         )
+        return example
 
-    def transform_batch(batch: dict) -> dict:
-        batch = dict(batch)
-        raw_ids = batch.get("input_ids")
-        raw_labels = batch.get("labels")
-
-        ids_arr = np.asarray(raw_ids, dtype=np.float32) if raw_ids is not None else None
-        lbl_arr = np.asarray(raw_labels, dtype=np.float32) if raw_labels is not None else None
-
-        batched = ids_arr is not None and ids_arr.ndim == 3
-        bs = ids_arr.shape[0] if batched else 1
-
-        def _unpack(arr: np.ndarray) -> list[np.ndarray]:
-            return [arr[i] for i in range(bs)] if batched else [arr]
-
-        ids_list = _unpack(ids_arr) if ids_arr is not None else [None] * bs
-        lbl_list = _unpack(lbl_arr) if lbl_arr is not None else [None] * bs
-
-        out_ids: list[np.ndarray] = []
-        out_lbl: list[np.ndarray] = []
-        for seq, sig in zip(ids_list, lbl_list):
-            _sf, _cs, _ch, _bg = sf, cs, ch, bg
-
-            # --- shift crop (always applied when shift buffer was stored)
-            if shift_max_bins > 0:
-                s = (
-                    shift_max_bins
-                    if center_crop
-                    else int(np.random.randint(0, 2 * shift_max_bins + 1))
-                )
-                if seq is not None:
-                    seq = seq[:, s * bin_size : s * bin_size + context_length]
-                if sig is not None:
-                    sig = sig[:, s : s + n_pred_bins]
-
-            # --- RC augmentation
-            if enable_rc_aug and np.random.rand() < 0.5:
-                if seq is not None:
-                    seq = np.flip(seq, axis=(0, 1)).copy()
-                if sig is not None:
-                    sig = np.flip(sig, axis=-1)
-                    if rc_permutation is not None:
-                        sig = np.take(sig, rc_permutation, axis=-2)
-                        _sf = sf[rc_permutation]
-                        _cs = cs[rc_permutation]
-                        _ch = ch[rc_permutation]
-                        _bg = None if bg is None else bg[rc_permutation]
-                    sig = sig.copy()
-
-            if seq is not None:
-                out_ids.append(seq)
-            if sig is not None:
-                out_lbl.append(_transform_signal(sig, _sf, _cs, _ch, _bg))
-
-        if out_ids:
-            batch["input_ids"] = np.stack(out_ids) if batched else out_ids[0]
-        if out_lbl:
-            batch["labels"] = np.stack(out_lbl) if batched else out_lbl[0]
-
-        return batch
-
-    return transform_batch
+    return transform_example

@@ -57,13 +57,7 @@ def _file_sha256(path: Path) -> str | None:
 
 
 def _split_summary(dataset_dict: Mapping[str, Any]) -> dict[str, Any]:
-    summary: dict[str, Any] = {}
-    for split_name, split in dataset_dict.items():
-        try:
-            summary[split_name] = {"num_rows": len(split)}
-        except TypeError:
-            summary[split_name] = {"num_rows": None, "streaming": True}
-    return summary
+    return {split_name: {"num_rows": len(split)} for split_name, split in dataset_dict.items()}
 
 
 def _package_version(name: str) -> str | None:
@@ -91,9 +85,7 @@ def _environment_summary() -> dict[str, Any]:
             "cuda_available": torch.cuda.is_available(),
             "cuda": torch.version.cuda,
             "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
-            "devices": [
-                torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())
-            ]
+            "devices": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
             if torch.cuda.is_available()
             else [],
         },

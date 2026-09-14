@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 import torch.nn as nn
-from datasets import Dataset, DatasetDict
 from regulonado.metrics import (
     finalize_validation_metric_state,
     init_validation_metric_state,
@@ -263,25 +265,30 @@ def test_metric_state_without_conditions_skips_delta_lfc_metrics():
     assert "reconstruction/raw_pearson" in metrics
 
 
-def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
-    data_dir = tmp_path / "dataset"
-    ds = DatasetDict(
+def _write_parquet_split(data_dir, split: str, *, n_rows: int, context: int, n_tracks: int) -> None:
+    """Write a tiny HF-layout Parquet shard directly with pyarrow, for a dataset fixture."""
+    rng = np.random.default_rng(0)
+    seq = rng.integers(0, 4, size=(n_rows, context), dtype=np.uint8).tolist()
+    sig = rng.random((n_rows, n_tracks, context)).astype(np.float32).tolist()
+    table = pa.table(
         {
-            "train": Dataset.from_dict(
-                {
-                    "input_ids": [torch.randn(4, 12).tolist() for _ in range(4)],
-                    "labels": [torch.rand(2, 12).tolist() for _ in range(4)],
-                }
-            ),
-            "validation": Dataset.from_dict(
-                {
-                    "input_ids": [torch.randn(4, 12).tolist() for _ in range(2)],
-                    "labels": [torch.rand(2, 12).tolist() for _ in range(2)],
-                }
-            ),
+            "sequence_tokens": pa.array(seq, type=pa.list_(pa.uint8(), context)),
+            "signal": pa.array(sig, type=pa.list_(pa.list_(pa.float32(), context), n_tracks)),
+            "interval": pa.array([f"chr1:{i}" for i in range(n_rows)]),
+            "index": pa.array(list(range(n_rows)), type=pa.int64()),
+            "local_index": pa.array(list(range(n_rows)), type=pa.int64()),
         }
     )
-    ds.save_to_disk(str(data_dir))
+    (data_dir / "data").mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, str(data_dir / "data" / f"{split}-00000-of-00001.parquet"))
+
+
+def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
+    data_dir = tmp_path / "dataset"
+    (data_dir / "README.md").parent.mkdir(parents=True, exist_ok=True)
+    (data_dir / "README.md").write_text("# fixture dataset\n")
+    _write_parquet_split(data_dir, "train", n_rows=4, context=12, n_tracks=2)
+    _write_parquet_split(data_dir, "validation", n_rows=2, context=12, n_tracks=2)
 
     # 'condition' is a label, not an id — categorical ids are derived by sorted
     # factorisation at load time (see tracks_table.to_track_records), which is

@@ -195,9 +195,7 @@ def pipeline(
     configfile: Annotated[Path, typer.Argument(help="Workflow YAML config")],
     stage: Annotated[
         Optional[str],
-        typer.Argument(
-            help="Stage to run: train, parameter-sweep, recompress, attribution, or design."
-        ),
+        typer.Argument(help="Stage to run: train, parameter-sweep, attribution, or design."),
     ] = None,
     cores: Annotated[int, typer.Option("--cores", "-c", min=1, help="Local execution cores.")] = 1,
     jobs: Annotated[
@@ -257,7 +255,7 @@ def pipeline(
             f"Workflow config not found: {configfile}", param_hint="--configfile"
         )
     _validate_training_matrix(configfile)
-    valid_stages = ("train", "parameter-sweep", "recompress", "attribution", "design")
+    valid_stages = ("train", "parameter-sweep", "attribution", "design")
     if stage is not None and stage not in valid_stages:
         raise typer.BadParameter(f"Expected one of: {', '.join(valid_stages)}", param_hint="stage")
     if stage is not None and target is not None:
@@ -340,9 +338,7 @@ def pipeline(
 
         raw = yaml.safe_load(configfile.read_text()) or {}
         results = Path(raw["results_dir"])
-        if stage == "recompress":
-            selected_targets.add(str(results / "dataset" / "dataset_dict.json"))
-        elif stage == "train":
+        if stage == "train":
             train = raw.get("train") or {}
             phases, runs = train.get("phases") or [], train.get("runs") or []
             if not phases or not runs:

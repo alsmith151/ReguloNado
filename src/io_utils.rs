@@ -1,4 +1,5 @@
-use arrow_ipc::{writer::IpcWriteOptions, CompressionType, MetadataVersion};
+use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::properties::WriterProperties;
 use std::time::{Duration, Instant};
 
 /// Log progress at most once per 30 seconds, or when finished.
@@ -63,25 +64,17 @@ pub(crate) fn configure_global_rayon(n_threads: Option<usize>) {
     }
 }
 
-/// Build Arrow IPC write options with the specified compression codec.
-///
-/// Maps a compression name string ("zstd", "lz4"/"lz4_frame", "none"/"uncompressed"/"")
-/// to the corresponding Arrow compression type, then constructs IpcWriteOptions with
-/// metadata version V5 and buffer alignment of 8. Returns an error if the compression
-/// name is unrecognized.
-pub(crate) fn ipc_write_options(compression: &str) -> Result<IpcWriteOptions, String> {
-    let codec = match compression.to_ascii_lowercase().as_str() {
-        "" | "none" | "uncompressed" => None,
-        "zstd" => Some(CompressionType::ZSTD),
-        "lz4" | "lz4_frame" => Some(CompressionType::LZ4_FRAME),
-        other => {
-            return Err(format!(
-                "Unsupported Arrow compression '{other}'. Use 'zstd', 'lz4', or 'none'."
-            ))
-        }
-    };
-
-    IpcWriteOptions::try_new(8, false, MetadataVersion::V5)
-        .and_then(|opts| opts.try_with_compression(codec))
-        .map_err(|e| e.to_string())
+/// Build Parquet writer properties: one row group per `rows_per_row_group` rows,
+/// compressed with the given explicit ZSTD level. Page statistics are left at the
+/// Parquet default (on), which also produces a page index.
+pub(crate) fn parquet_writer_properties(
+    rows_per_row_group: usize,
+    zstd_level: i32,
+) -> Result<WriterProperties, String> {
+    let level = ZstdLevel::try_new(zstd_level)
+        .map_err(|e| format!("Invalid zstd level {zstd_level}: {e}"))?;
+    Ok(WriterProperties::builder()
+        .set_max_row_group_size(rows_per_row_group.max(1))
+        .set_compression(Compression::ZSTD(level))
+        .build())
 }

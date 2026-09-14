@@ -7,7 +7,6 @@ defaults:
   - override /loss: poisson_multinomial
 
 data:
-  streaming: true
   enable_rc_aug: true
 
 model:
@@ -18,7 +17,7 @@ trainer:
   batch_size: 4
   eval_batch_size: 4
   num_workers: 8
-  persistent_workers: false
+  persistent_workers: true
   learning_rate: 5.0e-5
   backbone_learning_rate: 5.0e-7
   weight_decay: 1.0e-2

@@ -16,8 +16,6 @@ data:
   apply_scale: true
   apply_squash: true
   apply_clip: true
-  streaming: false
-  shuffle_buffer_ram_gb: 8.0
   enable_rc_aug: false
   context_length: 524288
   n_pred_bins: 6144
@@ -35,6 +33,7 @@ trainer:
   # Keep within the conservative CPU allocation used by sweep workers. Sites
   # with larger allocations can override this explicitly.
   num_workers: 4
+  # Recommended true: shard footers and open Parquet handles then live for the whole job.
   persistent_workers: true
   prefetch_factor: 2
 

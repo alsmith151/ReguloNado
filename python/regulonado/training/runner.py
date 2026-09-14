@@ -14,11 +14,10 @@ from typing import Any
 import hydra
 import numpy as np
 import torch
-from datasets import DatasetDict, load_from_disk
-from datasets import IterableDataset as HFIterableDataset
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 from torch.optim import AdamW
+from torch.utils.data import Subset
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -39,11 +38,10 @@ from regulonado.model import (
 from regulonado.training.callbacks import (
     EvalExampleDiagnostics,
     LRLogCallback,
-    StreamingEpochProgressCallback,
     WandbConfigCallback,
 )
 from regulonado.training.config import TrainerConfig
-from regulonado.training.data import count_arrow_split_rows
+from regulonado.training.data import WindowParquetDataset
 from regulonado.training.losses import (
     log1p_huber_loss,
     poisson_multinomial_binwise_loss,
@@ -202,15 +200,6 @@ def load_dataset_metadata(
             )
 
     return {**table.attrs, "final_track_records": to_track_records(table)}
-
-
-def _load_dataset_streaming(data_path: Path) -> dict[str, Any]:
-    from datasets import load_dataset
-
-    return load_dataset(
-        data_path.as_posix(),
-        streaming=True,
-    )
 
 
 def track_records(metadata: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -388,9 +377,7 @@ def _build_collate_fn(
                     f"{', '.join(missing)}; available fields: {sorted(example)}"
                 )
         collated = {
-            "input_ids": torch.stack(
-                [torch.as_tensor(example["input_ids"]) for example in batch]
-            ).float(),
+            "input_ids": torch.stack([torch.as_tensor(example["input_ids"]) for example in batch]),
             "labels": torch.stack(
                 [torch.as_tensor(example["labels"]) for example in batch]
             ).float(),
@@ -496,11 +483,11 @@ def _build_loss_fn(
 
 
 def _apply_dataset_transforms(
-    dataset_dict: DatasetDict | dict[str, Any],
+    dataset_dict: Mapping[str, Any],
     metadata: Mapping[str, Any],
     records: Sequence[Mapping[str, Any]],
     data_cfg: Mapping[str, Any],
-) -> DatasetDict | dict[str, Any]:
+) -> Mapping[str, Any]:
     scale_factors, clip_soft, clip_hard, background = resolve_scale_and_clip(records)
     bin_size = int(metadata.get("bin_size", 32))
     shift_max_bp = int(metadata.get("shift_max_bp", 0))
@@ -542,20 +529,12 @@ def _apply_dataset_transforms(
         bin_size=bin_size,
         center_crop=True,
     )
-    is_streaming = isinstance(dataset_dict.get("train"), HFIterableDataset)
-    if is_streaming:
-        # IterableDataset.map is lazy — the transform is applied on-the-fly during iteration.
-        dataset_dict["train"] = dataset_dict["train"].map(train_transform)
-        if "validation" in dataset_dict:
-            dataset_dict["validation"] = dataset_dict["validation"].map(eval_transform)
-        if "test" in dataset_dict:
-            dataset_dict["test"] = dataset_dict["test"].map(eval_transform)
-    else:
-        dataset_dict["train"].set_transform(train_transform)
-        if "validation" in dataset_dict:
-            dataset_dict["validation"].set_transform(eval_transform)
-        if "test" in dataset_dict:
-            dataset_dict["test"].set_transform(eval_transform)
+    # WindowParquetDataset applies its `.transform` inside __getitem__, per example.
+    dataset_dict["train"].transform = train_transform
+    if "validation" in dataset_dict:
+        dataset_dict["validation"].transform = eval_transform
+    if "test" in dataset_dict:
+        dataset_dict["test"].transform = eval_transform
     return dataset_dict
 
 
@@ -679,14 +658,27 @@ def _empirical_track_output_bias(
     n_tracks: int,
     activation_type: str,
     max_samples: int,
+    seed: int = 0,
 ) -> list[float]:
-    """Estimate per-track transformed-label means without materializing the dataset."""
+    """Estimate per-track transformed-label means from a seeded random sample of rows.
+
+    Sampling by seeded random index (rather than the first ``max_samples`` rows) avoids
+    a genome-order bias: chromosome-major shard order means the first rows of a fresh
+    dataset are all chr1.
+    """
     if max_samples < 1:
         raise ValueError("head.output_init_samples must be at least 1")
+    n_total = len(train_dataset)
+    if n_total == 0:
+        raise ValueError("Cannot initialize output bias from an empty training dataset")
+    rng = np.random.default_rng(seed)
+    sample_size = min(max_samples, n_total)
+    indices = rng.choice(n_total, size=sample_size, replace=False)
+
     totals = np.zeros(n_tracks, dtype=np.float64)
     count = 0
-    for example in train_dataset:
-        labels = np.asarray(example["labels"], dtype=np.float64)
+    for index in indices:
+        labels = np.asarray(train_dataset[int(index)]["labels"], dtype=np.float64)
         if labels.ndim != 2:
             raise ValueError(f"Expected 2D training labels, got shape {labels.shape}")
         if labels.shape[0] != n_tracks and labels.shape[1] == n_tracks:
@@ -697,16 +689,13 @@ def _empirical_track_output_bias(
             )
         totals += labels.sum(axis=1)
         count += labels.shape[1]
-        max_samples -= 1
-        if max_samples == 0:
-            break
     if count == 0:
         raise ValueError("Cannot initialize output bias from an empty training dataset")
     return _inverse_output_activation_mean(totals / count, activation_type).tolist()
 
 
 def _resolve_empirical_output_bias(
-    cfg: Mapping[str, Any], dataset_dict: DatasetDict | dict[str, Any], n_tracks: int
+    cfg: Mapping[str, Any], dataset_dict: Mapping[str, Any], n_tracks: int, *, seed: int = 0
 ) -> None:
     """Replace the declarative empirical-mean mode with checkpoint-safe numeric biases."""
     head_cfg = cfg["head"]
@@ -721,6 +710,7 @@ def _resolve_empirical_output_bias(
         n_tracks=n_tracks,
         activation_type=str(cfg["model"].get("activation_type", "softplus")),
         max_samples=int(head_cfg.get("output_init_samples", 256)),
+        seed=seed,
     )
     head_cfg["resolved_output_bias"] = values
     head_cfg["zero_output_weights"] = mode == "empirical_mean_constant"
@@ -829,15 +819,14 @@ def _build_optimizer(model: RegulonadoModel, trainer_cfg: TrainerConfig) -> torc
 class StepBudget:
     """Optimizer-update counts shared by the scheduler, TrainingArguments, and logging."""
 
-    # None when the training split size cannot be determined (remote streaming source).
-    steps_per_epoch: int | None
+    steps_per_epoch: int
     max_steps: int
 
 
 def _resolve_step_budget(
     trainer_cfg: TrainerConfig,
     *,
-    train_rows: int | None,
+    train_rows: int,
     world_size: int,
 ) -> StepBudget:
     """Size an epoch in optimizer updates, matching HF Trainer's own accounting.
@@ -849,17 +838,8 @@ def _resolve_step_budget(
     Raises
     ------
     ValueError
-        If the split size is unknown and ``max_steps`` is unset, or the split is
-        smaller than one global batch.
+        If the split is smaller than one global batch.
     """
-    if train_rows is None:
-        if trainer_cfg.max_steps is None:
-            raise ValueError(
-                "trainer.max_steps must be set when the training split size is unknown "
-                "(streaming from a source without local Arrow shards)"
-            )
-        return StepBudget(steps_per_epoch=None, max_steps=trainer_cfg.max_steps)
-
     global_batch = max(trainer_cfg.batch_size, 1) * max(world_size, 1)
     batches_per_epoch = train_rows // global_batch
     if batches_per_epoch == 0:
@@ -871,26 +851,6 @@ def _resolve_step_budget(
     steps_per_epoch = math.ceil(batches_per_epoch / accumulation)
     max_steps = trainer_cfg.max_steps or math.ceil(trainer_cfg.max_epochs * steps_per_epoch)
     return StepBudget(steps_per_epoch=steps_per_epoch, max_steps=max_steps)
-
-
-def _count_train_rows(
-    data_path: Path,
-    dataset_dict: DatasetDict | dict[str, Any],
-    *,
-    streaming: bool,
-) -> int | None:
-    """Training split size; streaming reads local Arrow batch headers without decompressing."""
-    if not streaming:
-        return len(dataset_dict["train"])
-    return _count_local_split_rows(data_path, "train")
-
-
-def _count_local_split_rows(data_path: Path, split: str) -> int | None:
-    """Row count of a locally saved Arrow split, or None for a remote streaming source."""
-    split_dir = data_path / split
-    if not (split_dir / "state.json").is_file():
-        return None
-    return count_arrow_split_rows(split_dir)
 
 
 def _build_training_arguments(
@@ -920,8 +880,7 @@ def _build_training_arguments(
             )
         eval_steps = max(budget.steps_per_epoch // trainer_cfg.evals_per_epoch, 1)
     elif trainer_cfg.max_steps is None:
-        # Epoch-driven run: evaluate once per epoch. Counted in steps because HF's
-        # "epoch" strategy sees a streaming run's whole budget as one epoch.
+        # Epoch-driven run: evaluate once per epoch, counted in steps.
         eval_steps = budget.steps_per_epoch
     else:
         eval_steps = trainer_cfg.checkpoint_every_n_steps or trainer_cfg.log_every_n_steps
@@ -1129,24 +1088,6 @@ class RegulonadoTrainer(Trainer):
         return loss, logits, labels
 
 
-def _estimate_shuffle_buffer(
-    data_cfg: Mapping[str, Any],
-    metadata: Mapping[str, Any],
-    *,
-    num_workers: int = 0,
-) -> int:
-    """Size each worker's shuffle buffer within one total RAM budget."""
-    ram_gb = float(data_cfg.get("shuffle_buffer_ram_gb", 4.0))
-    context_length = int(metadata.get("context_length", data_cfg.get("context_length", 524_288)))
-    n_pred_bins = int(metadata.get("n_pred_bins", data_cfg.get("n_pred_bins", 6_144)))
-    n_tracks = int(metadata.get("n_final_tracks") or metadata.get("n_tracks") or 1)
-    # Buffered examples are numpy copies (see _copy_examples_out_of_arrow): int8 one-hot
-    # sequence plus float32 labels, matching the stored Arrow dtypes.
-    bytes_per_sample = context_length * 4 + n_tracks * n_pred_bins * 4
-    worker_copies = max(1, num_workers)
-    return max(10, int(ram_gb * 1e9 / bytes_per_sample / worker_copies))
-
-
 def _resolve_trainer_config(cfg: Mapping[str, Any]) -> TrainerConfig:
     """Validate ``cfg`` and merge ``cfg["trainer"]`` into a :class:`TrainerConfig`.
 
@@ -1183,142 +1124,94 @@ def _resolve_trainer_config(cfg: Mapping[str, Any]) -> TrainerConfig:
     return trainer_cfg
 
 
-def _load_training_dataset(
-    data_path: Path,
-    *,
-    streaming: bool,
-    rank: int,
-) -> DatasetDict | dict[str, Any]:
-    """Load the dataset from disk or as an HF streaming source, with timing logs."""
-    logger.info(f"[rank {rank}] loading dataset from {data_path} (streaming={streaming}) ...")
+def _check_dataset_layout(data_path: Path) -> None:
+    """Fail fast when a directory isn't a built HF-layout Parquet dataset."""
+    has_shards = any((data_path / "data").glob("*.parquet"))
+    if not (data_path / "README.md").is_file() or not has_shards:
+        raise FileNotFoundError(
+            f"{data_path} is missing README.md or data/*.parquet shards; "
+            "rebuild the dataset with `regulonado dataset`."
+        )
+
+
+def _load_training_dataset(data_path: Path, *, rank: int) -> dict[str, WindowParquetDataset]:
+    """Build a ``WindowParquetDataset`` per split present under ``data_path``."""
+    _check_dataset_layout(data_path)
+    logger.info(f"[rank {rank}] loading dataset from {data_path} ...")
     t0 = perf_counter()
-    dataset_dict = (
-        _load_dataset_streaming(data_path) if streaming else load_from_disk(str(data_path))
-    )
-    if streaming:
-        logger.info(f"[rank {rank}] dataset opened in {perf_counter() - t0:.1f}s (streaming)")
-    else:
-        sizes = {split: len(dataset_dict[split]) for split in dataset_dict}
-        logger.info(f"[rank {rank}] dataset loaded in {perf_counter() - t0:.1f}s | splits={sizes}")
+    dataset_dict: dict[str, WindowParquetDataset] = {}
+    for split in ("train", "validation", "test"):
+        if any((data_path / "data").glob(f"{split}-*.parquet")):
+            dataset_dict[split] = WindowParquetDataset(data_path, split)
+    if "train" not in dataset_dict:
+        raise ValueError("Training dataset does not contain a 'train' split")
+    sizes = {split: len(dataset) for split, dataset in dataset_dict.items()}
+    logger.info(f"[rank {rank}] dataset loaded in {perf_counter() - t0:.1f}s | splits={sizes}")
     return dataset_dict
 
 
 def _validate_dataset_schema(dataset_dict: Mapping[str, Any]) -> None:
-    """Fail before worker startup when a saved dataset lacks model inputs."""
-    required = {"input_ids", "labels"}
+    """Fail before worker startup when a dataset's stored columns lack model inputs."""
+    required = {"sequence_tokens", "signal"}
     if "train" not in dataset_dict:
         raise ValueError("Training dataset does not contain a 'train' split")
     for split, dataset in dataset_dict.items():
-        columns = set(getattr(dataset, "column_names", ()) or ())
+        columns = set(dataset.schema.names)
         missing = sorted(required - columns)
         if missing:
             raise ValueError(
                 f"Dataset split {split!r} is missing required column(s): "
                 f"{', '.join(missing)}; available columns: {sorted(columns)}. "
-                "Verify the source and recompressed dataset schemas before training."
+                "Verify the source dataset schema before training."
             )
 
 
 def _load_metadata_and_records(
     data_path: Path,
     metadata_path: Path | None,
-    dataset_dict: DatasetDict | dict[str, Any],
+    dataset_dict: Mapping[str, Any],
     *,
-    streaming: bool,
     rank: int,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Load track metadata/records and cross-check them against the Arrow dataset.
+    """Load track metadata/records and cross-check them against the Parquet schema.
 
     Raises
     ------
     ValueError
-        If the Arrow dataset's label width disagrees with the included track count.
+        If the stored signal column's track count disagrees with the included track count.
     """
     metadata = load_dataset_metadata(data_path, metadata_path)
     records = track_records(metadata)
     logger.info(f"[rank {rank}] metadata loaded | {len(records)} tracks")
 
-    if not streaming:
-        labels_feature = dataset_dict[next(iter(dataset_dict))].features.get("labels")
-        # Array2D (the real, Rust-built dataset) exposes .shape; other feature
-        # types (e.g. a plain Sequence, as in small hand-built test datasets)
-        # don't carry a fixed track count to check against.
-        arrow_n_tracks = getattr(labels_feature, "shape", (None,))[0]
-        if arrow_n_tracks is not None and arrow_n_tracks != len(records):
-            raise ValueError(
-                f"Arrow label width ({arrow_n_tracks}) != included track count "
-                f"({len(records)}); tracks.parquet and the Arrow dataset are out of sync — "
-                "rebuild the dataset."
-            )
+    arrow_n_tracks = dataset_dict["train"].schema.field("signal").type.list_size
+    if arrow_n_tracks != len(records):
+        raise ValueError(
+            f"Parquet signal width ({arrow_n_tracks}) != included track count "
+            f"({len(records)}); tracks.parquet and the Parquet dataset are out of sync — "
+            "rebuild the dataset."
+        )
     return metadata, records
 
 
-def _copy_example_arrays(example: dict[str, Any]) -> dict[str, np.ndarray]:
-    # The numpy formatter widens int8 to int64 (8x the one-hot sequence); restore the
-    # stored dtypes from regulonado.dataset.build._build_features.
-    return {
-        "input_ids": np.array(example["input_ids"], dtype=np.int8),
-        "labels": np.array(example["labels"], dtype=np.float32),
-    }
-
-
-def _copy_examples_out_of_arrow(dataset: HFIterableDataset) -> HFIterableDataset:
-    """Give each streamed example its own numpy arrays before it enters the shuffle buffer.
-
-    Unformatted streaming examples are zero-copy slices of their decompressed Arrow
-    record batch, so every buffered example keeps that whole batch (512 examples,
-    ~2.6 GB for the standard build) alive. Copying bounds the buffer to the
-    examples it actually holds. The format is cleared afterwards so the copied int8
-    arrays are yielded as-is rather than re-widened by the numpy formatter.
-    """
-    return dataset.with_format("numpy").map(_copy_example_arrays).with_format(None)
-
-
 def _prepare_dataset_splits(
-    dataset_dict: DatasetDict | dict[str, Any],
-    data_cfg: Mapping[str, Any],
+    dataset_dict: Mapping[str, Any],
     trainer_cfg: TrainerConfig,
-    metadata: Mapping[str, Any],
     *,
-    data_path: Path,
-    streaming: bool,
     seed: int,
-) -> DatasetDict | dict[str, Any]:
-    """Apply streaming shuffle and eval-sample capping, ahead of transform application."""
-    if streaming and "train" in dataset_dict:
-        shuffle_buffer = _estimate_shuffle_buffer(
-            data_cfg, metadata, num_workers=trainer_cfg.num_workers
-        )
-        dataset_dict["train"] = _copy_examples_out_of_arrow(dataset_dict["train"]).shuffle(
-            buffer_size=shuffle_buffer, seed=seed
-        )
-
+) -> dict[str, Any]:
+    """Apply the seeded validation-sample cap, after transforms are attached."""
+    dataset_dict = dict(dataset_dict)
     max_eval_samples = (
         int(trainer_cfg.max_eval_samples) if trainer_cfg.max_eval_samples is not None else None
     )
     if max_eval_samples is not None and "validation" in dataset_dict:
         val = dataset_dict["validation"]
-        if isinstance(val, HFIterableDataset):
-            # Stride-filter is memory-free and gives uniform coverage across all chromosomes,
-            # which is statistically equivalent for an unbiased Pearson estimate.
-            # Streaming split metadata carries no row count, so count the local shards;
-            # without it, take() would evaluate only the first (single-chromosome) shard.
-            n_val = _count_local_split_rows(data_path, "validation")
-            if n_val and n_val > max_eval_samples:
-                stride = n_val // max_eval_samples
-                dataset_dict["validation"] = val.filter(
-                    lambda _, idx: idx % stride == 0, with_indices=True
-                ).take(max_eval_samples)
-            else:
-                dataset_dict["validation"] = val.take(max_eval_samples)
-        else:
-            n_val = len(val)
-            if n_val > max_eval_samples:
-                rng = np.random.default_rng(seed)
-                indices = sorted(rng.choice(n_val, size=max_eval_samples, replace=False).tolist())
-                dataset_dict["validation"] = val.select(indices)
-            else:
-                dataset_dict["validation"] = val
+        n_val = len(val)
+        if n_val > max_eval_samples:
+            rng = np.random.default_rng(seed)
+            indices = sorted(rng.choice(n_val, size=max_eval_samples, replace=False).tolist())
+            dataset_dict["validation"] = Subset(val, indices)
     return dataset_dict
 
 
@@ -1375,28 +1268,6 @@ def _build_collate_and_loss(
         labels_already_scaled=labels_already_scaled,
     )
     return collate_fn, loss_fn, scale_factors, background
-
-
-def _guard_streaming_persistent_workers(
-    trainer_cfg: TrainerConfig,
-    *,
-    streaming: bool,
-) -> TrainerConfig:
-    """Disable persistent dataloader workers for streaming datasets.
-
-    Persistent workers with HF IterableDataset accumulate Arrow file handles and
-    shuffle-buffer state between iterator cycles — workers never restart to clear them.
-    """
-    if streaming and trainer_cfg.persistent_workers:
-        import warnings
-
-        warnings.warn(
-            "persistent_workers=True is unsafe with streaming datasets (memory leak). "
-            "Overriding to persistent_workers=False.",
-            stacklevel=2,
-        )
-        trainer_cfg = dataclasses.replace(trainer_cfg, persistent_workers=False)
-    return trainer_cfg
 
 
 def _prepare_model_for_training(
@@ -1562,17 +1433,16 @@ def run_training(
     """Run end-to-end model training with dataset loading, model building, and
     evaluation.
 
-    Loads a dataset from disk or streaming source, applies transforms,
-    builds a model, constructs optimizer and scheduler, and trains using
-    HuggingFace Trainer. Logs progress, saves checkpoints, and returns
-    training history.
+    Loads the HF-layout Parquet dataset as a ``WindowParquetDataset`` per split,
+    applies transforms, builds a model, constructs optimizer and scheduler, and
+    trains using HuggingFace Trainer. Logs progress, saves checkpoints, and
+    returns training history.
 
     Parameters
     ----------
     cfg : Mapping[str, Any]
         Complete training configuration with keys:
-        - data.path: dataset directory or HF streaming path
-        - data.streaming: whether to stream the dataset (default False)
+        - data.path: dataset directory (built by `regulonado dataset`)
         - backbone: backbone configuration
         - head: head configuration
         - model: model configuration (e.g. use_track_metadata)
@@ -1602,45 +1472,30 @@ def run_training(
 
     rank = _rank()
     data_path = Path(str(cfg["data"]["path"]))
-    streaming = bool(cfg["data"].get("streaming", False))
     logger.info(
         f"[rank {rank}] run_training start | backbone={cfg['backbone'].get('name')} "
         f"head={cfg['head'].get('type')} loss={cfg['loss'].get('name')} "
-        f"streaming={streaming} output_dir={cfg.get('output_dir')}"
+        f"output_dir={cfg.get('output_dir')}"
     )
 
-    dataset_dict = _load_training_dataset(data_path, streaming=streaming, rank=rank)
+    dataset_dict = _load_training_dataset(data_path, rank=rank)
     _validate_dataset_schema(dataset_dict)
 
     metadata_path_value = cfg["data"].get("metadata_path")
     metadata_path = Path(str(metadata_path_value)) if metadata_path_value else None
     metadata, records = _load_metadata_and_records(
-        data_path, metadata_path, dataset_dict, streaming=streaming, rank=rank
+        data_path, metadata_path, dataset_dict, rank=rank
     )
-
-    dataset_dict = _prepare_dataset_splits(
-        dataset_dict,
-        cfg["data"],
-        trainer_cfg,
-        metadata,
-        data_path=data_path,
-        streaming=streaming,
-        seed=seed,
-    )
-
-    # Resolve empirical head initialization from the raw dataset examples.
-    # Streaming datasets are transformed with ``IterableDataset.map`` below;
-    # depending on the datasets backend/version that can expose a projected
-    # example without the original ``labels`` field.  Head initialization must
-    # happen before that projection, while labels are guaranteed to be present.
-    _resolve_empirical_output_bias(cfg, dataset_dict, len(records))
 
     dataset_dict = _apply_dataset_transforms(dataset_dict, metadata, records, cfg["data"])
     logger.info(f"[rank {rank}] dataset transforms applied")
 
+    dataset_dict = _prepare_dataset_splits(dataset_dict, trainer_cfg, seed=seed)
+
+    _resolve_empirical_output_bias(cfg, dataset_dict, len(records), seed=seed)
+
     model = _build_model_with_logging(cfg, metadata, records, adapter_builder, rank=rank)
     collate_fn, loss_fn, scale_factors, background = _build_collate_and_loss(cfg, records)
-    trainer_cfg = _guard_streaming_persistent_workers(trainer_cfg, streaming=streaming)
 
     output_dir = Path(str(cfg.get("output_dir") or Path.cwd() / "outputs"))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1664,7 +1519,7 @@ def run_training(
         trainer_cfg=trainer_cfg,
     )
 
-    train_rows = _count_train_rows(data_path, dataset_dict, streaming=streaming)
+    train_rows = len(dataset_dict["train"])
     budget = _resolve_step_budget(trainer_cfg, train_rows=train_rows, world_size=_world_size())
     logger.info(
         f"[rank {rank}] step budget | train_rows={train_rows} world_size={_world_size()} "
@@ -1681,8 +1536,6 @@ def run_training(
     callbacks = _build_training_callbacks(
         cfg, trainer_cfg, val_dataset, collate_fn, scale_factors, background, records, output_dir
     )
-    if streaming and budget.steps_per_epoch:
-        callbacks.append(StreamingEpochProgressCallback(budget.steps_per_epoch))
     topk_bins = int(cfg["trainer"].get("topk_bins", 256))
     trainer = RegulonadoTrainer(
         model=model,

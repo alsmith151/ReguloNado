@@ -12,8 +12,8 @@ import pytest
 WORKFLOW = Path(__file__).parents[1] / "python" / "regulonado" / "workflow" / "Snakefile"
 
 
-def test_recompressed_dataset_survives_dag_rebuild_without_raw_source(tmp_path):
-    """A cleaned temp source must not cause rebuilding after the DAG is reconstructed."""
+def test_dataset_sentinel_is_readme_md(tmp_path):
+    """The build_dataset rule outputs README.md as the completion sentinel."""
     snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
     if snakemake is None:
         pytest.skip("Snakemake is an optional workflow dependency")
@@ -36,14 +36,12 @@ dataset:
   bin_size: 10
   n_pred_bins: 4
   shift_max_bp: 0
-recompress:
-  enabled: true
 scaling:
   method: tmm
 """
     )
     target_dir = results / "dataset"
-    target = target_dir / "dataset_dict.json"
+    target = target_dir / "README.md"
 
     planned = subprocess.run(
         [
@@ -65,20 +63,14 @@ scaling:
     )
     planned_output = planned.stdout + planned.stderr
     assert planned.returncode == 0, planned_output
-    assert "flag 'directory' used in rule recompress_dataset" not in planned_output
     assert "regulonado dataset" in planned_output
-    assert "regulonado recompress-dataset" in planned_output
-    assert str(results / "dataset_raw") in planned_output
+    assert "recompress" not in planned_output.lower()
     assert str(target_dir) in planned_output
-    assert "--remove-src" not in planned_output
-    for split in ("train", "validation", "test"):
-        assert str(results / "dataset_raw" / split) in planned_output
 
     target_dir.mkdir(parents=True)
     target.touch()
     (target_dir / "tracks.parquet").touch()
-    for split in ("train", "validation", "test"):
-        (target_dir / split).mkdir()
+    (target_dir / "data").mkdir()
 
     result = subprocess.run(
         [
@@ -131,8 +123,6 @@ dataset:
   bin_size: 10
   n_pred_bins: 4
   shift_max_bp: 0
-recompress:
-  enabled: false
 scaling:
   method: tmm
 parameter_sweep:
@@ -220,17 +210,10 @@ dataset:
   n_pred_bins: 4
   shift_max_bp: 0
   extract_threads: 1
-  arrow_write_threads: 1
-  arrow_batch_size: 4
-  compression: lz4
+  write_threads: 1
   stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
-recompress:
-  enabled: false
-  zstd_level: 3
-  max_batch_size: 4
-  workers: 1
 scaling:
   method: tmm
 train:
@@ -354,17 +337,10 @@ dataset:
   n_pred_bins: 4
   shift_max_bp: 0
   extract_threads: 1
-  arrow_write_threads: 1
-  arrow_batch_size: 4
-  compression: lz4
+  write_threads: 1
   stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
-recompress:
-  enabled: false
-  zstd_level: 3
-  max_batch_size: 4
-  workers: 1
 scaling:
   method: tmm
 train:
@@ -498,17 +474,10 @@ dataset:
   n_pred_bins: 4
   shift_max_bp: 0
   extract_threads: 1
-  arrow_write_threads: 1
-  arrow_batch_size: 4
-  compression: lz4
+  write_threads: 1
   stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
-recompress:
-  enabled: false
-  zstd_level: 3
-  max_batch_size: 4
-  workers: 1
 scaling:
   method: tmm
 train:
@@ -608,17 +577,10 @@ dataset:
   n_pred_bins: 4
   shift_max_bp: 0
   extract_threads: 1
-  arrow_write_threads: 1
-  arrow_batch_size: 4
-  compression: lz4
+  write_threads: 1
   stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
-recompress:
-  enabled: false
-  zstd_level: 3
-  max_batch_size: 4
-  workers: 1
 scaling:
   method: tmm
 train:
@@ -696,17 +658,10 @@ dataset:
   n_pred_bins: 4
   shift_max_bp: 0
   extract_threads: 1
-  arrow_write_threads: 1
-  arrow_batch_size: 4
-  compression: lz4
+  write_threads: 1
   stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
-recompress:
-  enabled: false
-  zstd_level: 3
-  max_batch_size: 4
-  workers: 1
 scaling:
   method: tmm
 train:
@@ -786,17 +741,10 @@ dataset:
   n_pred_bins: 4
   shift_max_bp: 0
   extract_threads: 1
-  arrow_write_threads: 1
-  arrow_batch_size: 4
-  compression: lz4
+  write_threads: 1
   stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
-recompress:
-  enabled: false
-  zstd_level: 3
-  max_batch_size: 4
-  workers: 1
 scaling:
   method: tmm
 train:
@@ -882,17 +830,10 @@ dataset:
   n_pred_bins: 4
   shift_max_bp: 0
   extract_threads: 1
-  arrow_write_threads: 1
-  arrow_batch_size: 4
-  compression: lz4
+  write_threads: 1
   stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
-recompress:
-  enabled: false
-  zstd_level: 3
-  max_batch_size: 4
-  workers: 1
 scaling:
   method: tmm
 train:
@@ -963,17 +904,10 @@ dataset:
   n_pred_bins: 4
   shift_max_bp: 0
   extract_threads: 1
-  arrow_write_threads: 1
-  arrow_batch_size: 4
-  compression: lz4
+  write_threads: 1
   stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
-recompress:
-  enabled: false
-  zstd_level: 3
-  max_batch_size: 4
-  workers: 1
 scaling:
   method: tmm
 train:

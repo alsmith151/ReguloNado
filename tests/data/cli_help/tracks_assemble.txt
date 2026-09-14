@@ -14,6 +14,10 @@
 │ *  --output           -o      PATH  tracks.parquet [required]                                    │
 │    --scale-factors            PATH  scale_factors.parquet                                        │
 │    --qc-report                PATH  qc_report.parquet                                            │
+│    --annotations              PATH  CSV/parquet with a 'track_name' column plus arbitrary extra  │
+│                                     columns (e.g. 'group') to merge in — the way to attach       │
+│                                     grouping metadata after 'tracks discover' without redoing    │
+│                                     discovery from a hand-crafted --track-sheet.                 │
 │    --drop-degenerate                Drop tracks with qc_verdict == 'failed'                      │
 │    --exclude-track            TEXT  track_name to force-exclude (repeatable)                     │
 │    --help                           Show this message and exit.                                  │

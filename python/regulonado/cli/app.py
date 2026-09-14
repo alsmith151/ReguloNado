@@ -7,7 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 import typer
 from regulonado.cli.attribute import attribute_app
 from regulonado.cli.config import config, init
-from regulonado.cli.dataset import dataset, recompress_dataset
+from regulonado.cli.dataset import dataset
 from regulonado.cli.design import design
 from regulonado.cli.normalization import normalization_app
 from regulonado.cli.pipeline import pipeline as _pipeline
@@ -109,7 +109,6 @@ app.command()(config)
 app.command()(init)
 app.command()(train)
 app.command("sweep-train", hidden=True)(sweep_train)
-app.command()(recompress_dataset)
 app.command()(dataset)
 app.command()(predict)
 app.command()(design)

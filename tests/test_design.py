@@ -645,7 +645,6 @@ def test_design_config_unknown_holdout_run_raises():
         DesignConfig,
         DesignTarget,
         InputsConfig,
-        RecompressConfig,
         ScalingConfig,
         TrainConfig,
         TrainPhase,
@@ -658,7 +657,6 @@ def test_design_config_unknown_holdout_run_raises():
             results_dir="results",
             inputs=InputsConfig(intervals="i.bed", fasta="g.fa", bigwig_dir="bw"),
             dataset=DatasetConfig(),
-            recompress=RecompressConfig(),
             scaling=ScalingConfig(),
             train=TrainConfig(
                 phases=[TrainPhase(name="head", preset="head_only")],
@@ -689,9 +687,7 @@ def test_design_config_duplicate_target_names_raise():
 def test_design_config_from_attribution_is_an_alternative_to_candidates():
     from regulonado.config.models import DesignConfig, DesignTarget
 
-    config = DesignConfig(
-        from_attribution="hl60", targets=[DesignTarget(name="a", target="K562")]
-    )
+    config = DesignConfig(from_attribution="hl60", targets=[DesignTarget(name="a", target="K562")])
     assert config.candidates is None
     assert config.from_attribution == "hl60"
 

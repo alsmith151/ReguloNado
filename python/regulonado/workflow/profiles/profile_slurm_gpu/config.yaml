@@ -40,11 +40,6 @@ set-resources:
     mem_mb: 256000
     cpus_per_task: 32
 
-  recompress_dataset:
-    runtime: 720
-    mem_mb: 128000
-    cpus_per_task: 8
-
   train_phase:
     # GPU rule; the rule definition itself sets `gpu` (sized to
     # nproc_per_node), so only site-specific placement/sizing goes here.

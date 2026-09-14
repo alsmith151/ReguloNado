@@ -11,7 +11,7 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
             # not merely configuration parsing.  Keep this dependency here
             # (rather than only on the agents) so the remote sweep cannot be
             # initialized while the dataset is still being built.
-            dataset=str(training_dataset_dir() / "dataset_dict.json"),
+            dataset=str(training_dataset_dir() / "README.md"),
             metadata=str(training_dataset_dir() / "tracks.parquet"),
         output:
             sweep_id=str(_SWEEP_DIR / "sweep.id"),
@@ -32,7 +32,7 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
 
     rule parameter_sweep_agent:
         input:
-            dataset=str(training_dataset_dir() / "dataset_dict.json"),
+            dataset=str(training_dataset_dir() / "README.md"),
             metadata=str(training_dataset_dir() / "tracks.parquet"),
             sweep_id=str(_SWEEP_DIR / "sweep.id"),
         output:

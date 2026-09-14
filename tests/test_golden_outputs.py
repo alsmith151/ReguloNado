@@ -51,8 +51,7 @@ def _check_or_regen_text(golden_path: Path, actual: str, label: str) -> None:
         return
     expected = golden_path.read_text()
     assert actual == expected, (
-        f"{label}: golden output changed — if intentional, regenerate with "
-        f"{REGEN_ENV_VAR}=1"
+        f"{label}: golden output changed — if intentional, regenerate with {REGEN_ENV_VAR}=1"
     )
 
 
@@ -63,8 +62,7 @@ def _check_or_regen_json(golden_path: Path, actual: dict, label: str) -> None:
         return
     expected = json.loads(golden_path.read_text())
     assert actual == expected, (
-        f"{label}: golden output changed — if intentional, regenerate with "
-        f"{REGEN_ENV_VAR}=1"
+        f"{label}: golden output changed — if intentional, regenerate with {REGEN_ENV_VAR}=1"
     )
 
 
@@ -152,29 +150,29 @@ def _build_tiny_dataset_inputs(root: Path) -> dict:
     }
 
 
-def _hash_arrow_split_dir(split_dir: Path) -> str:
-    """sha256 over a split's Arrow row data, in on-disk row order.
+def _hash_parquet_split(data_dir: Path, split: str) -> str:
+    """sha256 over a split's Parquet row data, in on-disk shard/row order.
 
     Reads shard files directly (sorted by filename, matching the order the
-    in_memory writer produces them in) and hashes each record batch's
-    columns, sorted by column name so key order can't introduce noise.
-    Uses ``repr()`` of the decoded Python values rather than raw dtype bytes
-    so the hash is insensitive to incidental numpy dtype choices while still
-    being exact and order-sensitive over the actual row content.
+    in_memory writer produces them in) and hashes each row's decoded column
+    values, sorted by column name so key order can't introduce noise. Uses
+    ``repr()`` of the decoded Python values rather than raw bytes so the hash
+    is exact and order-sensitive over row content but insensitive to Parquet
+    footer/metadata bytes (e.g. ``created_by``), which can carry
+    nondeterministic timestamps or thread-order-dependent artifacts.
     """
-    import pyarrow.ipc as ipc
+    import pyarrow.parquet as pq
 
     hasher = hashlib.sha256()
-    shards = sorted(split_dir.glob("data-*-of-*.arrow"))
-    assert shards, f"no Arrow shards found in {split_dir}"
+    shards = sorted(data_dir.glob(f"{split}-*.parquet"))
+    assert shards, f"no Parquet shards found for split {split!r} in {data_dir}"
     for shard in shards:
-        with shard.open("rb") as fh:
-            reader = ipc.open_stream(fh)
-            for batch in reader:
-                tbl = batch.to_pydict()
-                for col in sorted(tbl.keys()):
-                    hasher.update(col.encode())
-                    hasher.update(repr(tbl[col]).encode())
+        tbl = pq.read_table(shard).to_pydict()
+        n_rows = len(tbl["index"])
+        for row in range(n_rows):
+            for col in sorted(tbl.keys()):
+                hasher.update(col.encode())
+                hasher.update(repr(tbl[col][row]).encode())
     return hasher.hexdigest()
 
 
@@ -192,15 +190,15 @@ def _run_tiny_build(inputs: dict, output_dir: Path) -> dict[str, str]:
         n_pred_bins=_N_PRED_BINS,
         shift_max_bp=0,
         n_extract_threads=2,
-        arrow_batch_size=2,
-        arrow_write_threads=1,
+        write_threads=1,
+        zstd_level=3,
+        rows_per_row_group=1,
         strategy="in_memory",
         stage_to_scratch=False,
-        return_dataset=False,
     )
+    data_dir = output_dir / "data"
     return {
-        split: _hash_arrow_split_dir(output_dir / split)
-        for split in sorted(("train", "validation"))
+        split: _hash_parquet_split(data_dir, split) for split in sorted(("train", "validation"))
     }
 
 
@@ -218,10 +216,7 @@ def test_dataset_build_golden_output(tmp_path):
 def test_dataset_build_is_deterministic_across_runs(tmp_path):
     """The same tiny build run three times must produce identical content hashes."""
     inputs = _build_tiny_dataset_inputs(tmp_path / "src")
-    runs = [
-        _run_tiny_build(inputs, tmp_path / f"out{i}")
-        for i in range(3)
-    ]
+    runs = [_run_tiny_build(inputs, tmp_path / f"out{i}") for i in range(3)]
     assert runs[0] == runs[1] == runs[2], (
         "dataset build (in_memory) is not deterministic across repeated runs "
         f"with identical inputs: {runs}"
@@ -348,16 +343,11 @@ def test_attribution_core_regions_golden_output(tmp_path):
 
 def test_attribution_core_regions_is_deterministic_across_runs(tmp_path):
     """The same tiny attribution run three times must produce byte-identical BED text."""
-    runs = [
-        _run_tiny_attribution(tmp_path / f"run{i}")
-        for i in range(3)
-    ]
+    runs = [_run_tiny_attribution(tmp_path / f"run{i}") for i in range(3)]
     assert runs[0] == runs[1] == runs[2], "attribution core_regions.bed is not deterministic"
 
 
-@pytest.mark.skipif(
-    not GOLDEN_DIR.exists(), reason="golden fixtures not yet generated"
-)
+@pytest.mark.skipif(not GOLDEN_DIR.exists(), reason="golden fixtures not yet generated")
 def test_golden_fixtures_exist():
     """Guard against an accidental empty-fixture regen wiping out the pinned outputs."""
     assert (GOLDEN_DIR / "dataset_build_golden.json").exists()

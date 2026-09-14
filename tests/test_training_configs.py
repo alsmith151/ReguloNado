@@ -42,7 +42,7 @@ def test_phase_preset_composes(preset: str, expected: tuple[int, str]) -> None:
     assert cfg.head.type == "transfer_mlp"
     assert cfg.loss.name == loss_name
     assert cfg.trainer.unfreeze_backbone_stages_from_output_end == unfreeze_stages
-    assert cfg.trainer.persistent_workers is False
+    assert cfg.trainer.persistent_workers is True
 
 
 @pytest.mark.parametrize(

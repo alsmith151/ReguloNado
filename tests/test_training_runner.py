@@ -1,6 +1,6 @@
 """CPU-only unit tests for the pure/module-level steps extracted from run_training.
 
-These exercise the individual seams (config resolution, streaming guards, collate/loss
+These exercise the individual seams (config resolution, dataset access, collate/loss
 construction, history extraction, summary assembly) without loading a real dataset or
 model — no GPU, no downloads.
 """
@@ -8,31 +8,30 @@ model — no GPU, no downloads.
 from __future__ import annotations
 
 import json
+import pickle
+from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.ipc as ipc
+import pyarrow.parquet as pq
 import pytest
 import torch
-from regulonado.training.callbacks import StreamingEpochProgressCallback
 from regulonado.training.config import TrainerConfig
-from regulonado.training.data import count_arrow_split_rows
+from regulonado.training.data import WindowParquetDataset
 from regulonado.training.runner import (
     StepBudget,
     _build_collate_and_loss,
     _build_training_arguments,
     _build_training_summary,
     _empirical_track_output_bias,
-    _estimate_shuffle_buffer,
     _finalize_trainer_outputs,
-    _guard_streaming_persistent_workers,
     _prepare_dataset_splits,
     _resolve_empirical_output_bias,
     _resolve_step_budget,
     _resolve_trainer_config,
     _validate_dataset_schema,
 )
-from transformers import TrainerControl, TrainerState
+from torch.utils.data import Subset
 
 MINIMAL_CFG = {
     "data": {},
@@ -44,38 +43,138 @@ MINIMAL_CFG = {
 }
 
 
-class _DatasetColumns:
-    def __init__(self, *columns: str) -> None:
-        self.column_names = list(columns)
+def _write_shard(
+    path: Path,
+    *,
+    start: int,
+    n_rows: int,
+    context: int = 4,
+    n_tracks: int = 2,
+    n_bins: int = 3,
+    rows_per_row_group: int = 1,
+) -> None:
+    """Write a tiny HF-layout Parquet shard directly with pyarrow, for dataset fixtures."""
+    seq = [[(start + i) % 4] * context for i in range(n_rows)]
+    sig = [
+        [
+            [float((start + i) * 100 + t * n_bins + b) for b in range(n_bins)]
+            for t in range(n_tracks)
+        ]
+        for i in range(n_rows)
+    ]
+    table = pa.table(
+        {
+            "sequence_tokens": pa.array(seq, type=pa.list_(pa.uint8(), context)),
+            "signal": pa.array(sig, type=pa.list_(pa.list_(pa.float32(), n_bins), n_tracks)),
+            "interval": pa.array([f"chr1:{start + i}" for i in range(n_rows)]),
+            "index": pa.array(list(range(start, start + n_rows)), type=pa.int64()),
+            "local_index": pa.array(list(range(n_rows)), type=pa.int64()),
+        }
+    )
+    pq.write_table(table, str(path), row_group_size=rows_per_row_group)
+
+
+def _write_split(data_dir: Path, split: str, shard_row_counts: list[int]) -> None:
+    (data_dir / "data").mkdir(parents=True, exist_ok=True)
+    n_shards = len(shard_row_counts)
+    start = 0
+    for shard_idx, n_rows in enumerate(shard_row_counts):
+        name = f"{split}-{shard_idx:05d}-of-{n_shards:05d}.parquet"
+        _write_shard(data_dir / "data" / name, start=start, n_rows=n_rows)
+        start += n_rows
+
+
+class _FakeSchema:
+    def __init__(self, *names: str) -> None:
+        self.names = list(names)
+
+
+class _FakeParquetDataset:
+    def __init__(self, *names: str) -> None:
+        self.schema = _FakeSchema(*names)
 
 
 def test_validate_dataset_schema_accepts_model_inputs() -> None:
     _validate_dataset_schema(
-        {"train": _DatasetColumns("input_ids", "labels", "interval")}
+        {"train": _FakeParquetDataset("sequence_tokens", "signal", "interval")}
     )
 
 
-def test_validate_dataset_schema_rejects_missing_input_ids() -> None:
-    with pytest.raises(ValueError, match="missing required column.*input_ids"):
-        _validate_dataset_schema({"train": _DatasetColumns("labels", "interval")})
+def test_validate_dataset_schema_rejects_missing_sequence_tokens() -> None:
+    with pytest.raises(ValueError, match="missing required column.*sequence_tokens"):
+        _validate_dataset_schema({"train": _FakeParquetDataset("signal", "interval")})
 
 
-@pytest.mark.parametrize("compression", [None, "lz4", "zstd"])
-def test_count_arrow_split_rows_reads_batch_headers_across_shards(tmp_path, compression) -> None:
-    shard_rows = [(1000, 300), (512, 512), (0, 10)]
-    filenames = []
-    for index, (n_rows, chunk) in enumerate(shard_rows):
-        name = f"data-{index:05d}-of-{len(shard_rows):05d}.arrow"
-        table = pa.table({"labels": pa.array([b"x" * 64] * n_rows)})
-        options = ipc.IpcWriteOptions(compression=compression)
-        with ipc.new_stream(str(tmp_path / name), table.schema, options=options) as writer:
-            writer.write_table(table, max_chunksize=chunk)
-        filenames.append(name)
-    (tmp_path / "state.json").write_text(
-        json.dumps({"_data_files": [{"filename": name} for name in filenames]})
-    )
+class TestWindowParquetDataset:
+    def test_random_access_across_shards_first_last_and_boundary(self, tmp_path) -> None:
+        _write_split(tmp_path, "train", [3, 2])
 
-    assert count_arrow_split_rows(tmp_path) == 1512
+        dataset = WindowParquetDataset(tmp_path, "train")
+
+        assert len(dataset) == 5
+        assert dataset[0]["interval"] == "chr1:0"
+        # Boundary: last row of shard 0, first row of shard 1.
+        assert dataset[2]["interval"] == "chr1:2"
+        assert dataset[3]["interval"] == "chr1:3"
+        assert dataset[4]["interval"] == "chr1:4"
+        assert dataset[0]["sequence_tokens"].dtype == np.uint8
+        assert dataset[0]["signal"].dtype == np.float32
+        assert dataset[0]["signal"].shape == (2, 3)
+
+    def test_negative_index_wraps_like_a_sequence(self, tmp_path) -> None:
+        _write_split(tmp_path, "train", [3, 2])
+        dataset = WindowParquetDataset(tmp_path, "train")
+
+        assert dataset[-1]["interval"] == dataset[4]["interval"]
+
+    def test_index_error_out_of_range(self, tmp_path) -> None:
+        _write_split(tmp_path, "train", [3, 2])
+        dataset = WindowParquetDataset(tmp_path, "train")
+
+        with pytest.raises(IndexError):
+            dataset[5]
+        with pytest.raises(IndexError):
+            dataset[-6]
+
+    def test_missing_split_raises_file_not_found(self, tmp_path) -> None:
+        _write_split(tmp_path, "train", [3])
+
+        with pytest.raises(FileNotFoundError, match="regulonado dataset"):
+            WindowParquetDataset(tmp_path, "validation")
+
+    def test_pickle_round_trip_with_no_open_handles(self, tmp_path) -> None:
+        _write_split(tmp_path, "train", [3, 2])
+        dataset = WindowParquetDataset(tmp_path, "train")
+        # Touch the dataset before pickling so any opened file handles must be dropped.
+        _ = dataset[0]
+        assert dataset._files
+
+        restored = pickle.loads(pickle.dumps(dataset))
+
+        assert restored._files == {}
+        assert len(restored) == len(dataset)
+        assert restored[4]["interval"] == dataset[4]["interval"]
+
+    def test_transform_is_applied_per_example(self, tmp_path) -> None:
+        _write_split(tmp_path, "train", [2])
+        dataset = WindowParquetDataset(
+            tmp_path, "train", transform=lambda example: {"input_ids": example["sequence_tokens"]}
+        )
+
+        assert set(dataset[0]) == {"input_ids"}
+
+    def test_handles_multiple_rows_per_row_group(self, tmp_path) -> None:
+        (tmp_path / "data").mkdir()
+        _write_shard(
+            tmp_path / "data" / "train-00000-of-00001.parquet",
+            start=0,
+            n_rows=6,
+            rows_per_row_group=3,
+        )
+        dataset = WindowParquetDataset(tmp_path, "train")
+
+        assert len(dataset) == 6
+        assert [dataset[i]["interval"] for i in range(6)] == [f"chr1:{i}" for i in range(6)]
 
 
 def test_step_budget_counts_optimizer_steps_per_epoch() -> None:
@@ -99,12 +198,6 @@ def test_step_budget_keeps_explicit_max_steps() -> None:
     cfg = TrainerConfig(batch_size=12, max_steps=500)
 
     assert _resolve_step_budget(cfg, train_rows=41_699, world_size=1) == StepBudget(3_474, 500)
-    assert _resolve_step_budget(cfg, train_rows=None, world_size=1) == StepBudget(None, 500)
-
-
-def test_step_budget_requires_max_steps_when_split_size_unknown() -> None:
-    with pytest.raises(ValueError, match="trainer.max_steps"):
-        _resolve_step_budget(TrainerConfig(), train_rows=None, world_size=1)
 
 
 def test_step_budget_rejects_split_smaller_than_global_batch() -> None:
@@ -158,87 +251,26 @@ def test_evals_per_epoch_requires_known_epoch_size(tmp_path) -> None:
         )
 
 
-def test_streaming_epoch_progress_uses_steps_per_epoch() -> None:
-    state = TrainerState(global_step=500, epoch=1.0)
+def test_seeded_eval_cap_selects_a_fixed_subset(tmp_path) -> None:
+    validation = list(range(30))
+    dataset_dict = {"validation": validation}
 
-    StreamingEpochProgressCallback(steps_per_epoch=3_474).on_step_end(None, state, TrainerControl())
+    prepared = _prepare_dataset_splits(dataset_dict, TrainerConfig(max_eval_samples=6), seed=0)
 
-    assert state.epoch == pytest.approx(500 / 3_474)
-
-
-def test_streaming_eval_cap_strides_across_every_validation_shard(tmp_path) -> None:
-    from datasets import Dataset, load_dataset
-
-    Dataset.from_dict({"local_index": list(range(30))}).save_to_disk(
-        str(tmp_path / "validation"), num_shards=3
-    )
-    (tmp_path / "dataset_dict.json").write_text(json.dumps({"splits": ["validation"]}))
-    dataset_dict = dict(load_dataset(str(tmp_path), streaming=True))
-
-    prepared = _prepare_dataset_splits(
-        dataset_dict,
-        {},
-        TrainerConfig(max_eval_samples=6),
-        {},
-        data_path=tmp_path,
-        streaming=True,
-        seed=0,
-    )
-
-    selected = [row["local_index"] for row in prepared["validation"]]
-    assert selected == [0, 5, 10, 15, 20, 25]
+    assert isinstance(prepared["validation"], Subset)
+    assert len(prepared["validation"]) == 6
+    # Deterministic for a fixed seed.
+    again = _prepare_dataset_splits(dataset_dict, TrainerConfig(max_eval_samples=6), seed=0)
+    assert list(prepared["validation"]) == list(again["validation"])
 
 
-def test_streaming_train_examples_own_their_arrays_before_shuffle(tmp_path) -> None:
-    from datasets import Array2D, Dataset, Features, Value, load_dataset
+def test_seeded_eval_cap_is_a_no_op_below_the_limit(tmp_path) -> None:
+    validation = list(range(4))
+    dataset_dict = {"validation": validation}
 
-    features = Features(
-        {
-            "input_ids": Array2D(dtype="int8", shape=(4, 8)),
-            "labels": Array2D(dtype="float32", shape=(2, 3)),
-            "interval": Value("string"),
-        }
-    )
-    Dataset.from_dict(
-        {
-            "input_ids": [np.eye(4, 8, dtype=np.int8)] * 6,
-            "labels": [np.ones((2, 3), dtype=np.float32)] * 6,
-            "interval": [f"chr1:{i}" for i in range(6)],
-        },
-        features=features,
-    ).save_to_disk(str(tmp_path / "train"), num_shards=2)
-    (tmp_path / "dataset_dict.json").write_text(json.dumps({"splits": ["train"]}))
-    dataset_dict = dict(load_dataset(str(tmp_path), streaming=True))
-    data_cfg = {"shuffle_buffer_ram_gb": 1.0, "context_length": 8, "n_pred_bins": 3}
+    prepared = _prepare_dataset_splits(dataset_dict, TrainerConfig(max_eval_samples=6), seed=0)
 
-    prepared = _prepare_dataset_splits(
-        dataset_dict, data_cfg, TrainerConfig(), {}, data_path=tmp_path, streaming=True, seed=0
-    )
-
-    examples = list(prepared["train"])
-    assert len(examples) == 6
-    for example in examples:
-        assert example["input_ids"].dtype == np.int8
-        assert example["input_ids"].flags.owndata
-        assert example["labels"].shape == (2, 3)
-        assert example["labels"].flags.owndata
-
-
-def test_shuffle_buffer_sizes_examples_by_stored_dtypes() -> None:
-    data_cfg = {"shuffle_buffer_ram_gb": 8.0, "context_length": 100, "n_pred_bins": 10}
-
-    # int8 one-hot sequence (4 x 100 bytes) + float32 labels (2 x 10 x 4 bytes) = 480 bytes.
-    assert _estimate_shuffle_buffer(data_cfg, {"n_tracks": 2}) == int(8e9 / 480)
-
-
-def test_streaming_shuffle_ram_budget_is_divided_across_workers() -> None:
-    data_cfg = {"shuffle_buffer_ram_gb": 8.0, "context_length": 100, "n_pred_bins": 10}
-    metadata = {"n_tracks": 2}
-
-    single_process = _estimate_shuffle_buffer(data_cfg, metadata, num_workers=0)
-    four_workers = _estimate_shuffle_buffer(data_cfg, metadata, num_workers=4)
-
-    assert four_workers == single_process // 4
+    assert prepared["validation"] is validation
 
 
 def test_empirical_track_output_bias_matches_track_means_through_softplus() -> None:
@@ -248,7 +280,7 @@ def test_empirical_track_output_bias_matches_track_means_through_softplus() -> N
     ]
 
     bias = _empirical_track_output_bias(
-        dataset, n_tracks=2, activation_type="softplus", max_samples=2
+        dataset, n_tracks=2, activation_type="softplus", max_samples=2, seed=0
     )
 
     torch.testing.assert_close(
@@ -256,15 +288,40 @@ def test_empirical_track_output_bias_matches_track_means_through_softplus() -> N
     )
 
 
-def test_empirical_track_output_bias_respects_sample_limit_and_transposed_labels() -> None:
+def test_empirical_track_output_bias_respects_sample_limit() -> None:
     dataset = [
         {"labels": np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])},
         {"labels": np.full((3, 2), 100.0)},
     ]
 
-    bias = _empirical_track_output_bias(dataset, n_tracks=2, activation_type="exp", max_samples=1)
+    bias = _empirical_track_output_bias(
+        dataset, n_tracks=2, activation_type="exp", max_samples=1, seed=0
+    )
 
-    torch.testing.assert_close(torch.exp(torch.tensor(bias)), torch.tensor([3.0, 4.0]))
+    # With max_samples < len(dataset), only one of the two examples contributes.
+    exp_bias = torch.exp(torch.tensor(bias))
+    assert exp_bias.tolist() in (
+        pytest.approx([2.0, 3.0]),
+        pytest.approx([100.0, 100.0]),
+    )
+
+
+def test_empirical_track_output_bias_sampler_does_not_only_draw_the_first_rows() -> None:
+    """Chromosome-major shard order means the first N rows are all chr1 — sampling must
+    not systematically prefer them."""
+    n_total = 200
+    # Track 0 encodes the row's position so we can tell which rows were sampled.
+    dataset = [{"labels": np.array([[float(i)], [1.0]])} for i in range(n_total)]
+
+    drawn_indices: set[int] = set()
+    for seed in range(20):
+        bias = _empirical_track_output_bias(
+            dataset, n_tracks=2, activation_type="identity", max_samples=1, seed=seed
+        )
+        drawn_indices.add(int(round(bias[0])))
+
+    # Seeded random sampling across many seeds should reach well beyond the first rows.
+    assert max(drawn_indices) > 20
 
 
 @pytest.mark.parametrize(
@@ -278,7 +335,7 @@ def test_resolve_empirical_output_initialization(mode: str, zero_weights: bool) 
     }
     dataset = {"train": [{"labels": np.array([[1.0, 3.0], [2.0, 4.0]])}]}
 
-    _resolve_empirical_output_bias(cfg, dataset, n_tracks=2)
+    _resolve_empirical_output_bias(cfg, dataset, n_tracks=2, seed=0)
 
     assert cfg["head"]["zero_output_weights"] is zero_weights
     resolved = torch.tensor(cfg["head"]["resolved_output_bias"])
@@ -317,24 +374,6 @@ class TestResolveTrainerConfig:
         assert trainer_cfg.resume_from_checkpoint is True
 
 
-class TestGuardStreamingPersistentWorkers:
-    def test_disables_persistent_workers_when_streaming(self) -> None:
-        trainer_cfg = TrainerConfig(persistent_workers=True)
-        with pytest.warns(UserWarning, match="persistent_workers"):
-            guarded = _guard_streaming_persistent_workers(trainer_cfg, streaming=True)
-        assert guarded.persistent_workers is False
-
-    def test_leaves_non_streaming_untouched(self) -> None:
-        trainer_cfg = TrainerConfig(persistent_workers=True)
-        guarded = _guard_streaming_persistent_workers(trainer_cfg, streaming=False)
-        assert guarded.persistent_workers is True
-
-    def test_leaves_already_disabled_untouched_when_streaming(self) -> None:
-        trainer_cfg = TrainerConfig(persistent_workers=False)
-        guarded = _guard_streaming_persistent_workers(trainer_cfg, streaming=True)
-        assert guarded.persistent_workers is False
-
-
 class TestBuildCollateAndLoss:
     RECORDS = [{}, {}]  # two tracks, all fields default via resolve_scale_and_clip fallbacks
 
@@ -346,15 +385,16 @@ class TestBuildCollateAndLoss:
         assert callable(collate_fn)
         assert callable(loss_fn)
 
-    def test_collate_fn_stacks_batch(self) -> None:
+    def test_collate_fn_stacks_batch_and_keeps_input_ids_uint8(self) -> None:
         cfg = {"model": {"use_track_metadata": False}, "data": {}, "loss": {"name": "mse"}}
         collate_fn, _, _, _ = _build_collate_and_loss(cfg, self.RECORDS)
         batch = [
-            {"input_ids": torch.zeros(4), "labels": torch.ones(2, 3)},
-            {"input_ids": torch.zeros(4), "labels": torch.ones(2, 3)},
+            {"input_ids": np.zeros(4, dtype=np.uint8), "labels": torch.ones(2, 3)},
+            {"input_ids": np.ones(4, dtype=np.uint8), "labels": torch.ones(2, 3)},
         ]
         collated = collate_fn(batch)
         assert collated["input_ids"].shape == (2, 4)
+        assert collated["input_ids"].dtype == torch.uint8
         assert collated["labels"].shape == (2, 2, 3)
 
     def test_loss_fn_computes_mse(self) -> None:

@@ -95,9 +95,9 @@ class DatasetConfig(BaseModel):
     n_pred_bins: int = Field(default=6_144, ge=1)
     shift_max_bp: int = Field(default=64, ge=0)
     extract_threads: int = Field(default=32, ge=1)
-    arrow_write_threads: int = Field(default=4, ge=1)
-    arrow_batch_size: int = Field(default=512, ge=1)
-    compression: str = "lz4"
+    write_threads: int = Field(default=4, ge=1)
+    zstd_level: int = Field(default=3, ge=1)
+    rows_per_row_group: int = Field(default=1, ge=1)
     stage_to_scratch: bool = True
     drop_missing: bool = True
     dedupe_tracks: Literal["none", "identity", "content"] = "content"
@@ -110,15 +110,6 @@ class DatasetConfig(BaseModel):
                 f"bin_size ({self.bin_size})"
             )
         return self
-
-
-class RecompressConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = True
-    zstd_level: int = 3
-    max_batch_size: int = Field(default=4, ge=1)
-    workers: int = Field(default=8, ge=1)
 
 
 class ScalingConfig(BaseModel):
@@ -530,7 +521,6 @@ class RegulonadoConfig(BaseModel):
     results_dir: str = Field(min_length=1)
     inputs: InputsConfig
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
-    recompress: RecompressConfig = Field(default_factory=RecompressConfig)
     scaling: ScalingConfig = Field(default_factory=ScalingConfig)
     qc: QCConfig = Field(default_factory=QCConfig)
     train: TrainConfig | None = None

@@ -62,7 +62,6 @@ an Apptainer image; it carries the same scheduling settings plus
 | Rule | Runtime | Memory | CPUs | Notes |
 | --- | --- | --- | --- | --- |
 | `build_dataset` | 1440 min | 256 GB | 32 | Memory- and I/O-hungry rather than GPU-bound |
-| `recompress_dataset` | 720 min | 128 GB | 8 | |
 | `train_phase` | 1440 min | 256 GB | 16 | GPU rule; own partition and account |
 
 Snakemake's Slurm executor has no generic GPU resource, so the GRES request is

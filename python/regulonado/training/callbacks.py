@@ -176,27 +176,6 @@ class LRLogCallback(TrainerCallback):
             state.log_history[-1].update(logs)
 
 
-class StreamingEpochProgressCallback(TrainerCallback):
-    """Report ``state.epoch`` as optimizer steps completed over steps per epoch.
-
-    HF Trainer cannot size an epoch for a streaming dataset, so it treats the
-    whole ``max_steps`` budget as a single epoch. The runner knows the split size
-    from the Arrow headers and corrects the value before it is logged.
-    """
-
-    def __init__(self, steps_per_epoch: int) -> None:
-        self.steps_per_epoch = steps_per_epoch
-
-    def on_step_end(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs: Any,
-    ) -> None:
-        state.epoch = state.global_step / self.steps_per_epoch
-
-
 class EvalExampleDiagnostics(TrainerCallback):
     """Plot and record per-track validation magnitudes after each evaluation.
 

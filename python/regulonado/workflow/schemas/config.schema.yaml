@@ -288,20 +288,21 @@ $defs:
         minimum: 1
         title: Extract Threads
         type: integer
-      arrow_write_threads:
+      write_threads:
         default: 4
         minimum: 1
-        title: Arrow Write Threads
+        title: Write Threads
         type: integer
-      arrow_batch_size:
-        default: 512
+      zstd_level:
+        default: 3
         minimum: 1
-        title: Arrow Batch Size
+        title: Zstd Level
         type: integer
-      compression:
-        default: lz4
-        title: Compression
-        type: string
+      rows_per_row_group:
+        default: 1
+        minimum: 1
+        title: Rows Per Row Group
+        type: integer
       stage_to_scratch:
         default: true
         title: Stage To Scratch
@@ -791,29 +792,6 @@ $defs:
         type: integer
     title: QCConfig
     type: object
-  RecompressConfig:
-    additionalProperties: false
-    properties:
-      enabled:
-        default: true
-        title: Enabled
-        type: boolean
-      zstd_level:
-        default: 3
-        title: Zstd Level
-        type: integer
-      max_batch_size:
-        default: 4
-        minimum: 1
-        title: Max Batch Size
-        type: integer
-      workers:
-        default: 8
-        minimum: 1
-        title: Workers
-        type: integer
-    title: RecompressConfig
-    type: object
   ScalingConfig:
     additionalProperties: false
     properties:
@@ -1017,8 +995,6 @@ properties:
     $ref: '#/$defs/InputsConfig'
   dataset:
     $ref: '#/$defs/DatasetConfig'
-  recompress:
-    $ref: '#/$defs/RecompressConfig'
   scaling:
     $ref: '#/$defs/ScalingConfig'
   qc:

@@ -322,7 +322,7 @@ each for a specific reason.
 | Preset installer (`regulonado init`) | **Reimplemented** | SeqNado's is a Typer command body, not a callable function; there is nothing to import |
 | Config generator (`regulonado config`) | **Reimplemented** | Same reason, and the generated config is a different shape |
 | Genome registry reader | **Reimplemented** | SeqNado's loader calls `sys.exit(1)` when the file is missing, which is unusable from library code. When SeqNado is present its `GenomeConfig` model is still used to validate entries, so the error messages are SeqNado's |
-| `build` / `recompress` / `train` config sections | **ReguloNado-specific** | No SeqNado analogue — dataset geometry, Arrow compression and training phases have no counterpart in an NGS pipeline |
+| `build` / `train` config sections | **ReguloNado-specific** | No SeqNado analogue — dataset geometry and training phases have no counterpart in an NGS pipeline |
 
 The reimplemented pieces are behavioural copies, not forks. Preset resolution
 and the prompt primitive both have a fallback that reproduces SeqNado's
@@ -332,6 +332,6 @@ resolution is a filesystem convention, and the prompt is a string format.
 
 ## Not shared
 
-Dataset geometry, Arrow compression and rechunking, training phases, presets and
-checkpoints are ReguloNado's alone. The track sheet is the seam: everything
-upstream of it is SeqNado's vocabulary, everything downstream is ReguloNado's.
+Dataset geometry and training phases, presets and checkpoints are ReguloNado's alone.
+The track sheet is the seam: everything upstream of it is SeqNado's vocabulary,
+everything downstream is ReguloNado's.

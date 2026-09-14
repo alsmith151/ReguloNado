@@ -1,19 +1,19 @@
-//! Chromosome-pass Arrow writer.
+//! Chromosome-pass Parquet writer.
 //!
 //! For each chromosome, decode the binned signal of all tracks once into an
 //! in-RAM `(n_tracks, n_chrom_bins)` matrix, then slice per-sample rows out of
 //! that matrix. This collapses ~N_samples random BigWig seeks per chromosome
 //! into one sequential pass per (chrom, track) pair.
 //!
-//! Output: Arrow IPC shards `data-NNNNN-of-MMMMM.arrow`, ordered chrom-major
-//! with shard `00000` on the longest chromosome that has at least one sample in
-//! this split (descending by length). Each chromosome is split into
-//! `ceil(samples / shard_size)` shard files, and each shard file holds
-//! `ceil(shard_size / batch_size)` Arrow record batches — so shard *file* size
-//! (`shard_size`) is decoupled from the RAM-bounded record-batch size
-//! (`batch_size`). Rows within a shard are in original BED order. The schema
-//! includes a `local_index` column so downstream code can recover original BED
-//! order via `dataset.sort("index")` if needed.
+//! Output: Parquet shards `{split}-NNNNN-of-MMMMM.parquet`, all splits sharing
+//! one output directory, ordered chrom-major with shard `00000` on the longest
+//! chromosome that has at least one sample in this split (descending by
+//! length). Each chromosome is split into `ceil(samples / shard_size)` shard
+//! files. Rows within a shard are written one at a time (bounding writer RAM
+//! to one example), grouped into Parquet row groups of `rows_per_row_group`
+//! rows. Rows within a shard are in original BED order. The schema includes a
+//! `local_index` column so downstream code can recover original BED order via
+//! `dataset.sort("index")` if needed.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,18 +23,18 @@ use arrow_array::{
     builder::{Int64Builder, StringBuilder},
     ArrayRef, RecordBatch,
 };
-use arrow_ipc::writer::StreamWriter;
+use parquet::arrow::ArrowWriter;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-use crate::arrow_schema::{hf_arrow_schema, make_2d_f32_array, make_2d_i8_array};
+use crate::arrow_schema::{sequence_tokens_array, signal_array, window_arrow_schema};
 use crate::bigwig_io::{open_bigwig_handles, BwHandle};
 use crate::binning::{bin_region_into, BinningScratch, BinningUsage};
-use crate::fasta::{load_fasta_index, read_one_hot_sequence};
-use crate::io_utils::{ipc_write_options, maybe_log_progress};
+use crate::fasta::{load_fasta_index, read_sequence_tokens};
+use crate::io_utils::{maybe_log_progress, parquet_writer_properties};
 
-/// Timing profile for a single Arrow shard write.
+/// Timing profile for a single Parquet shard write.
 ///
 /// Tracks raw and wall-clock time spent in each stage of writing one shard
 /// file, along with row and byte counts. Aggregated across shards for
@@ -45,8 +45,8 @@ struct WriteShardProfile {
     bytes: u64,
     slice_ns: u128,
     fasta_ns: u128,
-    batch_ns: u128,
-    arrow_write_ns: u128,
+    row_build_ns: u128,
+    parquet_write_ns: u128,
     wall_ns: u128,
 }
 
@@ -56,17 +56,19 @@ impl WriteShardProfile {
         self.bytes += other.bytes;
         self.slice_ns += other.slice_ns;
         self.fasta_ns += other.fasta_ns;
-        self.batch_ns += other.batch_ns;
-        self.arrow_write_ns += other.arrow_write_ns;
+        self.row_build_ns += other.row_build_ns;
+        self.parquet_write_ns += other.parquet_write_ns;
         self.wall_ns += other.wall_ns;
     }
 }
 
-/// Specification for writing a single Arrow shard file.
+/// Specification for writing a single Parquet shard file.
 ///
-/// Describes the output location, shard numbering (for the `data-NNNNN-of-MMMMM.arrow`
-/// filename), and the range of samples within the split that this shard covers.
+/// Describes the split name (for the `{split}-NNNNN-of-MMMMM.parquet` filename),
+/// shard numbering, and the range of samples within the split that this shard
+/// covers.
 struct WriteShardSpec<'a> {
+    split_name: &'a str,
     out_dir: &'a str,
     shard_idx: usize,
     shard_total: usize,
@@ -79,33 +81,30 @@ struct WriteShardSpec<'a> {
 /// Context passed to each shard-write task.
 ///
 /// Contains references to all shared data (schema, decoded chromosome signals,
-/// FASTA index, BED rows) and settings (bin/batch/context dimensions, compression).
-/// Each worker thread (via `write_chrom_shard`) reads from this context to construct
-/// its shard file without copying the large signal matrix.
+/// FASTA index, BED rows) and settings (bin/context dimensions, writer
+/// properties). Each worker thread (via `write_chrom_shard`) reads from this
+/// context to construct its shard file without copying the large signal matrix.
 struct WriteShardCtx<'a> {
     schema: Arc<arrow_schema::Schema>,
-    compression: &'a str,
+    rows_per_row_group: usize,
+    zstd_level: i32,
     chrom_signals: &'a [f32],
     n_chrom_bins: usize,
     n_tracks: usize,
     n_bins: usize,
     context_len: usize,
     bin_size: u32,
-    /// Rows per Arrow record batch within a shard file. A shard holds
-    /// `ceil((shard_end - shard_start) / batch_size)` record batches, keeping
-    /// peak RAM bounded by one batch regardless of the shard's row count.
-    batch_size: usize,
     signal_intervals: &'a [(String, u32, u32)],
     bed_rows: &'a [(String, u32, u32, String)],
     fasta_path: &'a str,
     fai: &'a HashMap<String, crate::fasta::FastaIndexRecord>,
 }
 
-/// Write a single Arrow shard file for one chromosome.
+/// Write a single Parquet shard file for one chromosome.
 ///
 /// For each sample in the shard, slices the decoded chromosome signal matrix to extract
-/// the binned labels for that sample's interval, reads its FASTA sequence, and appends
-/// a record batch to the Arrow file. The decoded signal was already read once during
+/// the binned labels for that sample's interval, reads its FASTA sequence tokens, and
+/// appends one row to the Parquet writer. The decoded signal was already read once during
 /// the per-chromosome scan phase; this function only slices per-sample rows from it.
 ///
 /// Returns a profile with timing breakdowns and byte count for later aggregation,
@@ -117,104 +116,89 @@ fn write_chrom_shard(
     let started = Instant::now();
     let rows_in_shard = spec.shard_end - spec.shard_start;
     let shard_path = format!(
-        "{}/data-{:05}-of-{:05}.arrow",
-        spec.out_dir, spec.shard_idx, spec.shard_total
+        "{}/{}-{:05}-of-{:05}.parquet",
+        spec.out_dir, spec.split_name, spec.shard_idx, spec.shard_total
     );
 
     let fasta = std::fs::File::open(ctx.fasta_path)
         .map_err(|e| format!("Cannot open FASTA {}: {e}", ctx.fasta_path))?;
     let out_file = std::fs::File::create(&shard_path)
-        .map_err(|e| format!("Cannot create Arrow file {shard_path}: {e}"))?;
-    let write_options = ipc_write_options(ctx.compression)?;
-    let mut writer = StreamWriter::try_new_with_options(out_file, &ctx.schema, write_options)
+        .map_err(|e| format!("Cannot create Parquet file {shard_path}: {e}"))?;
+    let props = parquet_writer_properties(ctx.rows_per_row_group, ctx.zstd_level)?;
+    let mut writer = ArrowWriter::try_new(out_file, Arc::clone(&ctx.schema), Some(props))
         .map_err(|e| e.to_string())?;
 
     let mut slice_ns: u128 = 0;
     let mut fasta_ns: u128 = 0;
-    let mut batch_ns: u128 = 0;
-    let mut arrow_write_ns: u128 = 0;
+    let mut row_build_ns: u128 = 0;
+    let mut parquet_write_ns: u128 = 0;
 
-    // Write the shard as a sequence of record batches of at most `batch_size`
-    // rows. Decoupling on-disk shard size from record-batch size keeps peak RAM
-    // bounded by one batch while producing far fewer, larger shard files.
-    let batch_size = ctx.batch_size.max(1);
-    let mut batch_start = spec.shard_start;
-    while batch_start < spec.shard_end {
-        let batch_end = (batch_start + batch_size).min(spec.shard_end);
-        let rows_in_batch = batch_end - batch_start;
-
+    // Write one sample per row, so writer RAM is bounded by a single example
+    // regardless of shard size. Parquet groups rows into row groups of
+    // `rows_per_row_group` internally via the writer properties.
+    for (local_idx, global_idx) in spec.samples[spec.shard_start..spec.shard_end]
+        .iter()
+        .copied()
+    {
         let t_slice = Instant::now();
-        let mut labels: Vec<f32> = vec![0.0; rows_in_batch * ctx.n_tracks * ctx.n_bins];
-        for (row_idx, (_, global_idx)) in spec.samples[batch_start..batch_end]
-            .iter()
-            .copied()
-            .enumerate()
-        {
-            let (_chrom, sig_start, sig_end) = &ctx.signal_intervals[global_idx];
-            let bin_start = (*sig_start / ctx.bin_size) as usize;
-            let bin_end_raw = (*sig_end / ctx.bin_size) as usize;
-            let bin_end = bin_end_raw.min(ctx.n_chrom_bins);
-            let copy_n = bin_end.saturating_sub(bin_start).min(ctx.n_bins);
+        let mut label = vec![0.0f32; ctx.n_tracks * ctx.n_bins];
+        let (_chrom, sig_start, sig_end) = &ctx.signal_intervals[global_idx];
+        let bin_start = (*sig_start / ctx.bin_size) as usize;
+        let bin_end_raw = (*sig_end / ctx.bin_size) as usize;
+        let bin_end = bin_end_raw.min(ctx.n_chrom_bins);
+        let copy_n = bin_end.saturating_sub(bin_start).min(ctx.n_bins);
 
-            if copy_n > 0 && bin_start < ctx.n_chrom_bins {
-                let row_base = row_idx * ctx.n_tracks * ctx.n_bins;
-                for track_idx in 0..ctx.n_tracks {
-                    let src_start = track_idx * ctx.n_chrom_bins + bin_start;
-                    let dst_start = row_base + track_idx * ctx.n_bins;
-                    labels[dst_start..dst_start + copy_n]
-                        .copy_from_slice(&ctx.chrom_signals[src_start..src_start + copy_n]);
-                }
+        if copy_n > 0 && bin_start < ctx.n_chrom_bins {
+            for track_idx in 0..ctx.n_tracks {
+                let src_start = track_idx * ctx.n_chrom_bins + bin_start;
+                let dst_start = track_idx * ctx.n_bins;
+                label[dst_start..dst_start + copy_n]
+                    .copy_from_slice(&ctx.chrom_signals[src_start..src_start + copy_n]);
             }
         }
         slice_ns += t_slice.elapsed().as_nanos();
 
         let t_fasta = Instant::now();
-        let mut input_values = Vec::with_capacity(rows_in_batch * 4 * ctx.context_len);
-        let mut interval_builder = StringBuilder::with_capacity(rows_in_batch, rows_in_batch * 32);
-        let mut index_builder = Int64Builder::with_capacity(rows_in_batch);
-        let mut local_index_builder = Int64Builder::with_capacity(rows_in_batch);
-
-        for (local_idx, global_idx) in spec.samples[batch_start..batch_end].iter().copied() {
-            let (bed_chrom, bed_start, bed_end, _) = &ctx.bed_rows[global_idx];
-            let seq = read_one_hot_sequence(
-                &fasta,
-                ctx.fai,
-                bed_chrom,
-                *bed_start,
-                *bed_end,
-                ctx.context_len,
-            )?;
-            input_values.extend_from_slice(&seq);
-            interval_builder.append_value(format!("{bed_chrom}:{bed_start}-{bed_end}"));
-            index_builder.append_value(global_idx as i64);
-            local_index_builder.append_value(local_idx as i64);
-        }
+        let (bed_chrom, bed_start, bed_end, _) = &ctx.bed_rows[global_idx];
+        let tokens = read_sequence_tokens(
+            &fasta,
+            ctx.fai,
+            bed_chrom,
+            *bed_start,
+            *bed_end,
+            ctx.context_len,
+        )?;
         fasta_ns += t_fasta.elapsed().as_nanos();
 
-        let t_batch = Instant::now();
+        let t_row = Instant::now();
+        let mut interval_builder = StringBuilder::with_capacity(1, 32);
+        let mut index_builder = Int64Builder::with_capacity(1);
+        let mut local_index_builder = Int64Builder::with_capacity(1);
+        interval_builder.append_value(format!("{bed_chrom}:{bed_start}-{bed_end}"));
+        index_builder.append_value(global_idx as i64);
+        local_index_builder.append_value(local_idx as i64);
+
         let batch = RecordBatch::try_new(
             Arc::clone(&ctx.schema),
             vec![
-                make_2d_i8_array(input_values, rows_in_batch, 4, ctx.context_len),
-                make_2d_f32_array(labels, rows_in_batch, ctx.n_tracks, ctx.n_bins),
+                sequence_tokens_array(tokens, ctx.context_len),
+                signal_array(label, ctx.n_tracks, ctx.n_bins),
                 Arc::new(interval_builder.finish()) as ArrayRef,
                 Arc::new(index_builder.finish()) as ArrayRef,
                 Arc::new(local_index_builder.finish()) as ArrayRef,
             ],
         )
         .map_err(|e| e.to_string())?;
-        batch_ns += t_batch.elapsed().as_nanos();
+        row_build_ns += t_row.elapsed().as_nanos();
 
-        let t_arrow = Instant::now();
+        let t_write = Instant::now();
         writer.write(&batch).map_err(|e| e.to_string())?;
-        arrow_write_ns += t_arrow.elapsed().as_nanos();
-
-        batch_start = batch_end;
+        parquet_write_ns += t_write.elapsed().as_nanos();
     }
 
     let t_finish = Instant::now();
-    writer.finish().map_err(|e| e.to_string())?;
-    arrow_write_ns += t_finish.elapsed().as_nanos();
+    writer.close().map_err(|e| e.to_string())?;
+    parquet_write_ns += t_finish.elapsed().as_nanos();
 
     let bytes = std::fs::metadata(&shard_path).map(|m| m.len()).unwrap_or(0);
     Ok(WriteShardProfile {
@@ -222,8 +206,8 @@ fn write_chrom_shard(
         bytes,
         slice_ns,
         fasta_ns,
-        batch_ns,
-        arrow_write_ns,
+        row_build_ns,
+        parquet_write_ns,
         wall_ns: started.elapsed().as_nanos(),
     })
 }
@@ -232,39 +216,14 @@ fn write_chrom_shard(
 ///
 /// Tracks which samples belong to this split (by chromosome), how many shards total
 /// will be written, and the next shard index to assign. Updated as each chromosome's
-/// shards are written to produce monotonically increasing `data-NNNNN-of-MMMMM.arrow`
+/// shards are written to produce monotonically increasing `{split}-NNNNN-of-MMMMM.parquet`
 /// filenames.
 struct SplitChromSamples {
     name: String,
-    out_dir: String,
     total_samples: usize,
     samples_by_chrom: HashMap<String, Vec<(usize, usize)>>,
     total_shards: usize,
     next_shard: usize,
-}
-
-/// Validate that a batch size does not exceed Arrow i32 offset limits.
-///
-/// The 2D arrays (labels and input sequences) are stored as Arrow List arrays with
-/// i32 offsets. This function checks that `batch_size * n_tracks * n_bins` and
-/// `batch_size * 4 * context_len` both fit in i32::MAX, returning an error with
-/// a suggested safe batch size if either would overflow.
-fn validate_batch_size(
-    batch_size: usize,
-    n_tracks: usize,
-    n_bins: usize,
-    context_len: usize,
-) -> Result<(), String> {
-    let max_label_offset = batch_size.saturating_mul(n_tracks).saturating_mul(n_bins);
-    let max_input_offset = batch_size.saturating_mul(4).saturating_mul(context_len);
-    if max_label_offset > i32::MAX as usize || max_input_offset > i32::MAX as usize {
-        let safe_batch = (i32::MAX as usize) / (n_tracks.max(1) * n_bins.max(1));
-        return Err(format!(
-            "batch_size={batch_size} causes Arrow i32 offset overflow. \
-             Reduce batch_size to <= {safe_batch}."
-        ));
-    }
-    Ok(())
 }
 
 /// Per-split sample grouping paired with the chromosome scan order.
@@ -275,38 +234,31 @@ type SplitPlan = (Vec<SplitChromSamples>, Vec<(String, u64)>);
 
 /// Build split-wide state and determine chromosome scan order.
 ///
-/// Validates that split_names, out_dirs, and split_sample_indices all have the
-/// same length, then groups each split's samples by chromosome. Returns both a
-/// per-split state struct (holding samples_by_chrom and total_shards for progress
-/// tracking) and a sorted list of chromosomes ordered descending by length (so the
-/// longest chromosome lands in shard `00000`). Chromosomes with zero bins after
-/// division by bin_size are excluded from the scan.
+/// Validates that split_names and split_sample_indices have the same length, then
+/// groups each split's samples by chromosome. Returns both a per-split state struct
+/// (holding samples_by_chrom and total_shards for progress tracking) and a sorted
+/// list of chromosomes ordered descending by length (so the longest chromosome
+/// lands in shard `00000`). Chromosomes with zero bins after division by bin_size
+/// are excluded from the scan.
 fn build_split_chrom_samples(
     split_names: Vec<String>,
-    out_dirs: Vec<String>,
     split_sample_indices: Vec<Vec<usize>>,
     bed_rows: &[(String, u32, u32, String)],
     chrom_lengths: &HashMap<String, crate::fasta::FastaIndexRecord>,
     bin_size: u32,
     shard_size: usize,
 ) -> Result<SplitPlan, String> {
-    if split_names.len() != out_dirs.len() || split_names.len() != split_sample_indices.len() {
+    if split_names.len() != split_sample_indices.len() {
         return Err(format!(
-            "split_names, out_dirs, and split_sample_indices must have the same length \
-             (got {}, {}, {})",
+            "split_names and split_sample_indices must have the same length (got {}, {})",
             split_names.len(),
-            out_dirs.len(),
             split_sample_indices.len(),
         ));
     }
 
     let mut chrom_seen: HashMap<String, u64> = HashMap::new();
     let mut splits = Vec::with_capacity(split_names.len());
-    for ((name, out_dir), sample_indices) in split_names
-        .into_iter()
-        .zip(out_dirs)
-        .zip(split_sample_indices)
-    {
+    for (name, sample_indices) in split_names.into_iter().zip(split_sample_indices) {
         let mut samples_by_chrom: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
         for (local_idx, global_idx) in sample_indices.iter().copied().enumerate() {
             let chrom = bed_rows
@@ -336,7 +288,6 @@ fn build_split_chrom_samples(
 
         splits.push(SplitChromSamples {
             name,
-            out_dir,
             total_samples: sample_indices.len(),
             samples_by_chrom,
             total_shards,
@@ -349,18 +300,20 @@ fn build_split_chrom_samples(
     Ok((splits, chrom_order))
 }
 
-/// Write Arrow datasets using the chromosome-pass strategy.
+/// Write Parquet datasets using the chromosome-pass strategy.
 ///
 /// Scans each chromosome once, decoding the binned signal of all tracks into a
 /// single (n_tracks, n_chrom_bins) matrix in RAM, then slices per-sample rows out of
 /// that matrix. This collapses ~N_samples random BigWig seeks per chromosome into one
 /// sequential scan per (chrom, track) pair, achieving much better BigWig I/O locality.
 ///
-/// All splits share a single chromosome scan. For each split, writes one Arrow IPC shard
-/// file per chromosome per shard (ordered chrom-major, with shard `00000` on the longest
-/// chromosome). Each shard file holds one or more Arrow record batches (decoupling on-disk
-/// shard size from per-batch RAM usage). Within a shard, rows are in original BED order;
-/// a `local_index` column preserves the original position for sorting.
+/// All splits share a single chromosome scan and a single output directory. For each
+/// split, writes one Parquet shard file per chromosome per shard (ordered chrom-major,
+/// with shard `00000` on the longest chromosome), named `{split}-NNNNN-of-MMMMM.parquet`.
+/// Within a shard, rows are written one at a time (bounding writer RAM to a single
+/// example) and grouped into row groups of `rows_per_row_group` rows by the Parquet
+/// writer. Rows within a shard are in original BED order; a `local_index` column
+/// preserves the original position for sorting.
 ///
 /// Releases the GIL during the per-chromosome scan and during shard file writing, and
 /// fans out over tracks within each chromosome using Rayon parallelism.
@@ -372,94 +325,96 @@ fn build_split_chrom_samples(
 ///   negated if the majority (≥80%) of non-zero values are already negative.
 /// - `signal_intervals`: list of (chrom, region_start, region_end) tuples defining
 ///   the binned signal region for each sample, aligned to bin boundaries.
-/// - `split_names`: names of the splits being written (train, val, test, etc.).
-/// - `out_dirs`: output directories, one per split, where Arrow shards will be written.
+/// - `split_names`: names of the splits being written (train, validation, test, etc.).
+/// - `out_dir`: shared output directory where all splits' Parquet shards are written.
 /// - `split_sample_indices`: for each split, a list of indices into `bed_rows` and
 ///   `signal_intervals` specifying which samples belong to that split.
 /// - `bed_rows`: list of (chrom, start, end, name) tuples from the BED file; defines
 ///   sample intervals and metadata.
 /// - `fasta_path`: path to a .fasta file with a corresponding .fasta.fai index.
-/// - `n_bins`: number of bins in the signal output (rows of the labels matrix).
-/// - `context_len`: length of the DNA context window (rows of the input matrix).
+/// - `n_bins`: number of bins in the signal output.
+/// - `context_len`: length of the DNA context window (`stored_context`).
 /// - `bin_size`: size of each bin in basepairs; used to convert between BED coordinates
 ///   and bin indices.
-/// - `batch_size`: maximum rows per Arrow record batch (default 4). Keeps peak RAM
-///   bounded regardless of shard size.
-/// - `shard_size`: rows per Arrow shard file (default 0, meaning use `batch_size`).
-///   Decouples on-disk shard size from per-batch RAM usage.
+/// - `hf_features_json`: `datasets.Features.to_dict()` JSON, stored verbatim as the
+///   `huggingface` schema metadata.
+/// - `shard_size`: rows per Parquet shard file (default 0, meaning one shard per
+///   chromosome per split).
+/// - `rows_per_row_group`: rows per Parquet row group (default 1).
+/// - `zstd_level`: explicit ZSTD compression level (default 3).
 /// - `n_threads`: Rayon thread pool size for BigWig scanning and track parallelism.
 ///   If unset, uses available cores.
-/// - `arrow_write_threads`: thread pool size for parallel shard writes (default 8 or
+/// - `write_threads`: thread pool size for parallel shard writes (default 8 or
 ///   n_threads, whichever is smaller).
-/// - `compression`: Arrow IPC compression codec ("zstd", "lz4", or "none"; default "zstd").
 /// - `profile`: if true, collect and log timing breakdowns per stage.
+///
+/// # Returns
+///
+/// A mapping from split name to the number of rows written, for the dataset card.
 ///
 /// # Errors
 ///
 /// Returns a PyRuntimeError if:
 /// - The FASTA file cannot be opened or the .fai index is missing.
 /// - A BED index falls outside the bed_rows array.
-/// - A sample's signal region references a contig absent from the FASTA index.
-/// - `batch_size` causes Arrow i32 offset overflow (a limit around 1e8 rows depending
-///   on dimensions).
+/// - `zstd_level` is not a valid ZSTD compression level.
 #[pyfunction]
 #[pyo3(signature = (
     bw_paths,
     minus_flags,
     signal_intervals,
     split_names,
-    out_dirs,
+    out_dir,
     split_sample_indices,
     bed_rows,
     fasta_path,
     n_bins,
     context_len,
     bin_size,
-    batch_size=4,
+    hf_features_json,
     shard_size=0,
+    rows_per_row_group=1,
+    zstd_level=3,
     n_threads=None,
-    arrow_write_threads=None,
-    compression=None,
+    write_threads=None,
     profile=false
 ))]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn write_arrow_splits_chrom_pass(
+pub(crate) fn write_parquet_splits_chrom_pass(
     py: Python<'_>,
     bw_paths: Vec<String>,
     minus_flags: Vec<bool>,
     signal_intervals: Vec<(String, u32, u32)>,
     split_names: Vec<String>,
-    out_dirs: Vec<String>,
+    out_dir: String,
     split_sample_indices: Vec<Vec<usize>>,
     bed_rows: Vec<(String, u32, u32, String)>,
     fasta_path: String,
     n_bins: usize,
     context_len: usize,
     bin_size: u32,
-    batch_size: usize,
+    hf_features_json: String,
     shard_size: usize,
+    rows_per_row_group: usize,
+    zstd_level: i32,
     n_threads: Option<usize>,
-    arrow_write_threads: Option<usize>,
-    compression: Option<String>,
+    write_threads: Option<usize>,
     profile: bool,
-) -> PyResult<()> {
+) -> PyResult<HashMap<String, usize>> {
     crate::io_utils::configure_global_rayon(n_threads);
 
     let n_tracks = bw_paths.len();
-    let batch_size = batch_size.max(1);
+    let rows_per_row_group = rows_per_row_group.max(1);
     let shard_size = if shard_size == 0 {
-        batch_size
+        usize::MAX
     } else {
-        shard_size.max(1)
+        shard_size
     };
-    validate_batch_size(batch_size, n_tracks, n_bins, context_len)
-        .map_err(PyRuntimeError::new_err)?;
 
-    let schema = hf_arrow_schema(context_len, n_tracks, n_bins);
+    let schema = window_arrow_schema(context_len, n_tracks, n_bins, hf_features_json);
     let fai = load_fasta_index(&fasta_path).map_err(PyRuntimeError::new_err)?;
     let (mut splits, chrom_order) = build_split_chrom_samples(
         split_names,
-        out_dirs,
         split_sample_indices,
         &bed_rows,
         &fai,
@@ -468,14 +423,13 @@ pub(crate) fn write_arrow_splits_chrom_pass(
     )
     .map_err(PyRuntimeError::new_err)?;
 
-    let compression = compression.unwrap_or_else(|| "zstd".to_string());
-    let write_threads = arrow_write_threads
+    let write_threads = write_threads
         .unwrap_or_else(|| n_threads.unwrap_or(8).min(8))
         .max(1);
     let write_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(write_threads)
         .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("Cannot build Arrow write pool: {e}")))?;
+        .map_err(|e| PyRuntimeError::new_err(format!("Cannot build Parquet write pool: {e}")))?;
 
     let total_samples: usize = splits.iter().map(|s| s.total_samples).sum();
     let total_shards: usize = splits.iter().map(|s| s.total_shards).sum();
@@ -490,13 +444,14 @@ pub(crate) fn write_arrow_splits_chrom_pass(
         .collect::<Vec<_>>()
         .join(", ");
     eprintln!(
-        "[regulonado_rs] chrom_pass(all_splits): {} tracks × {} chromosomes ({} samples, {} shards) → [{}] (compression={}, arrow_write_threads={})",
+        "[regulonado_rs] chrom_pass(all_splits): {} tracks × {} chromosomes ({} samples, {} shards) → [{}] (zstd_level={}, rows_per_row_group={}, write_threads={})",
         n_tracks,
         chrom_order.len(),
         total_samples,
         total_shards,
         split_summary,
-        compression,
+        zstd_level,
+        rows_per_row_group,
         write_threads,
     );
 
@@ -598,7 +553,8 @@ pub(crate) fn write_arrow_splits_chrom_pass(
             };
             for shard_start in (0..samples.len()).step_by(shard_size) {
                 write_specs.push(WriteShardSpec {
-                    out_dir: &split.out_dir,
+                    split_name: &split.name,
+                    out_dir: &out_dir,
                     shard_idx: split.next_shard,
                     shard_total: split.total_shards,
                     shard_start,
@@ -611,14 +567,14 @@ pub(crate) fn write_arrow_splits_chrom_pass(
 
         let write_ctx = WriteShardCtx {
             schema: Arc::clone(&schema),
-            compression: &compression,
+            rows_per_row_group,
+            zstd_level,
             chrom_signals: &chrom_signals,
             n_chrom_bins,
             n_tracks,
             n_bins,
             context_len,
             bin_size,
-            batch_size,
             signal_intervals: &signal_intervals,
             bed_rows: &bed_rows,
             fasta_path: &fasta_path,
@@ -663,8 +619,8 @@ pub(crate) fn write_arrow_splits_chrom_pass(
              writer:     total_wall_s={:.1} summed_worker_s={:.1} threads={}\n  \
              slice:      total_worker_s={:.1}\n  \
              fasta:      total_worker_s={:.1}\n  \
-             batch:      total_worker_s={:.1}\n  \
-             arrow_write: total_worker_s={:.1}\n  \
+             row_build:  total_worker_s={:.1}\n  \
+             parquet_write: total_worker_s={:.1}\n  \
              bytes:      {:.1} GiB\n  \
              throughput: {:.2} samples/s\n  \
              total_wall_s={:.1}",
@@ -677,14 +633,15 @@ pub(crate) fn write_arrow_splits_chrom_pass(
             write_threads,
             prof_write.slice_ns as f64 / 1e9,
             prof_write.fasta_ns as f64 / 1e9,
-            prof_write.batch_ns as f64 / 1e9,
-            prof_write.arrow_write_ns as f64 / 1e9,
+            prof_write.row_build_ns as f64 / 1e9,
+            prof_write.parquet_write_ns as f64 / 1e9,
             prof_write.bytes as f64 / 1024.0 / 1024.0 / 1024.0,
             prof_write.rows as f64 / started.elapsed().as_secs_f64().max(1e-9),
             started.elapsed().as_secs_f64(),
         );
     }
 
+    let mut row_counts = HashMap::with_capacity(splits.len());
     for split in &splits {
         if split.next_shard != split.total_shards {
             return Err(PyRuntimeError::new_err(format!(
@@ -692,7 +649,8 @@ pub(crate) fn write_arrow_splits_chrom_pass(
                 split.name, split.next_shard, split.total_shards
             )));
         }
+        row_counts.insert(split.name.clone(), split.total_samples);
     }
 
-    Ok(())
+    Ok(row_counts)
 }

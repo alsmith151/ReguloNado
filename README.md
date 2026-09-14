@@ -132,19 +132,17 @@ track_discovery
     ├─ scale_factors ─┐
     └─ track_qc ───────┴─ track_assemble
                             └─ build_dataset
-                                └─ recompress_dataset (when recompress.enabled: true)
-                                    └─ train_phase for each run and phase
+                                └─ train_phase for each run and phase
 ```
 
 Track discovery, scaling, and QC all run **before** the Arrow build, directly from BigWigs —
 `track_assemble` merges them into `tracks.parquet`, the one file `build_dataset` and every later
-stage reads. `build_dataset` reads the FASTA, BED, and that table, and writes the Arrow dataset.
-`recompress_dataset` is optional. The scaling stage writes per-track factors; its method is
-selected by `scaling.method` (`original`, `tmm`, `bamnado`, `seqnado`, or `anchor`). QC is opt-in
-(`qc.checks`) and can drop tracks at assembly rather than training on them. Each
-`train_phase` runs one training preset. Phases are sequential within a run
-(later phases warm-start from the previous checkpoint), while separate runs
-can execute concurrently.
+stage reads. `build_dataset` reads the FASTA, BED, and that table, and writes a Hugging Face Parquet
+dataset. The scaling stage writes per-track factors; its method is selected by `scaling.method`
+(`original`, `tmm`, `bamnado`, `seqnado`, or `anchor`). QC is opt-in (`qc.checks`) and can drop
+tracks at assembly rather than training on them. Each `train_phase` runs one training preset. Phases
+are sequential within a run (later phases warm-start from the previous checkpoint), while separate
+runs can execute concurrently.
 
 The pipeline does not run prediction, create BigWigs, align reads, call peaks,
 or perform QC. Those are separate commands or upstream SeqNado work. It also

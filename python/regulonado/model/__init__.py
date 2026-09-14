@@ -19,7 +19,12 @@ from regulonado.model.heads import (
     build_condition_shared_track_index,
     build_transfer_learning_head,
 )
-from regulonado.model.wrapper import BackboneAdapter, FreezePolicy, RegulonadoModel
+from regulonado.model.wrapper import (
+    BackboneAdapter,
+    FreezePolicy,
+    RegulonadoModel,
+    one_hot_sequence_tokens,
+)
 
 __all__ = [
     "ActivationType",
@@ -42,4 +47,5 @@ __all__ = [
     "build_backbone_architecture",
     "build_condition_shared_track_index",
     "build_transfer_learning_head",
+    "one_hot_sequence_tokens",
 ]

@@ -152,62 +152,6 @@ def test_track_dedupe_content_keeps_same_basename_different_content(tmp_path):
     assert [r["track_index"] for r in metadata["final_track_records"]] == [0, 1]
 
 
-def test_publish_tree_same_filesystem_swaps_and_deletes_stale_entries(tmp_path):
-    """os.replace path: dest is fully replaced by src, matching rsync --delete."""
-    from regulonado.dataset.build import _publish_tree
-
-    src = tmp_path / "src"
-    dest = tmp_path / "dest"
-    src.mkdir()
-    (src / "keep.txt").write_text("new")
-    dest.mkdir()
-    (dest / "stale.txt").write_text("old")
-
-    _publish_tree(src, dest)
-
-    assert (dest / "keep.txt").read_text() == "new"
-    assert not (dest / "stale.txt").exists()
-    assert not src.exists()  # swapped in place, not copied
-    assert not (tmp_path / "dest.old").exists()
-    assert not (tmp_path / "dest.staging").exists()
-
-
-def test_publish_tree_same_filesystem_first_publish(tmp_path):
-    """os.replace path when dest does not exist yet (first build)."""
-    from regulonado.dataset.build import _publish_tree
-
-    src = tmp_path / "src"
-    src.mkdir()
-    (src / "a.txt").write_text("a")
-    dest = tmp_path / "does" / "not" / "exist" / "dest"
-
-    _publish_tree(src, dest)
-
-    assert (dest / "a.txt").read_text() == "a"
-
-
-def test_publish_tree_cross_filesystem_copies_then_swaps(tmp_path, monkeypatch):
-    """Cross-fs path: copy into a temp sibling of dest, then swap — same end result."""
-    from regulonado.dataset import build as build_module
-
-    monkeypatch.setattr(build_module, "_same_filesystem", lambda a, b: False)
-
-    src = tmp_path / "src"
-    dest = tmp_path / "dest"
-    src.mkdir()
-    (src / "keep.txt").write_text("new")
-    dest.mkdir()
-    (dest / "stale.txt").write_text("old")
-
-    build_module._publish_tree(src, dest)
-
-    assert (dest / "keep.txt").read_text() == "new"
-    assert not (dest / "stale.txt").exists()
-    assert src.exists()  # cross-fs: src is copied, not moved
-    assert not (tmp_path / "dest.staging").exists()
-    assert not (tmp_path / "dest.old").exists()
-
-
 def test_same_filesystem_true_within_one_tmp_dir(tmp_path):
     from regulonado.dataset.build import _same_filesystem
 
@@ -218,7 +162,7 @@ def test_same_filesystem_true_within_one_tmp_dir(tmp_path):
     assert _same_filesystem(a, b) is True
 
 
-def test_dataset_cli_skips_final_reload_for_fast_path(tmp_path, monkeypatch):
+def test_dataset_cli_invokes_build_dataset(tmp_path, monkeypatch):
     from regulonado.__main__ import app
 
     runner = CliRunner()
@@ -251,7 +195,7 @@ def test_dataset_cli_skips_final_reload_for_fast_path(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 0, result.stdout
-    assert captured["return_dataset"] is False
+    assert "return_dataset" not in captured
 
 
 @pytest.mark.parametrize("old_name", ["chrom_pass", "fast"])
@@ -357,8 +301,8 @@ def test_compute_split_indices_skips_already_built_splits(tmp_path):
     from regulonado.dataset.build import _compute_split_indices
 
     output_dir = tmp_path / "out"
-    (output_dir / "train").mkdir(parents=True)
-    (output_dir / "train" / "dataset_info.json").write_text("{}")
+    (output_dir / "data").mkdir(parents=True)
+    (output_dir / "data" / "train-00000-of-00001.parquet").write_text("")
     bed_rows = [("chrA", 100, 116, "fold0"), ("chrA", 200, 216, "fold1")]
     splits = {"train": ["fold0"], "validation": ["fold1"]}
 
@@ -430,7 +374,6 @@ def test_build_dataset_drops_edge_unsafe_row_and_counts_it(tmp_path):
     """The unsafe row is dropped+counted at defaults; the build succeeds; other rows unaffected."""
     import json
 
-    import pyarrow.ipc as ipc
     import pyarrow.parquet as pq
     from regulonado.dataset.build import build_dataset
 
@@ -448,32 +391,32 @@ def test_build_dataset_drops_edge_unsafe_row_and_counts_it(tmp_path):
         n_pred_bins=_EDGE_N_PRED_BINS,
         shift_max_bp=0,
         n_extract_threads=1,
-        arrow_batch_size=2,
-        arrow_write_threads=1,
+        write_threads=1,
+        zstd_level=3,
+        rows_per_row_group=1,
         strategy="in_memory",
-        return_dataset=False,
     )
 
-    shard = sorted((output_dir / "train").glob("data-*-of-*.arrow"))
-    assert shard, "expected at least one Arrow shard"
-    with shard[0].open("rb") as fh:
-        reader = ipc.open_stream(fh)
-        rows = [batch.to_pydict() for batch in reader]
-    indices = [i for batch in rows for i in batch["index"]]
-    intervals = [iv for batch in rows for iv in batch["interval"]]
+    shards = sorted((output_dir / "data").glob("train-*.parquet"))
+    assert shards, "expected at least one Parquet shard"
+    table = pq.read_table(shards)
+    indices = table["index"].to_pylist()
+    intervals = table["interval"].to_pylist()
     assert indices == [1]
     assert intervals == ["chrA:100-116"]
 
-    table = pq.read_table(output_dir / "tracks.parquet")
-    attrs = json.loads(table.schema.metadata[b"regulonado"])
+    tracks_table = pq.read_table(output_dir / "tracks.parquet")
+    attrs = json.loads(tracks_table.schema.metadata[b"regulonado"])
     assert attrs["edge_dropped_rows"] == 1
     assert attrs["edge_dropped_examples"] == ["chrA:0-2"]
     assert "skipped_rows" not in attrs
 
+    assert (output_dir / "README.md").exists()
+
 
 def test_build_dataset_streaming_strategy_also_drops_edge_unsafe_row(tmp_path):
     """The edge-safety filter runs before strategy dispatch, so streaming is covered too."""
-    import pyarrow.ipc as ipc
+    import pyarrow.parquet as pq
     from regulonado.dataset.build import build_dataset
 
     inputs = _build_edge_case_dataset(tmp_path / "in")
@@ -490,15 +433,12 @@ def test_build_dataset_streaming_strategy_also_drops_edge_unsafe_row(tmp_path):
         n_pred_bins=_EDGE_N_PRED_BINS,
         shift_max_bp=0,
         n_extract_threads=1,
-        arrow_batch_size=2,
+        zstd_level=3,
+        rows_per_row_group=1,
         strategy="streaming",
-        return_dataset=False,
     )
 
-    shard = output_dir / "train" / "data-00000-of-00001.arrow"
+    shard = output_dir / "data" / "train-00000-of-00001.parquet"
     assert shard.exists()
-    with shard.open("rb") as fh:
-        reader = ipc.open_stream(fh)
-        rows = [batch.to_pydict() for batch in reader]
-    indices = [i for batch in rows for i in batch["index"]]
+    indices = pq.read_table(shard)["index"].to_pylist()
     assert indices == [1]

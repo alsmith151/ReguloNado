@@ -26,6 +26,7 @@ INTENTIONAL_ALLOWLIST: dict[str, str] = {
     "executor": "Used directly in pipeline() to select executor",
     "jobs": "Used directly in pipeline() as max_jobs",
     "latency-wait": "Used directly in pipeline() for ExecutionSettings.latency_wait",
+    "retries": "Used directly in pipeline() for ExecutionSettings.retries",
     "rerun-incomplete": "Used directly in pipeline() for DAGSettings.force_incomplete",
     "default-resources": "Used directly in pipeline() for ResourceSettings.default_resources",
     "set-resources": "Used directly in pipeline() for ResourceSettings.overwrite_resources",
@@ -71,40 +72,41 @@ def _translator_consumed_keys() -> set[str]:
     consumed = set()
 
     # Keys read in _deployment_settings
-    consumed.update([
-        "software-deployment-method",
-        "use-conda",
-        "use-apptainer",
-        "use-singularity",
-        "conda-prefix",
-        "apptainer-prefix",
-        "singularity-prefix",
-        "apptainer-args",
-        "singularity-args",
-    ])
+    consumed.update(
+        [
+            "software-deployment-method",
+            "use-conda",
+            "use-apptainer",
+            "use-singularity",
+            "conda-prefix",
+            "apptainer-prefix",
+            "singularity-prefix",
+            "apptainer-args",
+            "singularity-args",
+        ]
+    )
 
     # Keys read in _executor_settings (SLURM-specific)
-    consumed.update([
-        "executor-settings",
-        "slurm-logdir",
-        "slurm-keep-successful-logs",
-        "slurm-delete-logfiles-older-than",
-        "slurm-init-seconds-before-status-checks",
-        "slurm-status-attempts",
-        "slurm-requeue",
-        "slurm-no-account",
-        "slurm-reservation",
-    ])
+    consumed.update(
+        [
+            "executor-settings",
+            "slurm-logdir",
+            "slurm-keep-successful-logs",
+            "slurm-delete-logfiles-older-than",
+            "slurm-init-seconds-before-status-checks",
+            "slurm-status-attempts",
+            "slurm-requeue",
+            "slurm-no-account",
+            "slurm-reservation",
+        ]
+    )
 
     return consumed
 
 
 def _get_packaged_profiles() -> dict[str, Path]:
     """Locate all packaged profile directories."""
-    profiles_dir = (
-        Path(__file__).parent.parent
-        / "python" / "regulonado" / "workflow" / "profiles"
-    )
+    profiles_dir = Path(__file__).parent.parent / "python" / "regulonado" / "workflow" / "profiles"
     profiles = {}
     for profile_dir in profiles_dir.iterdir():
         if profile_dir.is_dir():
@@ -173,10 +175,7 @@ def test_intentional_allowlist_is_actively_used():
 
 @pytest.mark.parametrize(
     "profile_name,config_path",
-    [
-        (name, path)
-        for name, path in _get_packaged_profiles().items()
-    ],
+    [(name, path) for name, path in _get_packaged_profiles().items()],
     ids=lambda p: p if isinstance(p, str) else p.name,
 )
 def test_each_profile_translates_without_error(profile_name, config_path):

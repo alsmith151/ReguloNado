@@ -57,19 +57,67 @@ table passed in via `--track-table`, with build-time scalars (`context_length`, 
 `splits`, ...) merged in. Keep it beside the dataset; there is no separate metadata-enrichment
 step to run afterward.
 
-## Recompress an existing dataset
+## Dataset layout and sharing
 
-Smaller Arrow record batches can improve random reads during training:
+The build output is a Hugging Face dataset in Parquet format:
 
-```bash
-regulonado recompress-dataset dataset_raw/ dataset/ \
-  --max-batch-size 4 --workers 8
+```
+dataset/
+  README.md              HF dataset card (configs, features, split row counts)
+  tracks.parquet         track table + geometry metadata
+  data/
+    train-00000-of-00092.parquet
+    train-00001-of-00092.parquet
+    ...
+    validation-*.parquet
+    test-*.parquet
 ```
 
-The destination must not already exist. `tracks.parquet` is copied alongside the Arrow shards. The
-workflow can perform this step automatically when `recompress.enabled` is true. The final output is
-always `results/dataset/`; a raw `results/dataset_raw/` intermediate is removed after successful
-recompression. With recompression disabled, the builder writes directly to `results/dataset/`.
+Each `.parquet` file contains one or more row groups (default: one row per row group). Compression
+is zstd level 3 by default; adjust with `--zstd-level`. Data columns are:
+
+- `sequence_tokens`: uint8 fixed-size list (A=0, C=1, G=2, T=3; 4=N/padding)
+- `signal`: float32 nested list `[n_tracks][n_bins]`
+- `interval`, `index`, `local_index`: unchanged
+
+The `README.md` is written last as a sentinel. It contains the dataset card YAML (configs and
+features) with per-split row counts, making `load_dataset` report accurate split sizes.
+
+### Load and inspect the dataset
+
+`regulonado train` does not use `datasets` to read the data. It reads single Parquet row groups at
+random, so it knows the exact row count, shuffles the whole dataset each epoch and needs no
+streaming setup.
+
+Other tools can open the same folder with `datasets`. Streaming is the practical way to inspect it:
+
+```python
+from datasets import load_dataset
+dataset = load_dataset("path/to/dataset", streaming=True)
+dataset["train"].info.splits["train"].num_examples  # row count, read from README.md
+```
+
+Avoid map-style `load_dataset` (without `streaming=True`) on full datasets. It writes an uncompressed
+Arrow cache of about 3.5 MB per row. The `datasets` numpy and torch formatters widen `uint8`
+columns to `int64`; use `with_format("arrow")` to keep the original type:
+
+```python
+dataset = load_dataset("path/to/dataset", streaming=True).with_format("arrow")
+```
+
+### Share on the Hugging Face Hub
+
+Upload the whole `dataset/` directory to a Hub dataset repository:
+
+```bash
+hf upload <repo> dataset/ --repo-type dataset
+```
+
+Training and other tools load it by name or path:
+
+```bash
+regulonado train johahi/my-dataset
+```
 
 Use `regulonado dataset --help` for geometry, compression, shard sizing, and chromosome filtering
 options; use `regulonado tracks --help` for discovery, dedupe, and QC options.

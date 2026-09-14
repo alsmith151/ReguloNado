@@ -18,7 +18,6 @@ from regulonado.config.models import (
     PHASE_PRESETS,
     DatasetConfig,
     InputsConfig,
-    RecompressConfig,
     RegulonadoConfig,
     ScalingConfig,
     SeqNadoProjectRef,
@@ -99,9 +98,7 @@ def _describe_projects(projects: list[SeqNadoProjectRef]) -> tuple[list[str], li
     return sorted(methods or []), sorted(scales or [])
 
 
-def _select_genome(
-    genome: str | None, interactive: bool
-) -> GenomeEntry | None:
+def _select_genome(genome: str | None, interactive: bool) -> GenomeEntry | None:
     registry = load_genome_registry()
     if not registry:
         if genome:
@@ -146,7 +143,6 @@ def build_config(
         defaults = dict(base)
     inputs_defaults: dict[str, Any] = defaults.get("inputs", {})
     dataset_defaults: dict[str, Any] = defaults.get("dataset", {})
-    recompress_defaults: dict[str, Any] = defaults.get("recompress", {})
     scaling_defaults: dict[str, Any] = defaults.get("scaling", {})
     train_defaults: dict[str, Any] = defaults.get("train", {})
 
@@ -276,8 +272,8 @@ def build_config(
                 )
             )
     elif scaling.method == "seqnado":
-        scaling.seqnado_project = projects[0].path if projects else scaling_defaults.get(
-            "seqnado_project"
+        scaling.seqnado_project = (
+            projects[0].path if projects else scaling_defaults.get("seqnado_project")
         )
         spikein = ask(
             "Spike-in method whose normalisation factors to reuse?",
@@ -295,7 +291,7 @@ def build_config(
         seqnado_projects=projects,
     )
 
-    # --- dataset / recompress -------------------------------------------------
+    # --- dataset -----------------------------------------------------------
     dataset = DatasetConfig(
         **{
             **dataset_defaults,
@@ -339,18 +335,6 @@ def build_config(
             ),
         }
     )
-
-    recompress_enabled = (
-        ask(
-            "Recompress the dataset for faster random reads?",
-            "yes" if recompress_defaults.get("enabled", True) else "no",
-            is_boolean=True,
-            interactive=interactive,
-        )
-        if interactive
-        else recompress_defaults.get("enabled", True)
-    )
-    recompress = RecompressConfig(**{**recompress_defaults, "enabled": bool(recompress_enabled)})
 
     # --- training ----------------------------------------------------------
     nproc = ask_int(
@@ -408,7 +392,6 @@ def build_config(
         results_dir=str(results_dir),
         inputs=inputs,
         dataset=dataset,
-        recompress=recompress,
         scaling=scaling,
         train=train,
     )
