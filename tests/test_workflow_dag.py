@@ -69,11 +69,15 @@ scaling:
     assert "regulonado recompress-dataset" in planned_output
     assert str(results / "dataset_raw") in planned_output
     assert str(target_dir) in planned_output
-    assert "--remove-src" in planned_output
+    assert "--remove-src" not in planned_output
+    for split in ("train", "validation", "test"):
+        assert str(results / "dataset_raw" / split) in planned_output
 
     target_dir.mkdir(parents=True)
     target.touch()
     (target_dir / "tracks.parquet").touch()
+    for split in ("train", "validation", "test"):
+        (target_dir / split).mkdir()
 
     result = subprocess.run(
         [

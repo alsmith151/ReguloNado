@@ -372,6 +372,13 @@ def _build_collate_fn(
     constant_tensors = {key: value.clone() for key, value in track_metadata_tensors.items()}
 
     def collate(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        for index, example in enumerate(batch):
+            missing = sorted({"input_ids", "labels"} - example.keys())
+            if missing:
+                raise ValueError(
+                    f"Training example {index} is missing transformed field(s): "
+                    f"{', '.join(missing)}; available fields: {sorted(example)}"
+                )
         collated = {
             "input_ids": torch.stack(
                 [torch.as_tensor(example["input_ids"]) for example in batch]
@@ -1118,6 +1125,22 @@ def _load_training_dataset(
     return dataset_dict
 
 
+def _validate_dataset_schema(dataset_dict: Mapping[str, Any]) -> None:
+    """Fail before worker startup when a saved dataset lacks model inputs."""
+    required = {"input_ids", "labels"}
+    if "train" not in dataset_dict:
+        raise ValueError("Training dataset does not contain a 'train' split")
+    for split, dataset in dataset_dict.items():
+        columns = set(getattr(dataset, "column_names", ()) or ())
+        missing = sorted(required - columns)
+        if missing:
+            raise ValueError(
+                f"Dataset split {split!r} is missing required column(s): "
+                f"{', '.join(missing)}; available columns: {sorted(columns)}. "
+                "Verify the source and recompressed dataset schemas before training."
+            )
+
+
 def _load_metadata_and_records(
     data_path: Path,
     metadata_path: Path | None,
@@ -1484,6 +1507,7 @@ def run_training(
     )
 
     dataset_dict = _load_training_dataset(data_path, streaming=streaming, rank=rank)
+    _validate_dataset_schema(dataset_dict)
 
     metadata_path_value = cfg["data"].get("metadata_path")
     metadata_path = Path(str(metadata_path_value)) if metadata_path_value else None

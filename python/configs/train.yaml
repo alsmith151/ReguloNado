@@ -32,7 +32,9 @@ trainer:
   # Data loading
   batch_size: 1
   eval_batch_size: 1
-  num_workers: 8
+  # Keep within the conservative CPU allocation used by sweep workers. Sites
+  # with larger allocations can override this explicitly.
+  num_workers: 4
   persistent_workers: true
   prefetch_factor: 2
 

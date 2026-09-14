@@ -52,6 +52,35 @@ def test_recompress_overwrite_preserves_source(tmp_path):
     assert table.column("value").to_pylist() == [1, 2, 3]
 
 
+def test_recompress_preserves_training_columns_and_examples(tmp_path):
+    np = pytest.importorskip("numpy")
+    datasets = pytest.importorskip("datasets")
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    features = datasets.Features(
+        {
+            "input_ids": datasets.Array2D(shape=(4, 8), dtype="int8"),
+            "labels": datasets.Array2D(shape=(2, 3), dtype="float32"),
+            "index": datasets.Value("int64"),
+        }
+    )
+    split = datasets.Dataset.from_dict(
+        {
+            "input_ids": [np.zeros((4, 8), dtype=np.int8)] * 3,
+            "labels": [np.ones((2, 3), dtype=np.float32)] * 3,
+            "index": [0, 1, 2],
+        },
+        features=features,
+    )
+    datasets.DatasetDict({"train": split}).save_to_disk(source)
+
+    recompress_dataset(source, destination, max_batch_size=1)
+    loaded = datasets.load_from_disk(destination)
+
+    assert set(loaded["train"].column_names) == {"input_ids", "labels", "index"}
+    assert set(loaded["train"][0]) == {"input_ids", "labels", "index"}
+
+
 def test_recompress_remove_src_deletes_source_after_success(tmp_path):
     source = tmp_path / "source"
     destination = tmp_path / "destination"

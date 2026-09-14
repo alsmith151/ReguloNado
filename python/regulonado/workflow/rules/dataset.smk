@@ -81,6 +81,7 @@ if config["recompress"]["enabled"]:
         input:
             info=str(RAW_DATASET_DIR / "dataset_dict.json"),
             table=str(RAW_DATASET_DIR / "tracks.parquet"),
+            splits=[directory(str(RAW_DATASET_DIR / s)) for s in SPLITS],
         params:
             src=str(RAW_DATASET_DIR),
             dst=str(DATASET_DIR),
@@ -90,6 +91,7 @@ if config["recompress"]["enabled"]:
         output:
             info=str(DATASET_DIR / "dataset_dict.json"),
             table=str(DATASET_DIR / "tracks.parquet"),
+            splits=[directory(str(DATASET_DIR / s)) for s in SPLITS],
         threads: config["recompress"]["workers"]
         log:
             str(RESULTS / "logs" / "recompress_dataset.log"),
@@ -102,6 +104,5 @@ if config["recompress"]["enabled"]:
                 --max-batch-size {params.max_batch_size} \
                 --workers {params.workers} \
                 --overwrite \
-                --remove-src \
                 > {log} 2>&1
             """

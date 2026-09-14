@@ -21,6 +21,7 @@ from regulonado.training.runner import (
     _guard_streaming_persistent_workers,
     _resolve_empirical_output_bias,
     _resolve_trainer_config,
+    _validate_dataset_schema,
 )
 
 MINIMAL_CFG = {
@@ -31,6 +32,22 @@ MINIMAL_CFG = {
     "loss": {},
     "trainer": {},
 }
+
+
+class _DatasetColumns:
+    def __init__(self, *columns: str) -> None:
+        self.column_names = list(columns)
+
+
+def test_validate_dataset_schema_accepts_model_inputs() -> None:
+    _validate_dataset_schema(
+        {"train": _DatasetColumns("input_ids", "labels", "interval")}
+    )
+
+
+def test_validate_dataset_schema_rejects_missing_input_ids() -> None:
+    with pytest.raises(ValueError, match="missing required column.*input_ids"):
+        _validate_dataset_schema({"train": _DatasetColumns("labels", "interval")})
 
 
 def test_empirical_track_output_bias_matches_track_means_through_softplus() -> None:
