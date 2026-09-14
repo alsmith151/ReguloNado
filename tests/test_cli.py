@@ -25,6 +25,7 @@ def test_sweep_train_maps_wandb_json_to_training_settings(tmp_path, monkeypatch)
                 "data.metadata_path": "/data/dataset/tracks.parquet",
                 "backbone.pretrained_name": "johahi/flashzoi-replicate-1",
                 "loss": "poisson_nll",
+                "loss.poisson_weight": 0.2,
                 "trainer.learning_rate": 0.001,
                 "head.output_init": "empirical_mean_constant",
             }
@@ -40,7 +41,8 @@ def test_sweep_train_maps_wandb_json_to_training_settings(tmp_path, monkeypatch)
     assert captured["output_dir"] == Path("/data/parameter-sweep/runs/abc123")
     assert captured["preset"] == "unfreeze_output"
     assert 'loss="poisson_nll"' in captured["settings"]
-    assert 'head.output_init="empirical_mean_constant"' in captured["settings"]
+    assert "++loss.poisson_weight=0.2" in captured["settings"]
+    assert '++head.output_init="empirical_mean_constant"' in captured["settings"]
 
 
 def test_train_builds_a_readable_preset_command(tmp_path):

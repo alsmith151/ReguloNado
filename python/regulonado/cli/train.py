@@ -33,9 +33,17 @@ def sweep_train(
     preset = str(values.pop("preset", "head_only"))
     dataset = Path(str(values.pop("data.path")))
     configured_output = values.pop("output_dir", None)
-    settings = [
-        f"{key}={json.dumps(value, separators=(',', ':'))}" for key, value in values.items()
-    ]
+    settings = []
+    for key, value in values.items():
+        # A sweep can select a config-group option and then tune a field that is
+        # absent from some options in that group.  Hydra's ``++`` operator works
+        # for both cases: it overrides an existing field or appends a missing
+        # one.  Keep top-level keys unchanged because entries such as ``loss``
+        # select a Hydra config-group option rather than an ordinary field.
+        override_key = f"++{key}" if "." in key else key
+        settings.append(
+            f"{override_key}={json.dumps(value, separators=(',', ':'))}"
+        )
 
     run_id = os.environ.get("WANDB_RUN_ID", "trial")
     output_dir = Path(configured_output or dataset.parent / "parameter-sweep" / "runs" / run_id)

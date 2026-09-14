@@ -45,6 +45,29 @@ def test_phase_preset_composes(preset: str, expected: tuple[int, str]) -> None:
     assert cfg.trainer.persistent_workers is False
 
 
+@pytest.mark.parametrize(
+    "loss_name",
+    [
+        "poisson_multinomial",
+        "poisson_multinomial_binwise",
+        "poisson_nll",
+        "transfer_calibration",
+    ],
+)
+def test_sweep_poisson_weight_override_composes_for_every_loss(loss_name: str) -> None:
+    with hydra.initialize_config_dir(version_base=None, config_dir=str(CONFIG_DIR)):
+        cfg = hydra.compose(
+            config_name="train",
+            overrides=[
+                "+experiment=head_only",
+                f"loss={loss_name}",
+                "++loss.poisson_weight=0.2",
+            ],
+        )
+
+    assert cfg.loss.poisson_weight == 0.2
+
+
 def test_only_supported_phase_presets_are_shipped() -> None:
     names = {path.stem for path in (CONFIG_DIR / "experiment").glob("*.yaml")}
     assert names == set(PRESETS)
