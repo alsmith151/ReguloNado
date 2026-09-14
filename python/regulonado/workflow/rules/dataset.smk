@@ -4,6 +4,7 @@ from regulonado.dataset.build import DEFAULT_SPLITS
 
 SPLITS = list(DEFAULT_SPLITS)  # train / validation / test
 maybe_temp = temp if config["recompress"]["enabled"] else (lambda x: x)
+BUILD_DATASET_DIR = RAW_DATASET_DIR if config["recompress"]["enabled"] else DATASET_DIR
 
 
 rule build_dataset:
@@ -40,9 +41,9 @@ rule build_dataset:
         compression=config["dataset"]["compression"],
         stage=lambda w: "--stage" if config["dataset"]["stage_to_scratch"] else "--no-stage",
     output:
-        info=maybe_temp(str(DATASET_DIR / "dataset_dict.json")),
-        table=maybe_temp(str(DATASET_DIR / "tracks.parquet")),
-        splits=[maybe_temp(directory(str(DATASET_DIR / s))) for s in SPLITS],
+        info=maybe_temp(str(BUILD_DATASET_DIR / "dataset_dict.json")),
+        table=maybe_temp(str(BUILD_DATASET_DIR / "tracks.parquet")),
+        splits=[maybe_temp(directory(str(BUILD_DATASET_DIR / s))) for s in SPLITS],
     threads: config["dataset"]["extract_threads"]
     log:
         str(RESULTS / "logs" / "build_dataset.log"),
@@ -66,41 +67,41 @@ rule build_dataset:
         """
 
 
-rule recompress_dataset:
-    """Rebatch and recompress the dataset for faster random-access reads.
+if config["recompress"]["enabled"]:
+    rule recompress_dataset:
+        """Rebatch and recompress the dataset for faster random-access reads.
 
-    One unit of work: rewrite every Arrow shard with smaller record batches and
-    zstd compression. Training reads randomly, so smaller batches reduce the
-    amount decoded per sample.
+        One unit of work: rewrite every Arrow shard with smaller record batches and
+        zstd compression. Training reads randomly, so smaller batches reduce the
+        amount decoded per sample.
 
-    Skipped entirely when `recompress.enabled` is false — in that case the
-    training rules read the raw build output instead, and `build_dataset`'s
-    outputs are ordinary (non-temp) files.
-    """
-    input:
-        info=str(DATASET_DIR / "dataset_dict.json"),
-        table=str(DATASET_DIR / "tracks.parquet"),
-    params:
-        src=str(DATASET_DIR),
-        dst=str(RECHUNK_DIR),
-        zstd_level=config["recompress"]["zstd_level"],
-        max_batch_size=config["recompress"]["max_batch_size"],
-        workers=config["recompress"]["workers"],
-    output:
-        info=str(RECHUNK_DIR / "dataset_dict.json"),
-        table=str(RECHUNK_DIR / "tracks.parquet"),
-    threads: config["recompress"]["workers"]
-    log:
-        str(RESULTS / "logs" / "recompress_dataset.log"),
-    shell:
-        r"""
-        regulonado recompress-dataset \
-            {params.src} \
-            {params.dst} \
-            --level {params.zstd_level} \
-            --max-batch-size {params.max_batch_size} \
-            --workers {params.workers} \
-            --overwrite \
-            --remove-src \
-            > {log} 2>&1
+        Skipped entirely when `recompress.enabled` is false — in that case the
+        builder writes the final dataset directly and its outputs are non-temp.
         """
+        input:
+            info=str(RAW_DATASET_DIR / "dataset_dict.json"),
+            table=str(RAW_DATASET_DIR / "tracks.parquet"),
+        params:
+            src=str(RAW_DATASET_DIR),
+            dst=str(DATASET_DIR),
+            zstd_level=config["recompress"]["zstd_level"],
+            max_batch_size=config["recompress"]["max_batch_size"],
+            workers=config["recompress"]["workers"],
+        output:
+            info=str(DATASET_DIR / "dataset_dict.json"),
+            table=str(DATASET_DIR / "tracks.parquet"),
+        threads: config["recompress"]["workers"]
+        log:
+            str(RESULTS / "logs" / "recompress_dataset.log"),
+        shell:
+            r"""
+            regulonado recompress-dataset \
+                {params.src} \
+                {params.dst} \
+                --level {params.zstd_level} \
+                --max-batch-size {params.max_batch_size} \
+                --workers {params.workers} \
+                --overwrite \
+                --remove-src \
+                > {log} 2>&1
+            """

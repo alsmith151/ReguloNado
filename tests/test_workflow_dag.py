@@ -42,9 +42,36 @@ scaling:
   method: tmm
 """
     )
-    target_dir = results / "dataset_rechunked"
-    target_dir.mkdir(parents=True)
+    target_dir = results / "dataset"
     target = target_dir / "dataset_dict.json"
+
+    planned = subprocess.run(
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            "--dry-run",
+            "--printshellcmds",
+            str(target),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    planned_output = planned.stdout + planned.stderr
+    assert planned.returncode == 0, planned_output
+    assert "regulonado dataset" in planned_output
+    assert "regulonado recompress-dataset" in planned_output
+    assert str(results / "dataset_raw") in planned_output
+    assert str(target_dir) in planned_output
+    assert "--remove-src" in planned_output
+
+    target_dir.mkdir(parents=True)
     target.touch()
     (target_dir / "tracks.parquet").touch()
 

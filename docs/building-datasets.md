@@ -62,14 +62,14 @@ step to run afterward.
 Smaller Arrow record batches can improve random reads during training:
 
 ```bash
-regulonado recompress-dataset dataset/ dataset_rechunked/ \
+regulonado recompress-dataset dataset_raw/ dataset/ \
   --max-batch-size 4 --workers 8
 ```
 
 The destination must not already exist. `tracks.parquet` is copied alongside the Arrow shards. The
-workflow can perform this step automatically when `recompress.enabled` is true — in which case the
-raw `dataset/` build output is a pure intermediate and is removed after successful recompression to
-save disk space.
+workflow can perform this step automatically when `recompress.enabled` is true. The final output is
+always `results/dataset/`; a raw `results/dataset_raw/` intermediate is removed after successful
+recompression. With recompression disabled, the builder writes directly to `results/dataset/`.
 
 Use `regulonado dataset --help` for geometry, compression, shard sizing, and chromosome filtering
 options; use `regulonado tracks --help` for discovery, dedupe, and QC options.

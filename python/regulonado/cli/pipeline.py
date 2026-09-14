@@ -341,7 +341,7 @@ def pipeline(
         raw = yaml.safe_load(configfile.read_text()) or {}
         results = Path(raw["results_dir"])
         if stage == "recompress":
-            selected_targets.add(str(results / "dataset_rechunked" / "dataset_dict.json"))
+            selected_targets.add(str(results / "dataset" / "dataset_dict.json"))
         elif stage == "train":
             train = raw.get("train") or {}
             phases, runs = train.get("phases") or [], train.get("runs") or []

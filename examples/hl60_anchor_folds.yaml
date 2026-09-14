@@ -27,7 +27,7 @@ dataset:
   dedupe_tracks: content
 
 recompress:
-  # The existing dataset is used directly; no dataset_rechunked output is made.
+  # The dataset is built directly at results/dataset; no raw intermediate is made.
   enabled: false
   zstd_level: 3
   max_batch_size: 4
