@@ -723,6 +723,11 @@ $defs:
         minimum: 1
         title: Trials Per Agent
         type: integer
+      wandb_project:
+        default: regulonado-parameter-sweep
+        minLength: 1
+        title: Wandb Project
+        type: string
     required:
     - sweep_config
     title: ParameterSweepConfig

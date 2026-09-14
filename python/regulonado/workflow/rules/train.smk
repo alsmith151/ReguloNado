@@ -31,6 +31,10 @@ def _override_flags(wildcards):
     # Run identity always wins over generic settings.
     merged["seed"] = run["seed"]
     merged["backbone.pretrained_name"] = run["pretrained_model"]
+    merged.setdefault("trainer.wandb_project", "regulonado-training")
+    merged.setdefault("trainer.wandb_group", f"{RESULTS.name}/{wildcards.run}")
+    merged.setdefault("trainer.wandb_job_type", wildcards.phase)
+    merged.setdefault("trainer.wandb_run_name", f"{wildcards.run}/{wildcards.phase}")
 
     flags = []
     for key, value in sorted(merged.items()):

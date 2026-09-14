@@ -73,7 +73,9 @@ parameter_sweep:
     assert "parameter_sweep_agent" in output
     assert "agent_0.done" in output
     assert "agent_1.done" in output
-    assert "wandb agent --count 1" in output
+    assert "wandb agent" in output
+    assert "--count 1" in output
+    assert "--forward-signals" in output
 
     all_result = subprocess.run(
         [

@@ -11,13 +11,14 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
             sweep_id=str(_SWEEP_DIR / "sweep.id"),
         params:
             output_dir=str(_SWEEP_DIR),
+            project=str(PARAMETER_SWEEP.get("wandb_project", "regulonado-parameter-sweep")),
         log:
             str(RESULTS / "logs" / "parameter_sweep_create.log"),
         shell:
             r"""
             set -euo pipefail
             mkdir -p {params.output_dir:q}
-            wandb sweep {input.sweep_config:q} > {log:q} 2>&1
+            wandb sweep --project {params.project:q} {input.sweep_config:q} > {log:q} 2>&1
             SWEEP_ID=$(awk '/wandb agent/ {{print $NF; exit}}' {log:q})
             test -n "$SWEEP_ID"
             printf '%s\n' "$SWEEP_ID" > {output.sweep_id:q}
@@ -33,6 +34,7 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
         params:
             trials=int(PARAMETER_SWEEP.get("trials_per_agent", 1)),
             agent_dir=str(_SWEEP_DIR / "agents"),
+            project=str(PARAMETER_SWEEP.get("wandb_project", "regulonado-parameter-sweep")),
         resources:
             gpu=1,
         wildcard_constraints:
@@ -45,7 +47,11 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
             mkdir -p {params.agent_dir:q}
             SWEEP_ID=$(cat {input.sweep_id:q})
             test -n "$SWEEP_ID"
-            wandb agent --count {params.trials} "$SWEEP_ID" > {log:q} 2>&1
+            WANDB_JOB_TYPE=parameter-sweep wandb agent \
+                --project {params.project:q} \
+                --forward-signals \
+                --count {params.trials} \
+                "$SWEEP_ID" > {log:q} 2>&1
             date -u +%FT%TZ > {output.done:q}
             """
 

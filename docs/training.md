@@ -115,6 +115,7 @@ parameter_sweep:
   sweep_config: examples/hl60_parameter_sweep_wandb.yaml
   agents: 24
   trials_per_agent: 1
+  wandb_project: regulonado-parameter-sweep
 ```
 
 Run only this stage on the configured Slurm GPU profile:
@@ -124,9 +125,16 @@ regulonado pipeline hl60_anchor_folds.yaml parameter-sweep --preset sg
 ```
 
 The workflow registers the sweep once, then submits `agents` independent one-GPU
-jobs. Each processes `trials_per_agent` trials. W&B stores the individual runs
-and metrics; the workflow writes `results/parameter-sweep/sweep.done` after all
-agents finish.
+jobs. Each processes `trials_per_agent` trials and forwards Slurm signals to its
+training child. W&B stores the individual runs and metrics; the workflow writes
+`results/parameter-sweep/sweep.done` after all agents finish.
+
+For grid searches, `agents: N` with `trials_per_agent: 1` gives maximum parallelism
+and isolates every trial in its own allocation. For Bayesian searches, use fewer
+longer-lived agents so later suggestions can incorporate earlier results; for a
+24-trial sweep, `agents: 8` and `trials_per_agent: 3` is a good starting point.
+One-by-one jobs remain preferable when queue policy, wall-time prediction, or
+preemption isolation matters more than Bayesian adaptivity.
 
 ## Read the output
 
@@ -140,6 +148,14 @@ Evaluation metrics and any configured reporting backend are controlled by the
 resolved `trainer` settings. Check the resolved configuration saved with a run
 before comparing experiments so that differences in seeds, model identifiers,
 batch sizes, and learning rates are explicit.
+
+W&B training runs default to the `regulonado-training` project. Pipeline runs
+are grouped as `<results_dir-name>/<fold>`, named `<fold>/<phase>`, and use the
+phase name as their job type. Override `trainer.wandb_project`,
+`trainer.wandb_group`, `trainer.wandb_job_type`, `trainer.wandb_run_name`, or
+`trainer.wandb_tags` under `train.common` when a different organization is
+needed. Parameter sweeps default to `regulonado-parameter-sweep`, while design
+runs default to `regulonado-design`.
 
 Training several independent folds this way is also what
 [synthetic enhancer design](design.md) needs: it optimises against some folds

@@ -223,6 +223,7 @@ class ParameterSweepConfig(BaseModel):
     sweep_config: str = Field(min_length=1)
     agents: int = Field(default=1, ge=1)
     trials_per_agent: int = Field(default=1, ge=1)
+    wandb_project: str = Field(default="regulonado-parameter-sweep", min_length=1)
 
 
 class DesignTarget(BaseModel):

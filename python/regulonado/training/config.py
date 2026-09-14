@@ -136,6 +136,11 @@ class TrainerConfig:
     prefetch_factor: int | None = 2
     # Logging backends passed to TrainingArguments report_to. Use ["wandb"] to enable W&B.
     report_to: list[str] = field(default_factory=list)
+    wandb_project: str = "regulonado-training"
+    wandb_group: str | None = None
+    wandb_job_type: str = "training"
+    wandb_run_name: str | None = None
+    wandb_tags: list[str] = field(default_factory=list)
     # Full Trainer resume: restores model, optimizer, scheduler, RNG, and Trainer state.
     resume_from_checkpoint: str | bool | None = None
     # Warm start: loads model weights only and creates a fresh optimizer/scheduler.

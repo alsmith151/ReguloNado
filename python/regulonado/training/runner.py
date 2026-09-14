@@ -816,6 +816,13 @@ def _build_training_arguments(
     *,
     has_eval: bool,
 ) -> TrainingArguments:
+    if "wandb" in trainer_cfg.report_to:
+        environ["WANDB_PROJECT"] = trainer_cfg.wandb_project
+        environ["WANDB_JOB_TYPE"] = trainer_cfg.wandb_job_type
+        if trainer_cfg.wandb_group:
+            environ["WANDB_RUN_GROUP"] = trainer_cfg.wandb_group
+        if trainer_cfg.wandb_tags:
+            environ["WANDB_TAGS"] = ",".join(trainer_cfg.wandb_tags)
     save_steps = trainer_cfg.checkpoint_every_n_steps or trainer_cfg.log_every_n_steps
     eval_strategy = "epoch" if has_eval and trainer_cfg.max_steps is None else "steps"
     if not has_eval:
@@ -828,7 +835,7 @@ def _build_training_arguments(
 
     return TrainingArguments(
         output_dir=str(output_dir),
-        run_name=environ.get("WANDB_NAME") or output_dir.name,
+        run_name=trainer_cfg.wandb_run_name or environ.get("WANDB_NAME") or output_dir.name,
         per_device_train_batch_size=trainer_cfg.batch_size,
         per_device_eval_batch_size=trainer_cfg.resolved_eval_batch_size(),
         dataloader_num_workers=trainer_cfg.num_workers,

@@ -62,6 +62,13 @@ trainer:
   eval_on_start: true
   num_plot_examples: 4
   report_to: []
+  # W&B organization. Pipeline training supplies fold/phase-specific group,
+  # job type, and run name values unless explicitly overridden.
+  wandb_project: regulonado-training
+  wandb_group: null
+  wandb_job_type: training
+  wandb_run_name: null
+  wandb_tags: []
 
   # Backbone and restart behavior
   freeze_backbone: true
