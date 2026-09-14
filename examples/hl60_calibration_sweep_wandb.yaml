@@ -1,7 +1,8 @@
 program: regulonado
 method: grid
 metric:
-  name: eval_total_ratio_median
+  # Distance from calibrated total ratio (1.0) in log space; zero is optimal.
+  name: eval_abs_log_ratio_total_median
   goal: minimize
 parameters:
   dataset_dir:
@@ -16,6 +17,10 @@ parameters:
     values: [0.2, 1.0, 5.0, 20.0]
   learning_rate:
     values: [0.0001, 0.001, 0.01]
+  activation_type:
+    values: [softplus, softplus_beta2, exp]
+  output_bias_init:
+    values: ["null", empirical_mean]
   max_steps:
     value: 500
 command:
@@ -33,6 +38,10 @@ command:
   - loss.name=${loss}
   - --set
   - loss.poisson_weight=${poisson_weight}
+  - --set
+  - model.activation_type=${activation_type}
+  - --set
+  - head.output_bias_init=${output_bias_init}
   - --set
   - trainer.learning_rate=${learning_rate}
   - --set

@@ -17,7 +17,7 @@ from regulonado.model.heads import (
     TrackMetadataEncoder,
     TransferMLPPerturbHead,
     build_condition_shared_track_index,
-    build_perturb_head,
+    build_transfer_learning_head,
 )
 from regulonado.model.wrapper import BackboneAdapter, FreezePolicy, RegulonadoModel
 
@@ -41,5 +41,5 @@ __all__ = [
     "build_backbone_adapter",
     "build_backbone_architecture",
     "build_condition_shared_track_index",
-    "build_perturb_head",
+    "build_transfer_learning_head",
 ]

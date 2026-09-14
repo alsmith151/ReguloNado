@@ -1,4 +1,4 @@
-# Head family selected by build_perturb_head.
+# Head family selected by build_transfer_learning_head.
 type: film
 # Hidden channel width inside the head.
 hidden: 512

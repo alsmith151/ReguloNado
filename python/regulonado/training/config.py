@@ -57,7 +57,8 @@ class HeadConfig:
     dropout: float = 0.0
     refinement_kernel: int | None = None
     mlp_hidden: int | None = None
-    output_bias_init: float | list[float] | None = None
+    output_bias_init: float | list[float] | str | None = None
+    output_bias_init_samples: int = 256
 
 
 @dataclass(slots=True)

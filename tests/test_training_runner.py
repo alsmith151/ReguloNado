@@ -4,16 +4,19 @@ These exercise the individual seams (config resolution, streaming guards, collat
 construction, history extraction, summary assembly) without loading a real dataset or
 model — no GPU, no downloads.
 """
+
 from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
 import torch
 from regulonado.training.config import TrainerConfig
 from regulonado.training.runner import (
     _build_collate_and_loss,
     _build_training_summary,
+    _empirical_track_output_bias,
     _finalize_trainer_outputs,
     _guard_streaming_persistent_workers,
     _resolve_trainer_config,
@@ -27,6 +30,32 @@ MINIMAL_CFG = {
     "loss": {},
     "trainer": {},
 }
+
+
+def test_empirical_track_output_bias_matches_track_means_through_softplus() -> None:
+    dataset = [
+        {"labels": np.array([[1.0, 3.0], [2.0, 4.0]])},
+        {"labels": np.array([[5.0, 7.0], [6.0, 8.0]])},
+    ]
+
+    bias = _empirical_track_output_bias(
+        dataset, n_tracks=2, activation_type="softplus", max_samples=2
+    )
+
+    torch.testing.assert_close(
+        torch.nn.functional.softplus(torch.tensor(bias)), torch.tensor([4.0, 5.0])
+    )
+
+
+def test_empirical_track_output_bias_respects_sample_limit_and_transposed_labels() -> None:
+    dataset = [
+        {"labels": np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])},
+        {"labels": np.full((3, 2), 100.0)},
+    ]
+
+    bias = _empirical_track_output_bias(dataset, n_tracks=2, activation_type="exp", max_samples=1)
+
+    torch.testing.assert_close(torch.exp(torch.tensor(bias)), torch.tensor([3.0, 4.0]))
 
 
 class TestResolveTrainerConfig:
@@ -84,9 +113,7 @@ class TestBuildCollateAndLoss:
 
     def test_returns_expected_shapes_and_defaults(self) -> None:
         cfg = {"model": {"use_track_metadata": False}, "data": {}, "loss": {"name": "mse"}}
-        collate_fn, loss_fn, scale_factors, background = _build_collate_and_loss(
-            cfg, self.RECORDS
-        )
+        collate_fn, loss_fn, scale_factors, background = _build_collate_and_loss(cfg, self.RECORDS)
         assert scale_factors.shape == (2,)
         assert background.shape == (2,)
         assert callable(collate_fn)
@@ -165,9 +192,7 @@ class TestBuildTrainingSummary:
         }
         trainer_cfg = TrainerConfig()
         history = {"train/loss": [1.0], "eval/loss": []}
-        summary = _build_training_summary(
-            cfg, tmp_path, 42, None, [{}, {}], trainer_cfg, history
-        )
+        summary = _build_training_summary(cfg, tmp_path, 42, None, [{}, {}], trainer_cfg, history)
         assert summary["n_tracks"] == 2
         assert summary["seed"] == 42
         assert summary["backbone"] == "borzoi"

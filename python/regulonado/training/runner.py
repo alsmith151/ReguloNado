@@ -136,7 +136,9 @@ def load_model_weights_only(model: torch.nn.Module, checkpoint: str | Path) -> N
         raise RuntimeError(f"Missing checkpoint keys when warm-starting: {missing[:10]}")
 
 
-def assert_track_names_match(model_track_names: Sequence[str], dataset_track_names: Sequence[str]) -> None:
+def assert_track_names_match(
+    model_track_names: Sequence[str], dataset_track_names: Sequence[str]
+) -> None:
     """Reject equal-sized but differently ordered output channels."""
     model_names = list(model_track_names)
     dataset_names = list(dataset_track_names)
@@ -579,7 +581,8 @@ def _build_regulonado_config(
     seen: dict[str, int] = {}
     for idx, record in enumerate(records):
         path = (
-            record.get("resolved_path")
+            record.get("track_name")
+            or record.get("resolved_path")
             or record.get("path")
             or record.get("bigwig_path")
             or f"track{idx}"
@@ -624,9 +627,7 @@ def _build_regulonado_config(
         activation_type=str(model_cfg.get("activation_type", "softplus")),
         num_conditions=infer_cardinality(records, "condition_id") if use_track_metadata else 0,
         num_cell_lines=(
-            infer_cardinality_any(records, "source_id", "cell_line_id")
-            if use_track_metadata
-            else 0
+            infer_cardinality_any(records, "source_id", "cell_line_id") if use_track_metadata else 0
         ),
         num_assay_types=infer_cardinality(records, "assay_type_id") if use_track_metadata else 0,
         num_targets=infer_cardinality(records, "target_id") if use_track_metadata else 0,
@@ -638,6 +639,74 @@ def _build_regulonado_config(
         track_names=track_names,
         track_metadata=constant_track_metadata_values(records) if use_track_metadata else {},
         data_path=str(cfg["data"]["path"]),
+    )
+
+
+def _inverse_output_activation_mean(means: np.ndarray, activation_type: str) -> np.ndarray:
+    """Map desired positive output means to final-layer bias values."""
+    means = np.maximum(np.asarray(means, dtype=np.float64), 1e-8)
+    if activation_type == "exp":
+        return np.log(means)
+    if activation_type == "softplus_beta2":
+        return np.log(np.expm1(2.0 * means)) / 2.0
+    if activation_type == "softplus":
+        # log(expm1(x)) is unstable for large x, where softplus^-1(x) ~= x.
+        return np.where(means > 20.0, means, np.log(np.expm1(means)))
+    if activation_type == "identity":
+        return means
+    raise ValueError(f"Empirical output-bias initialization does not support {activation_type!r}")
+
+
+def _empirical_track_output_bias(
+    train_dataset: Any,
+    *,
+    n_tracks: int,
+    activation_type: str,
+    max_samples: int,
+) -> list[float]:
+    """Estimate per-track transformed-label means without materializing the dataset."""
+    if max_samples < 1:
+        raise ValueError("head.output_bias_init_samples must be at least 1")
+    totals = np.zeros(n_tracks, dtype=np.float64)
+    count = 0
+    for example in train_dataset:
+        labels = np.asarray(example["labels"], dtype=np.float64)
+        if labels.ndim != 2:
+            raise ValueError(f"Expected 2D training labels, got shape {labels.shape}")
+        if labels.shape[0] != n_tracks and labels.shape[1] == n_tracks:
+            labels = labels.T
+        if labels.shape[0] != n_tracks:
+            raise ValueError(
+                f"Training label shape {labels.shape} does not contain {n_tracks} tracks"
+            )
+        totals += labels.sum(axis=1)
+        count += labels.shape[1]
+        max_samples -= 1
+        if max_samples == 0:
+            break
+    if count == 0:
+        raise ValueError("Cannot initialize output bias from an empty training dataset")
+    return _inverse_output_activation_mean(totals / count, activation_type).tolist()
+
+
+def _resolve_empirical_output_bias(
+    cfg: Mapping[str, Any], dataset_dict: DatasetDict | dict[str, Any], n_tracks: int
+) -> None:
+    """Replace the declarative empirical-mean mode with checkpoint-safe numeric biases."""
+    head_cfg = cfg["head"]
+    mode = head_cfg.get("output_bias_init")
+    if mode != "empirical_mean":
+        return
+    values = _empirical_track_output_bias(
+        dataset_dict["train"],
+        n_tracks=n_tracks,
+        activation_type=str(cfg["model"].get("activation_type", "softplus")),
+        max_samples=int(head_cfg.get("output_bias_init_samples", 256)),
+    )
+    head_cfg["output_bias_init"] = values
+    logger.info(
+        "Initialized transfer-head output bias from %d transformed training-label samples",
+        int(head_cfg.get("output_bias_init_samples", 256)),
     )
 
 
@@ -995,8 +1064,7 @@ def _resolve_trainer_config(cfg: Mapping[str, Any]) -> TrainerConfig:
     missing_sections = [section for section in required_sections if section not in cfg]
     if missing_sections:
         raise ValueError(
-            "Training configuration is missing required section(s): "
-            + ", ".join(missing_sections)
+            "Training configuration is missing required section(s): " + ", ".join(missing_sections)
         )
     try:
         trainer_cfg = OmegaConf.to_object(
@@ -1253,7 +1321,7 @@ def _build_training_callbacks(
     records: Sequence[Mapping[str, Any]],
     output_dir: Path,
 ) -> list[TrainerCallback]:
-    """Assemble the trainer callback list (wandb config, LR logging, early stopping, diagnostics)."""
+    """Assemble W&B, LR logging, early stopping, and diagnostic callbacks."""
     callbacks: list[TrainerCallback] = [WandbConfigCallback(cfg), LRLogCallback()]
     if trainer_cfg.early_stopping_patience is not None and val_dataset is not None:
         callbacks.append(
@@ -1417,6 +1485,8 @@ def run_training(
     dataset_dict = _apply_dataset_transforms(dataset_dict, metadata, records, cfg["data"])
     logger.info(f"[rank {rank}] dataset transforms applied")
 
+    _resolve_empirical_output_bias(cfg, dataset_dict, len(records))
+
     model = _build_model_with_logging(cfg, metadata, records, adapter_builder, rank=rank)
     collate_fn, loss_fn, scale_factors, background = _build_collate_and_loss(cfg, records)
     trainer_cfg = _guard_streaming_persistent_workers(trainer_cfg, streaming=streaming)
@@ -1424,8 +1494,14 @@ def run_training(
     output_dir = Path(str(cfg.get("output_dir") or Path.cwd() / "outputs"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset_track_names = [Path(r["bigwig_path"]).stem for r in records if r.get("bigwig_path")]
-    _prepare_model_for_training(model, trainer_cfg, rank=rank, dataset_track_names=dataset_track_names)
+    dataset_track_names = [
+        str(r.get("track_name") or Path(r["bigwig_path"]).stem)
+        for r in records
+        if r.get("track_name") or r.get("bigwig_path")
+    ]
+    _prepare_model_for_training(
+        model, trainer_cfg, rank=rank, dataset_track_names=dataset_track_names
+    )
 
     write_provenance(
         output_dir=output_dir,

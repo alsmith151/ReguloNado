@@ -72,6 +72,7 @@ class RegulonadoModel(PreTrainedModel):
             self.backbone = backbone
         else:
             from regulonado.model.adapters import build_backbone_architecture
+
             self.backbone = build_backbone_architecture(
                 config.backbone_type,
                 config.config_overrides,
@@ -106,7 +107,7 @@ class RegulonadoModel(PreTrainedModel):
 
         blocks = list(self.backbone.iter_named_blocks())
         if policy.unfreeze_backbone_stages_from_output_end > 0:
-            for _, module in blocks[-policy.unfreeze_backbone_stages_from_output_end:]:
+            for _, module in blocks[-policy.unfreeze_backbone_stages_from_output_end :]:
                 for p in module.parameters():
                     p.requires_grad = True
 
@@ -119,7 +120,7 @@ class RegulonadoModel(PreTrainedModel):
 
 
 def _build_head(config: RegulonadoConfig) -> nn.Module:
-    from regulonado.model.heads import build_perturb_head
+    from regulonado.model.heads import build_transfer_learning_head
 
     shared_track_index = config.condition_shared_track_index or None
     head_kwargs: dict = {
@@ -141,7 +142,7 @@ def _build_head(config: RegulonadoConfig) -> nn.Module:
         head_kwargs["mlp_hidden"] = config.mlp_hidden
     if config.head_type == "transfer_mlp" and config.output_bias_init is not None:
         head_kwargs["output_bias_init"] = config.output_bias_init
-    return build_perturb_head(
+    return build_transfer_learning_head(
         head_type=config.head_type,
         activation_type=config.activation_type,
         **head_kwargs,

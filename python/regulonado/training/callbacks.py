@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import random
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -254,7 +254,8 @@ class EvalExampleDiagnostics(TrainerCallback):
             return _inverse_signal_transform(
                 x, self._scale_factors, self._apply_squash, self._apply_scale, self._background
             )
-        preds_plot  = np.stack([_inv(preds_raw[i])  for i in range(preds_raw.shape[0])])
+
+        preds_plot = np.stack([_inv(preds_raw[i]) for i in range(preds_raw.shape[0])])
         labels_plot = np.stack([_inv(labels_raw[i]) for i in range(labels_raw.shape[0])])
 
         def _summary(values: np.ndarray) -> dict[str, list[float]]:
@@ -265,15 +266,20 @@ class EvalExampleDiagnostics(TrainerCallback):
             }
 
         self._output_dir.mkdir(parents=True, exist_ok=True)
-        diagnostic_path = self._output_dir / f"eval_diagnostics_step_{int(state.global_step)}.json"
-        diagnostic_path.write_text(json.dumps({
-            "intervals": intervals,
-            "track_names": self._track_names,
-            "predictions": _summary(preds_plot),
-            "labels": _summary(labels_plot),
-        }, indent=2) + "\n")
-
         intervals = [item.get("interval", f"example_{i}") for i, item in enumerate(raw_items)]
+        diagnostic_path = self._output_dir / f"eval_diagnostics_step_{int(state.global_step)}.json"
+        diagnostic_path.write_text(
+            json.dumps(
+                {
+                    "intervals": intervals,
+                    "track_names": self._track_names,
+                    "predictions": _summary(preds_plot),
+                    "labels": _summary(labels_plot),
+                },
+                indent=2,
+            )
+            + "\n"
+        )
         _plot_examples(
             preds_plot,
             labels_plot,

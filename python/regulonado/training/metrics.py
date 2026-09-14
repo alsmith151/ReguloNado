@@ -30,6 +30,7 @@ def make_preprocess_logits_for_metrics(topk_bins: int) -> Callable:
       cols 20-24: (sum_log_p, sum_log_t, sum_log_p*log_t, sum_log_p², n)
                    over bins — sufficient stats for dispersion_slope
     """
+
     def preprocess(logits: torch.Tensor | tuple, labels: torch.Tensor) -> torch.Tensor:
         if isinstance(logits, tuple):
             logits = logits[0]
@@ -39,26 +40,26 @@ def make_preprocess_logits_for_metrics(topk_bins: int) -> Callable:
         B, T, L = p.shape
         k = min(topk_bins, L)
 
-        sp   = p.sum(-1)
-        st   = t.sum(-1)
-        spt  = (p * t).sum(-1)
-        sp2  = (p * p).sum(-1)
-        st2  = (t * t).sum(-1)
-        n    = torch.full((B, T), float(L), dtype=p.dtype, device=p.device)
+        sp = p.sum(-1)
+        st = t.sum(-1)
+        spt = (p * t).sum(-1)
+        sp2 = (p * p).sum(-1)
+        st2 = (t * t).sum(-1)
+        n = torch.full((B, T), float(L), dtype=p.dtype, device=p.device)
 
         topk_idx = t.topk(k, dim=-1).indices  # [B, T, k]
         p_k = p.gather(-1, topk_idx)
         t_k = t.gather(-1, topk_idx)
-        sp_k  = p_k.sum(-1)
-        st_k  = t_k.sum(-1)
+        sp_k = p_k.sum(-1)
+        st_k = t_k.sum(-1)
         spt_k = (p_k * t_k).sum(-1)
         sp2_k = (p_k * p_k).sum(-1)
         st2_k = (t_k * t_k).sum(-1)
-        n_k   = torch.full((B, T), float(k), dtype=p.dtype, device=p.device)
+        n_k = torch.full((B, T), float(k), dtype=p.dtype, device=p.device)
 
         # Total-signal sufficient stats: sp, st are per-example track totals (summed over bins).
         # When accumulated across N eval examples: sum gives cross-example Pearson sufficient stats.
-        ones  = torch.ones((B, T), dtype=p.dtype, device=p.device)
+        ones = torch.ones((B, T), dtype=p.dtype, device=p.device)
         q99_p = torch.quantile(p.float(), 0.99, dim=-1).to(dtype=p.dtype)
         q99_t = torch.quantile(t.float(), 0.99, dim=-1).to(dtype=p.dtype)
         log_p = torch.log(p.float().clamp_min(1e-8))
@@ -69,12 +70,36 @@ def make_preprocess_logits_for_metrics(topk_bins: int) -> Callable:
         log_p2_sum = (log_p * log_p).sum(-1).to(dtype=p.dtype)
 
         return torch.stack(
-            [sp, st, spt, sp2, st2, n,
-             sp_k, st_k, spt_k, sp2_k, st2_k, n_k,
-             sp, st, sp * st, sp * sp, st * st, ones,
-             q99_p, q99_t, log_p_sum, log_t_sum, log_pt_sum, log_p2_sum, n],
+            [
+                sp,
+                st,
+                spt,
+                sp2,
+                st2,
+                n,
+                sp_k,
+                st_k,
+                spt_k,
+                sp2_k,
+                st2_k,
+                n_k,
+                sp,
+                st,
+                sp * st,
+                sp * sp,
+                st * st,
+                ones,
+                q99_p,
+                q99_t,
+                log_p_sum,
+                log_t_sum,
+                log_pt_sum,
+                log_p2_sum,
+                n,
+            ],
             dim=-1,
         )
+
     return preprocess
 
 
@@ -82,13 +107,15 @@ def make_compute_metrics(
     n_tracks: int,
 ) -> Callable[[EvalPrediction], dict[str, float]]:
     def _pearson_from_stats(
-        sp: np.ndarray, st: np.ndarray, spt: np.ndarray,
-        sp2: np.ndarray, st2: np.ndarray, n: np.ndarray,
+        sp: np.ndarray,
+        st: np.ndarray,
+        spt: np.ndarray,
+        sp2: np.ndarray,
+        st2: np.ndarray,
+        n: np.ndarray,
     ) -> np.ndarray:
         num = n * spt - sp * st
-        denom = np.sqrt(
-            np.maximum(n * sp2 - sp**2, 0.0) * np.maximum(n * st2 - st**2, 0.0)
-        )
+        denom = np.sqrt(np.maximum(n * sp2 - sp**2, 0.0) * np.maximum(n * st2 - st**2, 0.0))
         result = np.full_like(num, np.nan, dtype=np.float64)
         return np.divide(num, denom, out=result, where=denom > 0)
 
@@ -99,9 +126,7 @@ def make_compute_metrics(
 
         r_all = _pearson_from_stats(s[:, 0], s[:, 1], s[:, 2], s[:, 3], s[:, 4], s[:, 5])
         r_topk = _pearson_from_stats(s[:, 6], s[:, 7], s[:, 8], s[:, 9], s[:, 10], s[:, 11])
-        r_total = _pearson_from_stats(
-            s[:, 12], s[:, 13], s[:, 14], s[:, 15], s[:, 16], s[:, 17]
-        )
+        r_total = _pearson_from_stats(s[:, 12], s[:, 13], s[:, 14], s[:, 15], s[:, 16], s[:, 17])
 
         fin_all = r_all[np.isfinite(r_all)]
         fin_topk = r_topk[np.isfinite(r_topk)]
@@ -114,7 +139,8 @@ def make_compute_metrics(
         finite_ratios = total_ratios[np.isfinite(total_ratios) & (total_ratios > 0)]
         log_ratios = np.log(finite_ratios)
         amplitude_ratios = np.divide(
-            stats[:, :, 18], stats[:, :, 19],
+            stats[:, :, 18],
+            stats[:, :, 19],
             out=np.full(stats[:, :, 18].shape, np.nan),
             where=np.abs(stats[:, :, 19]) > 1e-12,
         )
@@ -124,7 +150,9 @@ def make_compute_metrics(
         # indicates under-dispersion; a pure scale error has slope approximately one.
         slope_num = s[:, 24] * s[:, 22] - s[:, 20] * s[:, 21]
         slope_den = s[:, 24] * s[:, 23] - s[:, 20] * s[:, 20]
-        slopes = np.divide(slope_num, slope_den, out=np.full(n_tracks, np.nan), where=slope_den > 1e-12)
+        slopes = np.divide(
+            slope_num, slope_den, out=np.full(n_tracks, np.nan), where=slope_den > 1e-12
+        )
         finite_slopes = slopes[np.isfinite(slopes)]
 
         return {
@@ -133,10 +161,21 @@ def make_compute_metrics(
                 float(np.median(fin_topk)) if fin_topk.size else float("nan")
             ),
             "pearson_total_median": float(np.median(fin_total)) if fin_total.size else float("nan"),
-            "total_ratio_median": float(np.median(finite_ratios)) if finite_ratios.size else float("nan"),
-            "log_ratio_total_median": float(np.median(log_ratios)) if log_ratios.size else float("nan"),
-            "amplitude_ratio_median": float(np.median(amplitude_ratios)) if amplitude_ratios.size else float("nan"),
-            "dispersion_slope": float(np.median(finite_slopes)) if finite_slopes.size else float("nan"),
+            "total_ratio_median": float(np.median(finite_ratios))
+            if finite_ratios.size
+            else float("nan"),
+            "log_ratio_total_median": float(np.median(log_ratios))
+            if log_ratios.size
+            else float("nan"),
+            "abs_log_ratio_total_median": (
+                float(abs(np.median(log_ratios))) if log_ratios.size else float("nan")
+            ),
+            "amplitude_ratio_median": float(np.median(amplitude_ratios))
+            if amplitude_ratios.size
+            else float("nan"),
+            "dispersion_slope": float(np.median(finite_slopes))
+            if finite_slopes.size
+            else float("nan"),
         }
 
     return compute_metrics

@@ -3,6 +3,7 @@
 These tests exercise the sufficient-stats accumulation and Pearson formulas
 without requiring a GPU or a real model.
 """
+
 from __future__ import annotations
 
 import unittest.mock
@@ -23,6 +24,7 @@ from transformers import Trainer
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_batch(
     B: int = 4,
@@ -45,19 +47,20 @@ def _make_batch(
 # preprocess tests
 # ---------------------------------------------------------------------------
 
+
 class TestPreprocess:
     def test_output_shape_btl_labels(self):
         preprocess = make_preprocess_logits_for_metrics(topk_bins=8)
         logits, labels = _make_batch(B=3, T=5, L=20, labels_transposed=False)
         out = preprocess(logits, labels)
-        assert out.shape == (3, 5, 18), out.shape
+        assert out.shape == (3, 5, 25), out.shape
 
     def test_output_shape_transposed_labels(self):
         """HF datasets loads labels as [B, L, T]; preprocess must handle it."""
         preprocess = make_preprocess_logits_for_metrics(topk_bins=8)
         logits, labels_lt = _make_batch(B=3, T=5, L=20, labels_transposed=True)
         out = preprocess(logits, labels_lt)
-        assert out.shape == (3, 5, 18), out.shape
+        assert out.shape == (3, 5, 25), out.shape
 
     def test_transposed_labels_same_stats(self):
         """Stats must be identical regardless of whether labels are transposed."""
@@ -81,7 +84,7 @@ class TestPreprocess:
         preprocess = make_preprocess_logits_for_metrics(topk_bins=1000)
         logits, labels = _make_batch(B=2, T=3, L=16)
         out = preprocess(logits, labels)
-        assert out.shape == (2, 3, 18)
+        assert out.shape == (2, 3, 25)
 
     def test_n_column_values(self):
         """Col 5 (n for all bins) must equal L; col 11 (n for topk) must equal min(k, L)."""
@@ -97,6 +100,7 @@ class TestPreprocess:
 # compute_metrics tests
 # ---------------------------------------------------------------------------
 
+
 class TestComputeMetrics:
     def _run(self, n_batches: int = 5, B: int = 4, T: int = 6, L: int = 24, topk: int = 8):
         """Accumulate stats over n_batches and return metrics dict."""
@@ -109,16 +113,18 @@ class TestComputeMetrics:
             stats = preprocess(logits, labels)
             all_stats.append(stats.numpy())
 
-        stacked = np.stack(all_stats, axis=0)  # [n_batches, B, T, 18] — mimic HF accumulation
+        stacked = np.stack(all_stats, axis=0)  # [n_batches, B, T, 25] — mimic HF accumulation
 
         from transformers import EvalPrediction
-        eval_pred = EvalPrediction(predictions=stacked.reshape(-1, T, 18), label_ids=None)
+
+        eval_pred = EvalPrediction(predictions=stacked.reshape(-1, T, 25), label_ids=None)
         return compute_metrics(eval_pred)
 
     def test_returns_expected_keys(self):
         metrics = self._run()
         assert "pearson_bin_median" in metrics
         assert "pearson_total_median" in metrics
+        assert "abs_log_ratio_total_median" in metrics
         assert any("pearson_top" in k for k in metrics)
 
     def test_pearson_in_range(self):
@@ -139,9 +145,11 @@ class TestComputeMetrics:
         stats = preprocess(signal, signal)
 
         from transformers import EvalPrediction
+
         eval_pred = EvalPrediction(predictions=stats.numpy(), label_ids=None)
         m = compute_metrics(eval_pred)
         assert m["pearson_bin_median"] == pytest.approx(1.0, abs=1e-4)
+        assert m["abs_log_ratio_total_median"] == pytest.approx(0.0, abs=1e-6)
 
     def test_against_scipy_pearson(self):
         """Sufficient-stats Pearson must match scipy on the same flat data."""
@@ -157,11 +165,12 @@ class TestComputeMetrics:
         stats = preprocess(logits, labels)
 
         from transformers import EvalPrediction
+
         eval_pred = EvalPrediction(predictions=stats.numpy(), label_ids=None)
         m = compute_metrics(eval_pred)
 
         # Compute expected per-track Pearson using scipy (flatten B and L together).
-        p_np = logits.numpy()   # [B, T, L]
+        p_np = logits.numpy()  # [B, T, L]
         t_np = labels.numpy()
 
         scipy_rs = []
@@ -184,6 +193,7 @@ class TestComputeMetrics:
         stats = preprocess(logits, labels)
 
         from transformers import EvalPrediction
+
         eval_pred = EvalPrediction(predictions=stats.numpy(), label_ids=None)
         m = compute_metrics(eval_pred)
         # With all-zero inputs, nan is expected; just check no exception raised
@@ -193,6 +203,7 @@ class TestComputeMetrics:
 # ---------------------------------------------------------------------------
 # RegulonadoTrainer.prediction_step integration
 # ---------------------------------------------------------------------------
+
 
 class TestRegulonadoTrainerPredictionStep:
     """Verify that prediction_step calls preprocess with raw labels and then

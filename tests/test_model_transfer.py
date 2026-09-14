@@ -114,6 +114,17 @@ def test_residual_and_transfer_heads_produce_expected_shapes():
     assert transfer_head(inputs).shape == (2, 2, 12)
 
 
+def test_transfer_head_accepts_per_track_output_bias_initialization():
+    head = TransferMLPPerturbHead(
+        in_ch=8,
+        hidden=4,
+        n_tracks=2,
+        output_bias_init=[-1.5, 0.75],
+    )
+
+    torch.testing.assert_close(head.proj[-1].bias, torch.tensor([-1.5, 0.75]))
+
+
 def test_freeze_policy_unfreezes_last_block_only():
     backbone = DummyBackbone()
     model = RegulonadoModel(
@@ -346,7 +357,7 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
     assert (tmp_path / "run" / "model.safetensors").exists()
 
     saved_config = RegulonadoConfig.from_pretrained(tmp_path / "run")
-    assert saved_config.track_names == ["track0", "track1"]
+    assert saved_config.track_names == ["t0", "t1"]
     # Enriched labels ["z", "a"] sort to ["a", "z"] -> a=0, z=1, so t0("z")=1, t1("a")=0 —
     # distinct from the dataset-copy's ["a", "b"] -> [0, 1], proving metadata_path won.
     assert saved_config.track_metadata["track_condition_ids"] == [1, 0]

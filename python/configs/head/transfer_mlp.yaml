@@ -1,4 +1,4 @@
-# Head family selected by build_perturb_head.
+# Head family selected by build_transfer_learning_head.
 type: transfer_mlp
 # Hidden channel width inside the transfer head.
 hidden: 512
@@ -6,3 +6,8 @@ hidden: 512
 dropout: 0.0
 # Intermediate width used by the metadata-free transfer MLP.
 mlp_hidden: 1024
+# null keeps the framework default. "empirical_mean" estimates each track's
+# transformed training-label mean and initializes the output bias through the
+# inverse output activation. A scalar or one value per track is also accepted.
+output_bias_init: null
+output_bias_init_samples: 256

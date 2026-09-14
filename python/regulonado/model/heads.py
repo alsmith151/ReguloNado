@@ -1087,13 +1087,13 @@ class TransferMLPPerturbHead(nn.Module):
         return self.activation(self.proj(x))
 
 
-def build_perturb_head(
+def build_transfer_learning_head(
     *,
     head_type: HeadType,
     activation_type: ActivationType = "softplus",
     **kwargs: object,
 ) -> nn.Module:
-    """Instantiate a perturbation head of the specified type.
+    """Instantiate a transfer-learning prediction head of the specified type.
 
     Factory function that selects and constructs the appropriate head class
     based on the type string. All keyword arguments except head_type and
@@ -1122,7 +1122,7 @@ def build_perturb_head(
 
     Examples
     --------
-    >>> head = build_perturb_head(
+    >>> head = build_transfer_learning_head(
     ...     head_type="film",
     ...     in_ch=1920,
     ...     n_tracks=12,
