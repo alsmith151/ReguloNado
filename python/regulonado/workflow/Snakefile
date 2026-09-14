@@ -122,7 +122,7 @@ rule all:
             else []
         ),
         *(
-            str(RESULTS / "parameter-sweep" / "sweep.done")
+            [str(RESULTS / "parameter-sweep" / "sweep.done")]
             if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False)
             else []
         ),

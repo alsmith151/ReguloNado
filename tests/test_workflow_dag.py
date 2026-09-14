@@ -75,6 +75,27 @@ parameter_sweep:
     assert "agent_1.done" in output
     assert "wandb agent --count 1" in output
 
+    all_result = subprocess.run(
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            "--dry-run",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    all_output = all_result.stdout + all_result.stderr
+    assert all_result.returncode == 0, all_output
+    assert "Empty file path encountered" not in all_output
+
 
 def test_two_runs_form_independent_phase_chains(tmp_path):
     snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
