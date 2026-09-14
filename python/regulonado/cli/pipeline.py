@@ -190,43 +190,6 @@ def _validate_training_matrix(configfile: Path) -> None:
                     f"Invalid training settings for {label}: {exc}", param_hint="CONFIGFILE"
                 ) from exc
 
-    parameter_sweep = raw.get("parameter_sweep") or {}
-    if parameter_sweep.get("enabled"):
-        selected_run_names = set(parameter_sweep.get("runs") or [r.get("name") for r in runs])
-        selected_runs = [
-            r for r in runs if isinstance(r, dict) and r.get("name") in selected_run_names
-        ]
-        for variant in parameter_sweep.get("variants", []):
-            if not isinstance(variant, dict):
-                continue
-            for run in selected_runs:
-                settings = {}
-                for layer in (
-                    train.get("common", {}),
-                    variant.get("settings", {}),
-                    run.get("settings", {}),
-                ):
-                    if isinstance(layer, dict):
-                        settings.update(_flatten_settings(layer))
-                settings["seed"] = run["seed"]
-                settings["backbone.pretrained_name"] = run["pretrained_model"]
-                overrides = [
-                    "data.path=/config-validation",
-                    "output_dir=/config-validation",
-                    *(
-                        f"{key}={json.dumps(value, separators=(',', ':'))}"
-                        for key, value in settings.items()
-                    ),
-                ]
-                try:
-                    resolved_training_config("head_only", overrides)
-                except Exception as exc:
-                    raise typer.BadParameter(
-                        "Invalid parameter-sweep settings for "
-                        f"{run.get('name')}/{variant.get('name')}: {exc}",
-                        param_hint="CONFIGFILE",
-                    ) from exc
-
 
 def pipeline(
     configfile: Annotated[Path, typer.Argument(help="Workflow YAML config")],

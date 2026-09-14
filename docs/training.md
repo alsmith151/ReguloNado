@@ -113,7 +113,8 @@ matrix when only this stage is being used. Add the stage to the workflow YAML:
 parameter_sweep:
   enabled: true
   sweep_config: examples/hl60_parameter_sweep_wandb.yaml
-  agent_count: 1
+  agents: 24
+  trials_per_agent: 1
 ```
 
 Run only this stage on the configured Slurm GPU profile:
@@ -122,8 +123,10 @@ Run only this stage on the configured Slurm GPU profile:
 regulonado pipeline hl60_anchor_folds.yaml parameter-sweep --preset sg
 ```
 
-W&B stores the individual runs and metrics; the workflow writes
-`results/parameter-sweep/sweep.done` after the configured agent count finishes.
+The workflow registers the sweep once, then submits `agents` independent one-GPU
+jobs. Each processes `trials_per_agent` trials. W&B stores the individual runs
+and metrics; the workflow writes `results/parameter-sweep/sweep.done` after all
+agents finish.
 
 ## Read the output
 

@@ -45,7 +45,8 @@ scaling:
 parameter_sweep:
   enabled: true
   sweep_config: {sweep}
-  agent_count: 2
+  agents: 2
+  trials_per_agent: 1
 """
     )
 
@@ -69,6 +70,10 @@ parameter_sweep:
     assert result.returncode == 0, output
     assert str(results / "parameter-sweep" / "sweep.done") in output
     assert "train_phase" not in output
+    assert "parameter_sweep_agent" in output
+    assert "agent_0.done" in output
+    assert "agent_1.done" in output
+    assert "wandb agent --count 1" in output
 
 
 def test_two_runs_form_independent_phase_chains(tmp_path):

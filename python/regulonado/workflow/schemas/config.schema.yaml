@@ -713,19 +713,16 @@ $defs:
         minLength: 1
         title: Sweep Config
         type: string
-      agent_count:
+      agents:
         default: 1
         minimum: 1
-        title: Agent Count
+        title: Agents
         type: integer
-      runs:
-        anyOf:
-        - items:
-            type: string
-          type: array
-        - type: 'null'
-        default: null
-        title: Runs
+      trials_per_agent:
+        default: 1
+        minimum: 1
+        title: Trials Per Agent
+        type: integer
     required:
     - sweep_config
     title: ParameterSweepConfig

@@ -58,7 +58,8 @@ def test_parameter_sweep_does_not_require_training_matrix() -> None:
         parameter_sweep={
             "enabled": True,
             "sweep_config": "sweep.yaml",
-            "agent_count": 4,
+            "agents": 4,
+            "trials_per_agent": 2,
         },
     )
 

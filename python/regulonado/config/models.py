@@ -221,8 +221,8 @@ class ParameterSweepConfig(BaseModel):
 
     enabled: bool = False
     sweep_config: str = Field(min_length=1)
-    agent_count: int = Field(default=1, ge=1)
-    runs: list[str] | None = None
+    agents: int = Field(default=1, ge=1)
+    trials_per_agent: int = Field(default=1, ge=1)
 
 
 class DesignTarget(BaseModel):
@@ -549,19 +549,6 @@ class RegulonadoConfig(BaseModel):
                     f"design.{label} names train.runs entries that don't exist: "
                     f"{', '.join(unknown)}"
                 )
-        return self
-
-    @model_validator(mode="after")
-    def _parameter_sweep_runs_are_known(self) -> "RegulonadoConfig":
-        if self.parameter_sweep is None or self.parameter_sweep.runs is None or self.train is None:
-            return self
-        known = {run.name for run in self.train.runs}
-        unknown = sorted(set(self.parameter_sweep.runs) - known)
-        if unknown:
-            raise ValueError(
-                "parameter_sweep.runs names train.runs entries that don't exist: "
-                + ", ".join(unknown)
-            )
         return self
 
     @model_validator(mode="after")
