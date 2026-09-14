@@ -7,6 +7,12 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
     rule create_parameter_sweep:
         input:
             sweep_config=lambda w: str(PARAMETER_SWEEP["sweep_config"]),
+            # Creating the W&B sweep is part of the dataset-dependent stage,
+            # not merely configuration parsing.  Keep this dependency here
+            # (rather than only on the agents) so the remote sweep cannot be
+            # initialized while the dataset is still being built.
+            dataset=str(training_dataset_dir() / "dataset_dict.json"),
+            metadata=str(training_dataset_dir() / "tracks.parquet"),
         output:
             sweep_id=str(_SWEEP_DIR / "sweep.id"),
         params:
