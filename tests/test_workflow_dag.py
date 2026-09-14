@@ -9,9 +9,7 @@ from pathlib import Path
 
 import pytest
 
-WORKFLOW = (
-    Path(__file__).parents[1] / "python" / "regulonado" / "workflow" / "Snakefile"
-)
+WORKFLOW = Path(__file__).parents[1] / "python" / "regulonado" / "workflow" / "Snakefile"
 
 
 def test_two_runs_form_independent_phase_chains(tmp_path):
@@ -480,7 +478,9 @@ design:
     )
     assert result.returncode == 0, result.stderr
     expected = str(results / "attribution" / "hl60" / "core_regions.bed")
-    assert re.search(rf"checkpoint shard_candidates:\n\s+input: {re.escape(expected)}", result.stdout)
+    assert re.search(
+        rf"checkpoint shard_candidates:\n\s+input: {re.escape(expected)}", result.stdout
+    )
 
 
 def test_design_from_attribution_rejects_an_unknown_target_name(tmp_path):
@@ -652,6 +652,26 @@ attribution:
     assert "--track " not in result.stdout
     assert f"--annotations {annotations}" in result.stdout
 
+    cli_result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "regulonado",
+            "pipeline",
+            str(config),
+            "attribution",
+            "--dry-run",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    cli_output = cli_result.stdout + cli_result.stderr
+    assert cli_result.returncode == 0, cli_output
+    assert str(results / "attribution" / "hl60" / "core_regions.bed") in cli_output
+
 
 def test_attribution_stage_is_absent_unless_configured(tmp_path):
     """No 'attribution:' key means the rules are never defined and rule all is unaffected."""
@@ -789,9 +809,20 @@ design:
 
     def dry_run():
         return subprocess.run(
-            [snakemake, "--snakefile", str(WORKFLOW), "--configfile", str(config),
-             "--cores", "1", "--dry-run"],
-            check=False, capture_output=True, text=True, env=env,
+            [
+                snakemake,
+                "--snakefile",
+                str(WORKFLOW),
+                "--configfile",
+                str(config),
+                "--cores",
+                "1",
+                "--dry-run",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
         )
 
     # 1. Before the checkpoint has run, Snakemake correctly refuses to guess the shard
@@ -802,9 +833,20 @@ design:
 
     # 2. Run the checkpoint for real.
     build_checkpoint = subprocess.run(
-        [snakemake, "--snakefile", str(WORKFLOW), "--configfile", str(config),
-         "--cores", "1", str(shards_dir)],
-        check=False, capture_output=True, text=True, env=env,
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            str(shards_dir),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
     )
     assert build_checkpoint.returncode == 0, build_checkpoint.stdout + build_checkpoint.stderr
     assert sorted(p.name for p in shards_dir.glob("*.bed")) == ["0.bed", "1.bed"]

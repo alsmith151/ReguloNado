@@ -253,40 +253,12 @@ $defs:
         default: null
         title: Group By
       settings:
+        additionalProperties: true
         title: Settings
         type: object
     required:
     - name
     title: AttributionTarget
-    type: object
-  CalibrationSweepConfig:
-    additionalProperties: false
-    description: Optional W&B-managed GPU calibration sweep.
-    properties:
-      enabled:
-        default: false
-        title: Enabled
-        type: boolean
-      sweep_config:
-        minLength: 1
-        title: Sweep Config
-        type: string
-      agent_count:
-        default: 1
-        minimum: 1
-        title: Agent Count
-        type: integer
-      runs:
-        anyOf:
-        - items:
-            type: string
-          type: array
-        - type: 'null'
-        default: null
-        title: Runs
-    required:
-    - sweep_config
-    title: CalibrationSweepConfig
     type: object
   DatasetConfig:
     additionalProperties: false
@@ -514,12 +486,12 @@ $defs:
         type: integer
       mu:
         default: 1.0
-        exclusiveMinimum: 0.0
+        exclusiveMinimum: 0
         title: Mu
         type: number
       recomb_rate:
         default: 0.1
-        minimum: 0.0
+        minimum: 0
         title: Recomb Rate
         type: number
       threshold:
@@ -556,17 +528,17 @@ $defs:
         type: string
       offtarget_boost_weight:
         default: 1.0
-        minimum: 0.0
+        minimum: 0
         title: Offtarget Boost Weight
         type: number
       offtarget_boost_tolerance:
         default: 0.0
-        minimum: 0.0
+        minimum: 0
         title: Offtarget Boost Tolerance
         type: number
       offtarget_temperature:
         default: 1.0
-        exclusiveMinimum: 0.0
+        exclusiveMinimum: 0
         title: Offtarget Temperature
         type: number
       gain_transform:
@@ -578,7 +550,7 @@ $defs:
         type: string
       gain_pseudocount:
         default: 1.0
-        exclusiveMinimum: 0.0
+        exclusiveMinimum: 0
         title: Gain Pseudocount
         type: number
       target_alpha:
@@ -663,6 +635,7 @@ $defs:
         title: Method
         type: string
       settings:
+        additionalProperties: true
         title: Settings
         type: object
     required:
@@ -728,6 +701,35 @@ $defs:
     - fasta
     title: InputsConfig
     type: object
+  ParameterSweepConfig:
+    additionalProperties: false
+    description: Optional W&B-managed GPU parameter sweep.
+    properties:
+      enabled:
+        default: false
+        title: Enabled
+        type: boolean
+      sweep_config:
+        minLength: 1
+        title: Sweep Config
+        type: string
+      agent_count:
+        default: 1
+        minimum: 1
+        title: Agent Count
+        type: integer
+      runs:
+        anyOf:
+        - items:
+            type: string
+          type: array
+        - type: 'null'
+        default: null
+        title: Runs
+    required:
+    - sweep_config
+    title: ParameterSweepConfig
+    type: object
   QCConfig:
     additionalProperties: false
     description: Opt-in track QC, run before the Arrow build. Empty/absent ``checks``
@@ -747,6 +749,10 @@ $defs:
         additionalProperties:
           additionalProperties:
             type: number
+          propertyNames:
+            enum:
+            - min
+            - max
           type: object
         title: Rules
         type: object
@@ -917,6 +923,7 @@ $defs:
         title: Nproc Per Node
         type: integer
       common:
+        additionalProperties: true
         title: Common
         type: object
       phases:
@@ -951,6 +958,7 @@ $defs:
         title: Preset
         type: string
       settings:
+        additionalProperties: true
         title: Settings
         type: object
     required:
@@ -972,6 +980,7 @@ $defs:
         title: Pretrained Model
         type: string
       settings:
+        additionalProperties: true
         title: Settings
         type: object
     required:
@@ -999,9 +1008,9 @@ properties:
     $ref: '#/$defs/QCConfig'
   train:
     $ref: '#/$defs/TrainConfig'
-  calibration_sweep:
+  parameter_sweep:
     anyOf:
-    - $ref: '#/$defs/CalibrationSweepConfig'
+    - $ref: '#/$defs/ParameterSweepConfig'
     - type: 'null'
   design:
     anyOf:

@@ -214,8 +214,8 @@ class TrainConfig(BaseModel):
         return self
 
 
-class CalibrationSweepConfig(BaseModel):
-    """Optional W&B-managed GPU calibration sweep."""
+class ParameterSweepConfig(BaseModel):
+    """Optional W&B-managed GPU parameter sweep."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -530,7 +530,7 @@ class RegulonadoConfig(BaseModel):
     scaling: ScalingConfig = Field(default_factory=ScalingConfig)
     qc: QCConfig = Field(default_factory=QCConfig)
     train: TrainConfig
-    calibration_sweep: CalibrationSweepConfig | None = None
+    parameter_sweep: ParameterSweepConfig | None = None
     design: DesignConfig | None = None
     attribution: AttributionConfig | None = None
 
@@ -552,14 +552,14 @@ class RegulonadoConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _calibration_runs_are_known(self) -> "RegulonadoConfig":
-        if self.calibration_sweep is None or self.calibration_sweep.runs is None:
+    def _parameter_sweep_runs_are_known(self) -> "RegulonadoConfig":
+        if self.parameter_sweep is None or self.parameter_sweep.runs is None:
             return self
         known = {run.name for run in self.train.runs}
-        unknown = sorted(set(self.calibration_sweep.runs) - known)
+        unknown = sorted(set(self.parameter_sweep.runs) - known)
         if unknown:
             raise ValueError(
-                "calibration_sweep.runs names train.runs entries that don't exist: "
+                "parameter_sweep.runs names train.runs entries that don't exist: "
                 + ", ".join(unknown)
             )
         return self

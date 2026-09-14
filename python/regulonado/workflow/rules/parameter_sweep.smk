@@ -1,22 +1,22 @@
-"""Optional W&B-managed calibration sweep on a GPU Slurm job."""
+"""Optional W&B-managed parameter sweep on a GPU Slurm job."""
 
-if CALIBRATION_SWEEP and CALIBRATION_SWEEP.get("enabled", False):
-    _SWEEP_DIR = RESULTS / "calibration-sweep"
+if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
+    _SWEEP_DIR = RESULTS / "parameter-sweep"
 
-    rule calibration_sweep:
+    rule parameter_sweep:
         input:
             dataset=str(training_dataset_dir() / "dataset_dict.json"),
             metadata=str(training_dataset_dir() / "tracks.parquet"),
-            sweep_config=lambda w: str(CALIBRATION_SWEEP["sweep_config"]),
+            sweep_config=lambda w: str(PARAMETER_SWEEP["sweep_config"]),
         output:
             done=str(_SWEEP_DIR / "sweep.done"),
         params:
             output_dir=str(_SWEEP_DIR),
-            agent_count=int(CALIBRATION_SWEEP.get("agent_count", 1)),
+            agent_count=int(PARAMETER_SWEEP.get("agent_count", 1)),
         resources:
             gpu=1,
         log:
-            str(RESULTS / "logs" / "calibration_sweep.log"),
+            str(RESULTS / "logs" / "parameter_sweep.log"),
         shell:
             r"""
             set -euo pipefail

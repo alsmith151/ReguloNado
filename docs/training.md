@@ -102,27 +102,27 @@ Outputs use `results/train/<run>/<phase>/`. If the workflow stops, fix the
 cause and run the same pipeline command again; completed outputs remain valid
 and Snakemake schedules only missing or stale work.
 
-## Run a calibration sweep
+## Run a parameter sweep
 
 W&B owns the search space and run bookkeeping. The Snakemake stage only supplies
 the dataset dependency and a GPU Slurm job, while each W&B command invokes the
 normal `regulonado train` entrypoint. Add an optional stage to the workflow YAML:
 
 ```yaml
-calibration_sweep:
+parameter_sweep:
   enabled: true
-  sweep_config: examples/hl60_calibration_sweep_wandb.yaml
+  sweep_config: examples/hl60_parameter_sweep_wandb.yaml
   agent_count: 1
 ```
 
 Run only this stage on the configured Slurm GPU profile:
 
 ```bash
-regulonado pipeline hl60_anchor_folds.yaml calibration --preset sg
+regulonado pipeline hl60_anchor_folds.yaml parameter-sweep --preset sg
 ```
 
 W&B stores the individual runs and metrics; the workflow writes
-`results/calibration-sweep/sweep.done` after the configured agent count finishes.
+`results/parameter-sweep/sweep.done` after the configured agent count finishes.
 
 ## Read the output
 
