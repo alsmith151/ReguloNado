@@ -106,7 +106,8 @@ and Snakemake schedules only missing or stale work.
 
 W&B owns the search space and run bookkeeping. The Snakemake stage only supplies
 the dataset dependency and a GPU Slurm job, while each W&B command invokes the
-normal `regulonado train` entrypoint. Add an optional stage to the workflow YAML:
+normal `regulonado train` entrypoint. The pipeline YAML does not need a `train:`
+matrix when only this stage is being used. Add the stage to the workflow YAML:
 
 ```yaml
 parameter_sweep:

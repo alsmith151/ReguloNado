@@ -51,6 +51,21 @@ def _config(**inputs: Any) -> RegulonadoConfig:
     )
 
 
+def test_parameter_sweep_does_not_require_training_matrix() -> None:
+    config = RegulonadoConfig(
+        results_dir="results",
+        inputs=InputsConfig(intervals="intervals.bed", fasta="genome.fa", bigwig_dir="bigwigs"),
+        parameter_sweep={
+            "enabled": True,
+            "sweep_config": "sweep.yaml",
+            "agent_count": 4,
+        },
+    )
+
+    assert config.train is None
+    _validate_against_schema(config.to_dict())
+
+
 # ---------------------------------------------------------------------- #
 #  Schema round-trip                                                       #
 # ---------------------------------------------------------------------- #
@@ -108,9 +123,7 @@ def test_full_config_with_every_optional_key_validates():
                 TrainPhase(name="deep", preset="deep_finetune", settings={"seed": 1}),
             ],
             runs=[
-                TrainRun(
-                    name="run_a", seed=0, pretrained_model="model/a", settings={"lr": 1e-4}
-                )
+                TrainRun(name="run_a", seed=0, pretrained_model="model/a", settings={"lr": 1e-4})
             ],
         ),
     )
@@ -153,9 +166,7 @@ def test_to_dict_omits_unset_optional_keys():
 
 
 def test_inputs_needs_a_track_source():
-    with pytest.raises(
-        ValueError, match="'bigwig_dir', 'track_sheet' or 'seqnado_projects'"
-    ):
+    with pytest.raises(ValueError, match="'bigwig_dir', 'track_sheet' or 'seqnado_projects'"):
         InputsConfig(intervals="intervals.bed", fasta="genome.fa")
 
 
@@ -243,9 +254,7 @@ def test_bamnado_scaling_requires_a_bam_dir():
     with pytest.raises(ValueError, match="inputs.bam_dir is required"):
         RegulonadoConfig(
             results_dir="results",
-            inputs=InputsConfig(
-                intervals="intervals.bed", fasta="genome.fa", bigwig_dir="bigwigs"
-            ),
+            inputs=InputsConfig(intervals="intervals.bed", fasta="genome.fa", bigwig_dir="bigwigs"),
             scaling={"method": "bamnado"},
             train=_train(),
         )

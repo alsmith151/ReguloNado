@@ -12,6 +12,65 @@ import pytest
 WORKFLOW = Path(__file__).parents[1] / "python" / "regulonado" / "workflow" / "Snakefile"
 
 
+def test_parameter_sweep_stage_does_not_require_train_config(tmp_path):
+    """A sweep builds its dataset dependency without requiring a training matrix."""
+    snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
+    if snakemake is None:
+        pytest.skip("Snakemake is an optional workflow dependency")
+
+    intervals = tmp_path / "intervals.bed"
+    fasta = tmp_path / "genome.fa"
+    sweep = tmp_path / "sweep.yaml"
+    intervals.touch()
+    fasta.touch()
+    sweep.write_text("program: regulonado\nmethod: bayes\n")
+    results = tmp_path / "results"
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"""
+results_dir: {results}
+inputs:
+  intervals: {intervals}
+  fasta: {fasta}
+  bigwig_dir: {tmp_path / "bigwigs"}
+dataset:
+  context_length: 100
+  bin_size: 10
+  n_pred_bins: 4
+  shift_max_bp: 0
+recompress:
+  enabled: false
+scaling:
+  method: tmm
+parameter_sweep:
+  enabled: true
+  sweep_config: {sweep}
+  agent_count: 2
+"""
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "regulonado",
+            "pipeline",
+            str(config),
+            "parameter-sweep",
+            "--dry-run",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert str(results / "parameter-sweep" / "sweep.done") in output
+    assert "train_phase" not in output
+
+
 def test_two_runs_form_independent_phase_chains(tmp_path):
     snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
     if snakemake is None:

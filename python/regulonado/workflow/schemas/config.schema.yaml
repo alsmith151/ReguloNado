@@ -1007,7 +1007,9 @@ properties:
   qc:
     $ref: '#/$defs/QCConfig'
   train:
-    $ref: '#/$defs/TrainConfig'
+    anyOf:
+    - $ref: '#/$defs/TrainConfig'
+    - type: 'null'
   parameter_sweep:
     anyOf:
     - $ref: '#/$defs/ParameterSweepConfig'
@@ -1023,6 +1025,5 @@ properties:
 required:
 - results_dir
 - inputs
-- train
 title: RegulonadoConfig
 type: object

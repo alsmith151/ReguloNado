@@ -60,10 +60,12 @@ DATASET_DIR = RESULTS / "dataset"
 RECHUNK_DIR = RESULTS / "dataset_rechunked"
 TRAIN_DIR = RESULTS / "train"
 
-PHASES = config["train"]["phases"]
-RUNS = config["train"]["runs"]
-_require_unique_names(PHASES, "train.phases")
-_require_unique_names(RUNS, "train.runs")
+TRAIN = config.get("train")
+PHASES = TRAIN["phases"] if TRAIN else []
+RUNS = TRAIN["runs"] if TRAIN else []
+if TRAIN:
+    _require_unique_names(PHASES, "train.phases")
+    _require_unique_names(RUNS, "train.runs")
 
 PHASE_NAMES = [phase["name"] for phase in PHASES]
 RUN_NAMES = [run["name"] for run in RUNS]
@@ -102,9 +104,13 @@ _QC_ENABLED = bool((config.get("qc") or {}).get("checks"))
 
 rule all:
     input:
-        expand(
-            str(TRAIN_DIR / "{run}" / PHASE_NAMES[-1] / "trainer_state.json"),
-            run=RUN_NAMES,
+        *(
+            expand(
+                str(TRAIN_DIR / "{run}" / PHASE_NAMES[-1] / "trainer_state.json"),
+                run=RUN_NAMES,
+            )
+            if TRAIN
+            else []
         ),
         *([str(RESULTS / "tracks" / "_stages" / "qc_report.parquet")] if _QC_ENABLED else []),
         *(
@@ -133,7 +139,8 @@ rule all:
 include: "rules/tracks.smk"
 include: "rules/dataset.smk"
 include: "rules/scaling.smk"
-include: "rules/train.smk"
+if TRAIN:
+    include: "rules/train.smk"
 include: "rules/parameter_sweep.smk"
 include: "rules/attribute.smk"
 include: "rules/design.smk"

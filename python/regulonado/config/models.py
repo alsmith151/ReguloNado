@@ -529,14 +529,14 @@ class RegulonadoConfig(BaseModel):
     recompress: RecompressConfig = Field(default_factory=RecompressConfig)
     scaling: ScalingConfig = Field(default_factory=ScalingConfig)
     qc: QCConfig = Field(default_factory=QCConfig)
-    train: TrainConfig
+    train: TrainConfig | None = None
     parameter_sweep: ParameterSweepConfig | None = None
     design: DesignConfig | None = None
     attribution: AttributionConfig | None = None
 
     @model_validator(mode="after")
     def _design_runs_are_known(self) -> "RegulonadoConfig":
-        if self.design is None:
+        if self.design is None or self.train is None:
             return self
         run_names = {run.name for run in self.train.runs}
         for label, names in (
@@ -553,7 +553,7 @@ class RegulonadoConfig(BaseModel):
 
     @model_validator(mode="after")
     def _parameter_sweep_runs_are_known(self) -> "RegulonadoConfig":
-        if self.parameter_sweep is None or self.parameter_sweep.runs is None:
+        if self.parameter_sweep is None or self.parameter_sweep.runs is None or self.train is None:
             return self
         known = {run.name for run in self.train.runs}
         unknown = sorted(set(self.parameter_sweep.runs) - known)
@@ -566,7 +566,7 @@ class RegulonadoConfig(BaseModel):
 
     @model_validator(mode="after")
     def _anchor_disables_squash(self) -> "RegulonadoConfig":
-        if self.scaling.method == "anchor":
+        if self.scaling.method == "anchor" and self.train is not None:
             common_squash = self.train.common.get("data.apply_squash", True)
             phase_squash = [
                 phase.settings.get("data.apply_squash", common_squash)
@@ -581,7 +581,7 @@ class RegulonadoConfig(BaseModel):
 
     @model_validator(mode="after")
     def _attribution_runs_are_known(self) -> "RegulonadoConfig":
-        if self.attribution is None or not self.attribution.runs:
+        if self.attribution is None or not self.attribution.runs or self.train is None:
             return self
         run_names = {run.name for run in self.train.runs}
         unknown = sorted(name for name in self.attribution.runs if name not in run_names)
