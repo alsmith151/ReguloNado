@@ -81,7 +81,7 @@ if config["recompress"]["enabled"]:
         input:
             info=str(RAW_DATASET_DIR / "dataset_dict.json"),
             table=str(RAW_DATASET_DIR / "tracks.parquet"),
-            splits=[directory(str(RAW_DATASET_DIR / s)) for s in SPLITS],
+            splits=[str(RAW_DATASET_DIR / s) for s in SPLITS],
         params:
             src=str(RAW_DATASET_DIR),
             dst=str(DATASET_DIR),

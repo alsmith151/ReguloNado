@@ -65,6 +65,7 @@ scaling:
     )
     planned_output = planned.stdout + planned.stderr
     assert planned.returncode == 0, planned_output
+    assert "flag 'directory' used in rule recompress_dataset" not in planned_output
     assert "regulonado dataset" in planned_output
     assert "regulonado recompress-dataset" in planned_output
     assert str(results / "dataset_raw") in planned_output
