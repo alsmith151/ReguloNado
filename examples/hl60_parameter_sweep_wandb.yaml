@@ -5,46 +5,32 @@ metric:
   name: eval_abs_log_ratio_total_median
   goal: minimize
 parameters:
-  dataset_dir:
+  preset:
+    value: head_only
+  data.path:
     value: /path/to/results/dataset
-  metadata:
+  data.metadata_path:
     value: /path/to/results/dataset/tracks.parquet
-  pretrained_model:
+  data.apply_squash:
+    value: false
+  backbone.pretrained_name:
     value: johahi/flashzoi-replicate-0
   loss:
     values: [poisson_multinomial, poisson_multinomial_binwise, poisson_nll, transfer_calibration]
-  poisson_weight:
+  loss.poisson_weight:
     values: [0.2, 1.0, 5.0, 20.0]
-  learning_rate:
+  trainer.learning_rate:
     values: [0.0001, 0.001, 0.01]
-  activation_type:
+  model.activation_type:
     values: [softplus, softplus_beta2, exp]
-  output_init:
+  head.output_init:
     values: [default, empirical_mean_bias, empirical_mean_constant]
-  max_steps:
+  trainer.max_steps:
     value: 500
+  trainer.report_to:
+    value: [wandb]
 command:
   - ${env}
   - ${program}
-  - train
-  - ${dataset_dir}
-  - --preset
-  - head_only
-  - --metadata
-  - ${metadata}
-  - --set
-  - backbone.pretrained_name=${pretrained_model}
-  - --set
-  - loss.name=${loss}
-  - --set
-  - loss.poisson_weight=${poisson_weight}
-  - --set
-  - model.activation_type=${activation_type}
-  - --set
-  - head.output_init=${output_init}
-  - --set
-  - trainer.learning_rate=${learning_rate}
-  - --set
-  - trainer.max_steps=${max_steps}
-  - --set
-  - trainer.report_to=[wandb]
+  - sweep-train
+  - ${args_json_file}

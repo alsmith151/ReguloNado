@@ -13,7 +13,7 @@ from regulonado.cli.normalization import normalization_app
 from regulonado.cli.pipeline import pipeline as _pipeline
 from regulonado.cli.predict import predict
 from regulonado.cli.tracks import tracks_app
-from regulonado.cli.train import train
+from regulonado.cli.train import sweep_train, train
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -108,6 +108,7 @@ def main() -> None:
 app.command()(config)
 app.command()(init)
 app.command()(train)
+app.command("sweep-train", hidden=True)(sweep_train)
 app.command()(recompress_dataset)
 app.command()(dataset)
 app.command()(predict)

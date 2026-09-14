@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import json
 import logging
 import subprocess
 import sys
@@ -10,6 +12,35 @@ from regulonado.cli.app import app
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+def test_sweep_train_maps_wandb_json_to_training_settings(tmp_path, monkeypatch):
+    train_module = importlib.import_module("regulonado.cli.train")
+    config_file = tmp_path / "trial.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "preset": "unfreeze_output",
+                "data.path": "/data/dataset_rechunked",
+                "data.metadata_path": "/data/dataset_rechunked/tracks.parquet",
+                "backbone.pretrained_name": "johahi/flashzoi-replicate-1",
+                "loss": "poisson_nll",
+                "trainer.learning_rate": 0.001,
+                "head.output_init": "empirical_mean_constant",
+            }
+        )
+    )
+    captured = {}
+    monkeypatch.setattr(train_module, "train", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setenv("WANDB_RUN_ID", "abc123")
+
+    train_module.sweep_train(config_file)
+
+    assert captured["dataset"] == Path("/data/dataset_rechunked")
+    assert captured["output_dir"] == Path("/data/parameter-sweep/runs/abc123")
+    assert captured["preset"] == "unfreeze_output"
+    assert 'loss="poisson_nll"' in captured["settings"]
+    assert 'head.output_init="empirical_mean_constant"' in captured["settings"]
 
 
 def test_train_builds_a_readable_preset_command(tmp_path):

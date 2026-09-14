@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -8,6 +9,42 @@ from shlex import join as shell_join
 from typing import Annotated, Optional
 
 import typer
+
+
+def sweep_train(
+    config_file: Annotated[
+        Path, typer.Argument(help="W&B-generated JSON file containing one sweep trial")
+    ],
+) -> None:
+    """Bridge one W&B trial into Hydra's normal training configuration."""
+    values = json.loads(config_file.read_text())
+    if not isinstance(values, dict):
+        raise typer.BadParameter(
+            "Sweep trial JSON must contain an object", param_hint="CONFIG_FILE"
+        )
+    required = {"data.path"}
+    missing = sorted(required - values.keys())
+    if missing:
+        raise typer.BadParameter(
+            f"Sweep trial is missing required parameter(s): {', '.join(missing)}",
+            param_hint="CONFIG_FILE",
+        )
+
+    preset = str(values.pop("preset", "head_only"))
+    dataset = Path(str(values.pop("data.path")))
+    configured_output = values.pop("output_dir", None)
+    settings = [
+        f"{key}={json.dumps(value, separators=(',', ':'))}" for key, value in values.items()
+    ]
+
+    run_id = os.environ.get("WANDB_RUN_ID", "trial")
+    output_dir = Path(configured_output or dataset.parent / "parameter-sweep" / "runs" / run_id)
+    train(
+        dataset=dataset,
+        output_dir=output_dir,
+        preset=preset,
+        settings=settings,
+    )
 
 
 def train(
