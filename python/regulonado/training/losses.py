@@ -58,6 +58,8 @@ def poisson_multinomial_loss(
     poisson_weight: float = 0.2,
     epsilon: float = 1e-6,
     rescale: bool = False,
+    weight_range: float = 0.0,
+    weight_exp: float = 1.0,
 ) -> torch.Tensor:
     seq_len = target.shape[-1]
     y_true = target.float() + epsilon
@@ -65,10 +67,15 @@ def poisson_multinomial_loss(
     s_true = y_true.sum(dim=-1, keepdim=True)
     s_pred = y_pred.sum(dim=-1, keepdim=True)
     p_pred = y_pred / s_pred
+    if weight_range:
+        positions = torch.linspace(-1, 1, seq_len, device=pred.device, dtype=pred.dtype)
+        weights = (1.0 + weight_range * positions.abs()).pow(weight_exp)
+    else:
+        weights = 1.0
     poisson_term = (
         F.poisson_nll_loss(s_pred, s_true, log_input=False, eps=0.0, reduction="mean") / seq_len
     )
-    multinomial_term = -(y_true * torch.log(p_pred)).sum(dim=-1) / seq_len
+    multinomial_term = -(y_true * torch.log(p_pred) * weights).sum(dim=-1) / seq_len
     combined_loss = multinomial_term + poisson_weight * poisson_term
     if rescale:
         combined_loss = combined_loss * 2.0 / (1.0 + poisson_weight)
@@ -115,11 +122,12 @@ def transfer_calibration_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
     *,
-    raw_pred: torch.Tensor | None = None,
-    raw_target: torch.Tensor | None = None,
     profile_weight: float = 1.0,
     total_weight: float = 0.5,
     bin_weight: float = 0.1,
+    bin_mode: str = "signal_weighted",
+    bin_signal_power: float = 1.0,
+    bin_threshold: float = 0.0,
     topk_bin_weight: float = 0.0,
     topk_bin_count: int = 0,
     topk_huber_delta: float = 1.0,
@@ -131,21 +139,28 @@ def transfer_calibration_loss(
     s_pred = y_pred.sum(dim=-1, keepdim=True)
     p_pred = y_pred / s_pred.clamp(min=epsilon)
 
-    raw_y_true = raw_target.float() + epsilon if raw_target is not None else y_true
-    raw_y_pred = raw_pred.float() + epsilon if raw_pred is not None else y_pred
-    raw_s_true = raw_y_true.sum(dim=-1, keepdim=True)
-    raw_s_pred = raw_y_pred.sum(dim=-1, keepdim=True)
-
     multinomial_term = -(y_true * torch.log(p_pred.clamp(min=epsilon))).sum(dim=-1).mean() / seq_len
-    total_term = F.mse_loss(torch.log1p(raw_s_pred), torch.log1p(raw_s_true), reduction="mean")
-    bin_term = F.mse_loss(torch.log1p(raw_y_pred), torch.log1p(raw_y_true), reduction="mean")
+    total_term = F.mse_loss(torch.log1p(s_pred), torch.log1p(y_true.sum(dim=-1, keepdim=True)), reduction="mean")
+    log_pred = torch.log1p(y_pred)
+    log_true = torch.log1p(y_true)
+    bin_error = (log_pred - log_true).square()
+    if bin_mode == "signal_weighted":
+        weights = y_true.clamp_min(0).pow(bin_signal_power)
+        bin_term = (bin_error * weights).sum() / weights.sum().clamp_min(epsilon)
+    elif bin_mode == "threshold_masked":
+        mask = y_true >= bin_threshold
+        bin_term = bin_error.masked_select(mask).mean() if mask.any() else bin_error.mean() * 0.0
+    elif bin_mode == "mean":
+        bin_term = bin_error.mean()
+    else:
+        raise ValueError(f"Unknown transfer calibration bin_mode={bin_mode!r}")
     topk_term = y_pred.new_zeros(())
 
     if topk_bin_weight > 0 and topk_bin_count > 0:
-        k = min(topk_bin_count, raw_y_true.shape[-1])
-        topk_indices = torch.topk(raw_y_true, k=k, dim=-1).indices
-        topk_true = torch.gather(raw_y_true, dim=-1, index=topk_indices)
-        topk_pred = torch.gather(raw_y_pred, dim=-1, index=topk_indices)
+        k = min(topk_bin_count, y_true.shape[-1])
+        topk_indices = torch.topk(y_true, k=k, dim=-1).indices
+        topk_true = torch.gather(y_true, dim=-1, index=topk_indices)
+        topk_pred = torch.gather(y_pred, dim=-1, index=topk_indices)
         topk_term = F.huber_loss(
             torch.log1p(topk_pred),
             torch.log1p(topk_true),

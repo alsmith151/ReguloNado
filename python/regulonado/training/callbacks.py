@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import random
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -175,8 +176,8 @@ class LRLogCallback(TrainerCallback):
             state.log_history[-1].update(logs)
 
 
-class EvalPlotCallback(TrainerCallback):
-    """After each validation run, plot a handful of pred-vs-target examples.
+class EvalExampleDiagnostics(TrainerCallback):
+    """Plot and record per-track validation magnitudes after each evaluation.
 
     Runs the model directly on raw dataset items so predictions are the full
     [n_tracks, n_bins] signal — not reduced by preprocess_logits_for_metrics.
@@ -239,6 +240,13 @@ class EvalPlotCallback(TrainerCallback):
             out = model(**inputs)
         preds_raw = (out["logits"] if isinstance(out, dict) else out).float().cpu().numpy()
         labels_raw = labels_tensor.float().cpu().numpy()
+        if labels_raw.shape[-2:] != preds_raw.shape[-2:]:
+            labels_raw = labels_raw.transpose(0, 2, 1)
+        if labels_raw.shape != preds_raw.shape:
+            raise ValueError(
+                f"Diagnostic prediction/label shapes disagree after axis alignment: "
+                f"pred={preds_raw.shape}, labels={labels_raw.shape}"
+            )
 
         # Both pred and target are in squash-transformed space; reverse to signal space
         # so the y-axis shows interpretable per-track signal magnitudes.
@@ -248,6 +256,22 @@ class EvalPlotCallback(TrainerCallback):
             )
         preds_plot  = np.stack([_inv(preds_raw[i])  for i in range(preds_raw.shape[0])])
         labels_plot = np.stack([_inv(labels_raw[i]) for i in range(labels_raw.shape[0])])
+
+        def _summary(values: np.ndarray) -> dict[str, list[float]]:
+            return {
+                "mean": np.mean(values, axis=-1).tolist(),
+                "q99": np.quantile(values, 0.99, axis=-1).tolist(),
+                "max": np.max(values, axis=-1).tolist(),
+            }
+
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+        diagnostic_path = self._output_dir / f"eval_diagnostics_step_{int(state.global_step)}.json"
+        diagnostic_path.write_text(json.dumps({
+            "intervals": intervals,
+            "track_names": self._track_names,
+            "predictions": _summary(preds_plot),
+            "labels": _summary(labels_plot),
+        }, indent=2) + "\n")
 
         intervals = [item.get("interval", f"example_{i}") for i, item in enumerate(raw_items)]
         _plot_examples(

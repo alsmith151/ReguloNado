@@ -9,12 +9,15 @@ a flat ``max``.
 from __future__ import annotations
 
 import math
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "EnergyResult",
@@ -262,6 +265,15 @@ class SpecificityEnergy(nn.Module):
         return tensor - adjustment
 
     def _summarize_predictions(self, preds: torch.Tensor) -> dict[str, object]:
+        finite_preds = preds[torch.isfinite(preds)]
+        observed_min = float(finite_preds.min().detach().cpu()) if finite_preds.numel() else math.nan
+        observed_max = float(finite_preds.max().detach().cpu()) if finite_preds.numel() else math.nan
+        if finite_preds.numel() and (observed_min < self.a_min or observed_max > self.a_max):
+            logger.warning(
+                "Design prediction range [%g, %g] exceeds configured clamp bounds [%g, %g]; "
+                "predictions will be clipped before scoring.",
+                observed_min, observed_max, self.a_min, self.a_max,
+            )
         preds = preds.clamp(self.a_min, self.a_max)
         preds = self.bend(preds)
         windowed = preds[..., self.bins]  # (n_folds, B, n_tracks, n_bins_in_window)

@@ -11,6 +11,7 @@ build/
 outputs/
 multirun/
 wandb/
+experiments/calibration-sweep/results/
 
 # Rust build artefacts
 target/

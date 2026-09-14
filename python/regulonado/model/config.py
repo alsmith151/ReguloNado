@@ -25,6 +25,7 @@ class RegulonadoConfig(PretrainedConfig):
         head_dropout: float = 0.0,
         refinement_kernel: int = 9,
         mlp_hidden: int | None = None,
+        output_bias_init: float | list[float] | None = None,
         # Architecture dimensions
         n_tracks: int = 1,
         feature_dim: int = 1920,
@@ -57,6 +58,7 @@ class RegulonadoConfig(PretrainedConfig):
         self.head_dropout = head_dropout
         self.refinement_kernel = refinement_kernel
         self.mlp_hidden = mlp_hidden
+        self.output_bias_init = output_bias_init
         self.n_tracks = n_tracks
         self.feature_dim = feature_dim
         self.use_track_metadata = use_track_metadata

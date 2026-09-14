@@ -1,0 +1,17 @@
+program: experiments/calibration-sweep/train_on_cache.py
+method: grid
+metric:
+  name: total_ratio_error
+  goal: minimize
+parameters:
+  overrides:
+    values:
+      - "experiment=head_only loss=poisson_multinomial_binwise"
+      - "experiment=unfreeze_output loss=poisson_multinomial_binwise"
+      - "experiment=head_only loss=poisson_nll"
+      - "experiment=unfreeze_output loss=transfer_calibration"
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args}

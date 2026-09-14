@@ -57,6 +57,7 @@ class HeadConfig:
     dropout: float = 0.0
     refinement_kernel: int | None = None
     mlp_hidden: int | None = None
+    output_bias_init: float | list[float] | None = None
 
 
 @dataclass(slots=True)
@@ -66,11 +67,16 @@ class LossConfig:
     name: str = "poisson_multinomial"
     delta: float | None = None
     poisson_weight: float | None = None
+    weight_range: float | None = None
+    weight_exp: float | None = None
     topk_fraction: float | None = None
     topk_weight: float | None = None
     profile_weight: float | None = None
     total_weight: float | None = None
     bin_weight: float | None = None
+    bin_mode: str | None = None
+    bin_signal_power: float | None = None
+    bin_threshold: float | None = None
     topk_bin_weight: float | None = None
     topk_bin_count: int | None = None
     topk_huber_delta: float | None = None

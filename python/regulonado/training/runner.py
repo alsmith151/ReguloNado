@@ -36,7 +36,7 @@ from regulonado.model import (
     build_condition_shared_track_index,
 )
 from regulonado.training.callbacks import (
-    EvalPlotCallback,
+    EvalExampleDiagnostics,
     LRLogCallback,
     WandbConfigCallback,
 )
@@ -134,6 +134,17 @@ def load_model_weights_only(model: torch.nn.Module, checkpoint: str | Path) -> N
         raise RuntimeError(f"Unexpected checkpoint keys when warm-starting: {unexpected[:10]}")
     if missing:
         raise RuntimeError(f"Missing checkpoint keys when warm-starting: {missing[:10]}")
+
+
+def assert_track_names_match(model_track_names: Sequence[str], dataset_track_names: Sequence[str]) -> None:
+    """Reject equal-sized but differently ordered output channels."""
+    model_names = list(model_track_names)
+    dataset_names = list(dataset_track_names)
+    if model_names and model_names != dataset_names:
+        raise ValueError(
+            "Model and dataset track order differs; refusing to silently permute head channels: "
+            f"model={model_names!r}, dataset={dataset_names!r}"
+        )
 
 
 def _seed_everything(seed: int) -> None:
@@ -402,10 +413,14 @@ def _build_loss_fn(
             poisson_weight=poisson_weight,
         )
     if loss_name == "poisson_multinomial":
+        weight_range = float(loss_cfg.get("weight_range", 0.0))
+        weight_exp = float(loss_cfg.get("weight_exp", 1.0))
         return lambda pred, target: poisson_multinomial_loss(
             pred,
             target,
             poisson_weight=poisson_weight,
+            weight_range=weight_range,
+            weight_exp=weight_exp,
         )
     if loss_name == "poisson_multinomial_binwise":
         return lambda pred, target: poisson_multinomial_binwise_loss(
@@ -423,6 +438,9 @@ def _build_loss_fn(
         profile_weight = float(loss_cfg.get("profile_weight", 1.0))
         total_weight = float(loss_cfg.get("total_weight", 0.5))
         bin_weight = float(loss_cfg.get("bin_weight", 0.1))
+        bin_mode = str(loss_cfg.get("bin_mode", "signal_weighted"))
+        bin_signal_power = float(loss_cfg.get("bin_signal_power", 1.0))
+        bin_threshold = float(loss_cfg.get("bin_threshold", 0.0))
         topk_bin_weight = float(loss_cfg.get("topk_bin_weight", 0.0))
         topk_bin_count = int(loss_cfg.get("topk_bin_count", 0))
         topk_huber_delta = float(loss_cfg.get("topk_huber_delta", 1.0))
@@ -432,6 +450,9 @@ def _build_loss_fn(
             profile_weight=profile_weight,
             total_weight=total_weight,
             bin_weight=bin_weight,
+            bin_mode=bin_mode,
+            bin_signal_power=bin_signal_power,
+            bin_threshold=bin_threshold,
             topk_bin_weight=topk_bin_weight,
             topk_bin_count=topk_bin_count,
             topk_huber_delta=topk_huber_delta,
@@ -596,6 +617,7 @@ def _build_regulonado_config(
         head_dropout=float(head_cfg.get("dropout", 0.0)),
         refinement_kernel=int(head_cfg.get("refinement_kernel", 9)),
         mlp_hidden=int(head_cfg["mlp_hidden"]) if head_cfg.get("mlp_hidden") is not None else None,
+        output_bias_init=head_cfg.get("output_bias_init"),
         n_tracks=len(records),
         feature_dim=int(getattr(backbone, "feature_dim", 1920)),
         use_track_metadata=use_track_metadata,
@@ -1177,9 +1199,12 @@ def _prepare_model_for_training(
     trainer_cfg: TrainerConfig,
     *,
     rank: int,
+    dataset_track_names: Sequence[str] | None = None,
 ) -> None:
     """Apply the freeze policy and, if configured, warm-start weights from a checkpoint."""
     _apply_freeze_policy(model, trainer_cfg)
+    if dataset_track_names is not None:
+        assert_track_names_match(getattr(model.config, "track_names", []), dataset_track_names)
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(
         f"[rank {rank}] freeze policy applied (freeze_backbone={trainer_cfg.freeze_backbone}) | "
@@ -1228,7 +1253,7 @@ def _build_training_callbacks(
     records: Sequence[Mapping[str, Any]],
     output_dir: Path,
 ) -> list[TrainerCallback]:
-    """Assemble the trainer callback list (wandb config, LR logging, early stopping, eval plots)."""
+    """Assemble the trainer callback list (wandb config, LR logging, early stopping, diagnostics)."""
     callbacks: list[TrainerCallback] = [WandbConfigCallback(cfg), LRLogCallback()]
     if trainer_cfg.early_stopping_patience is not None and val_dataset is not None:
         callbacks.append(
@@ -1240,7 +1265,7 @@ def _build_training_callbacks(
     track_names = [Path(r["bigwig_path"]).stem for r in records if r.get("bigwig_path")]
     if val_dataset is not None and trainer_cfg.num_plot_examples > 0:
         callbacks.append(
-            EvalPlotCallback(
+            EvalExampleDiagnostics(
                 dataset=val_dataset,
                 collate_fn=collate_fn,
                 num_examples=trainer_cfg.num_plot_examples,
@@ -1399,7 +1424,8 @@ def run_training(
     output_dir = Path(str(cfg.get("output_dir") or Path.cwd() / "outputs"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    _prepare_model_for_training(model, trainer_cfg, rank=rank)
+    dataset_track_names = [Path(r["bigwig_path"]).stem for r in records if r.get("bigwig_path")]
+    _prepare_model_for_training(model, trainer_cfg, rank=rank, dataset_track_names=dataset_track_names)
 
     write_provenance(
         output_dir=output_dir,
