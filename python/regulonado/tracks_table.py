@@ -250,6 +250,7 @@ def to_track_records(df: pd.DataFrame) -> list[dict[str, Any]]:
             "condition",
             "source",
             "assay",
+            "assay_class",
             "ip",
         ):
             if column in row and pd.notna(row[column]):

@@ -61,6 +61,9 @@ trainer:
   greater_is_better: false
   calibration_shape_pearson_weight: 0.1
   topk_bins: 256
+  contrast_region_bins: 16
+  contrast_pseudocount: 0.1
+  contrast_active_fraction: 0.1
   early_stopping_patience: null
   early_stopping_threshold: 0.0
   eval_accumulation_steps: null

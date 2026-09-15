@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 import torch
 from regulonado.training.losses import (
+    contrast_family_weights,
     log1p_huber_loss,
     paired_binwise_log2fc_loss,
     poisson_multinomial_loss,
@@ -11,6 +12,7 @@ from regulonado.training.losses import (
     scaled_poisson_multinomial_loss,
     topk_additive_loss,
     topk_reweight_loss,
+    track_contrast_loss,
     transfer_calibration_loss,
 )
 
@@ -286,3 +288,59 @@ def test_paired_log2fc_perfect_pred_near_zero() -> None:
     cond = torch.tensor([0, 0, 1, 1])
     loss = paired_binwise_log2fc_loss(tgt.detach().clone(), tgt, cond)
     assert loss.item() < 1e-5
+
+
+# ---------------------------------------------------------------------------
+# contrast_family_weights / track_contrast_loss
+# ---------------------------------------------------------------------------
+
+
+def test_contrast_family_weights_balance_groups_and_drop_single_group_families() -> None:
+    weights = contrast_family_weights(["A", "A", "A", "B", None], ["x", "x", "y", "z", "w"])
+    assert weights.shape == (1, 5)
+    torch.testing.assert_close(weights[0], torch.tensor([0.25, 0.25, 0.5, 0.0, 0.0]))
+
+
+def test_contrast_family_weights_empty_without_contrast() -> None:
+    assert contrast_family_weights([None, None], ["x", "y"]).shape == (0, 2)
+
+
+def _contrast_weights() -> torch.Tensor:
+    return contrast_family_weights(["A", "A", "A", "A"], ["g1", "g2", "g3", "g3"])
+
+
+def test_track_contrast_perfect_pred_near_zero() -> None:
+    tgt = _rand_pos(B, T, L)
+    loss = track_contrast_loss(tgt.detach().clone(), tgt, _contrast_weights(), region_bins=8)
+    assert loss.shape == ()
+    assert loss.item() < 1e-5
+
+
+def test_track_contrast_ignores_shared_scale() -> None:
+    tgt = _rand_pos(B, T, L)
+    loss = track_contrast_loss(3.0 * tgt.detach(), tgt, _contrast_weights(), region_bins=8)
+    assert loss.item() < 1e-5
+
+
+def test_track_contrast_penalises_identical_tracks() -> None:
+    tgt = torch.rand(B, T, L) + 0.1
+    tgt[:, 0] *= 5.0
+    shared = tgt.mean(dim=1, keepdim=True).expand_as(tgt)
+    assert track_contrast_loss(shared, tgt, _contrast_weights(), region_bins=8).item() > 0.01
+
+
+def test_track_contrast_gradient() -> None:
+    pred = _rand_pos(B, T, L)
+    tgt = _rand_pos(B, T, L)
+    track_contrast_loss(pred, tgt, _contrast_weights(), region_bins=8).backward()
+    assert pred.grad is not None
+    assert torch.isfinite(pred.grad).all()
+
+
+def test_track_contrast_without_families_is_zero_with_gradient() -> None:
+    pred = _rand_pos(B, T, L)
+    tgt = _rand_pos(B, T, L)
+    loss = track_contrast_loss(pred, tgt, torch.zeros(0, T), region_bins=8)
+    loss.backward()
+    assert loss.item() == pytest.approx(0.0)
+    assert pred.grad is not None

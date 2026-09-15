@@ -43,6 +43,7 @@ from regulonado.training.callbacks import (
 from regulonado.training.config import TrainerConfig
 from regulonado.training.data import WindowParquetDataset
 from regulonado.training.losses import (
+    contrast_family_weights,
     log1p_huber_loss,
     poisson_multinomial_binwise_loss,
     poisson_multinomial_loss,
@@ -50,6 +51,7 @@ from regulonado.training.losses import (
     scaled_poisson_multinomial_loss,
     topk_additive_loss,
     topk_reweight_loss,
+    track_contrast_loss,
     transfer_calibration_loss,
 )
 from regulonado.training.metrics import (
@@ -433,7 +435,44 @@ def _build_collate_fn(
     return collate
 
 
+def _contrast_weights_from_records(records: Sequence[Mapping[str, Any]]) -> torch.Tensor:
+    """Group-balanced cross-track contrast weights keyed by ``assay_class`` and ``group``."""
+    return contrast_family_weights(
+        [record.get("assay_class") for record in records],
+        [record.get("group") for record in records],
+    )
+
+
 def _build_loss_fn(
+    loss_cfg: Mapping[str, Any],
+    *,
+    scale_factors: np.ndarray,
+    clip_hard: np.ndarray,
+    labels_already_scaled: bool,
+    contrast_weights: torch.Tensor | None = None,
+) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """Build the configured base loss, plus the cross-track contrast term when weighted."""
+    base_loss = _build_base_loss_fn(
+        loss_cfg,
+        scale_factors=scale_factors,
+        clip_hard=clip_hard,
+        labels_already_scaled=labels_already_scaled,
+    )
+    contrast_weight = float(loss_cfg.get("contrast_weight") or 0.0)
+    if contrast_weight <= 0.0:
+        return base_loss
+    if contrast_weights is None or contrast_weights.shape[0] == 0:
+        raise ValueError(
+            "loss.contrast_weight requires tracks labelled with assay_class and group, "
+            "with at least two groups sharing one assay_class"
+        )
+    region_bins = int(loss_cfg.get("contrast_region_bins") or 16)
+    return lambda pred, target: base_loss(pred, target) + contrast_weight * track_contrast_loss(
+        pred, target, contrast_weights, region_bins=region_bins
+    )
+
+
+def _build_base_loss_fn(
     loss_cfg: Mapping[str, Any],
     *,
     scale_factors: np.ndarray,
@@ -1333,6 +1372,7 @@ def _build_collate_and_loss(
         scale_factors=scale_factors,
         clip_hard=clip_hard,
         labels_already_scaled=labels_already_scaled,
+        contrast_weights=_contrast_weights_from_records(records),
     )
     return collate_fn, loss_fn, scale_factors, background
 
@@ -1616,7 +1656,13 @@ def run_training(
         compute_metrics=make_compute_metrics(
             len(records), trainer_cfg.calibration_shape_pearson_weight
         ),
-        preprocess_logits_for_metrics=make_preprocess_logits_for_metrics(topk_bins),
+        preprocess_logits_for_metrics=make_preprocess_logits_for_metrics(
+            topk_bins,
+            contrast_family_weights=_contrast_weights_from_records(records),
+            contrast_region_bins=trainer_cfg.contrast_region_bins,
+            contrast_pseudocount=trainer_cfg.contrast_pseudocount,
+            contrast_active_fraction=trainer_cfg.contrast_active_fraction,
+        ),
     )
 
     _run_training_loop(trainer, trainer_cfg, budget, rank=rank)

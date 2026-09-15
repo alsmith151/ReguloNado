@@ -53,14 +53,14 @@ class TestPreprocess:
         preprocess = make_preprocess_logits_for_metrics(topk_bins=8)
         logits, labels = _make_batch(B=3, T=5, L=20, labels_transposed=False)
         out = preprocess(logits, labels)
-        assert out.shape == (3, 5, 25), out.shape
+        assert out.shape == (3, 5, 31), out.shape
 
     def test_output_shape_transposed_labels(self):
         """HF datasets loads labels as [B, L, T]; preprocess must handle it."""
         preprocess = make_preprocess_logits_for_metrics(topk_bins=8)
         logits, labels_lt = _make_batch(B=3, T=5, L=20, labels_transposed=True)
         out = preprocess(logits, labels_lt)
-        assert out.shape == (3, 5, 25), out.shape
+        assert out.shape == (3, 5, 31), out.shape
 
     def test_transposed_labels_same_stats(self):
         """Stats must be identical regardless of whether labels are transposed."""
@@ -84,7 +84,7 @@ class TestPreprocess:
         preprocess = make_preprocess_logits_for_metrics(topk_bins=1000)
         logits, labels = _make_batch(B=2, T=3, L=16)
         out = preprocess(logits, labels)
-        assert out.shape == (2, 3, 25)
+        assert out.shape == (2, 3, 31)
 
     def test_n_column_values(self):
         """Col 5 (n for all bins) must equal L; col 11 (n for topk) must equal min(k, L)."""
@@ -113,11 +113,11 @@ class TestComputeMetrics:
             stats = preprocess(logits, labels)
             all_stats.append(stats.numpy())
 
-        stacked = np.stack(all_stats, axis=0)  # [n_batches, B, T, 25] — mimic HF accumulation
+        stacked = np.stack(all_stats, axis=0)  # [n_batches, B, T, 31] — mimic HF accumulation
 
         from transformers import EvalPrediction
 
-        eval_pred = EvalPrediction(predictions=stacked.reshape(-1, T, 25), label_ids=None)
+        eval_pred = EvalPrediction(predictions=stacked.reshape(-1, T, 31), label_ids=None)
         return compute_metrics(eval_pred)
 
     def test_returns_expected_keys(self):
@@ -166,6 +166,55 @@ class TestComputeMetrics:
         assert np.isnan(m["pearson_bin_median"])
         assert m["abs_log_ratio_total_median"] == pytest.approx(0.0, abs=1e-6)
         assert m["calibration_shape_objective"] == pytest.approx(0.0, abs=1e-6)
+
+    @staticmethod
+    def _specificity_metrics(compression: float) -> dict[str, float]:
+        """Three cell types share one family; track 3 is alone in its family.
+
+        Region-constant signals make region sums exact, and predictions keep each family
+        member's centred log signal multiplied by ``compression``.
+        """
+        from regulonado.training.losses import contrast_family_weights
+        from transformers import EvalPrediction
+
+        B, T, R, region_bins = 6, 4, 16, 4
+        weights = contrast_family_weights(["A", "A", "A", "B"], ["g1", "g2", "g3", "g4"])
+        rng = torch.Generator()
+        rng.manual_seed(7)
+        log_t = torch.randn(B, T, R, generator=rng) + 6.0
+        log_p = log_t.clone()
+        family_mean = log_t[:, :3].mean(dim=1, keepdim=True)
+        log_p[:, :3] = family_mean + compression * (log_t[:, :3] - family_mean)
+        target = log_t.exp().repeat_interleave(region_bins, dim=-1)
+        pred = log_p.exp().repeat_interleave(region_bins, dim=-1)
+
+        preprocess = make_preprocess_logits_for_metrics(
+            topk_bins=8,
+            contrast_family_weights=weights,
+            contrast_region_bins=region_bins,
+            contrast_active_fraction=1.0,
+        )
+        compute_metrics = make_compute_metrics(n_tracks=T)
+        stats = preprocess(pred, target).numpy()
+        return compute_metrics(EvalPrediction(predictions=stats, label_ids=None))
+
+    def test_specificity_perfect_prediction(self):
+        m = self._specificity_metrics(compression=1.0)
+        assert m["contrast_pearson_median"] == pytest.approx(1.0, abs=1e-4)
+        assert m["contrast_slope_median"] == pytest.approx(1.0, abs=1e-3)
+        assert m["contrast_sd_ratio_median"] == pytest.approx(1.0, abs=1e-3)
+
+    def test_specificity_compressed_differences_keep_rank_but_shrink_spread(self):
+        m = self._specificity_metrics(compression=0.5)
+        assert m["contrast_pearson_median"] == pytest.approx(1.0, abs=1e-3)
+        assert m["contrast_slope_median"] == pytest.approx(0.5, abs=0.01)
+        assert m["contrast_sd_ratio_median"] == pytest.approx(0.5, abs=0.01)
+        assert np.isfinite(m["contrast_objective"])
+
+    def test_specificity_absent_without_families(self):
+        metrics = self._run()
+        assert np.isnan(metrics["contrast_pearson_median"])
+        assert np.isnan(metrics["contrast_objective"])
 
     def test_against_scipy_pearson(self):
         """Sufficient-stats Pearson must match scipy on the same flat data."""

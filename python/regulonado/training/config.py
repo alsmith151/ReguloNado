@@ -82,6 +82,10 @@ class LossConfig:
     topk_bin_weight: float | None = None
     topk_bin_count: int | None = None
     topk_huber_delta: float | None = None
+    # Weight of the cross-track allocation KL added to any base loss; unset/0 disables it.
+    contrast_weight: float | None = None
+    # Bins summed into one region before comparing allocation across tracks.
+    contrast_region_bins: int | None = None
 
 
 @dataclass(slots=True)
@@ -155,10 +159,15 @@ class TrainerConfig:
     # Best-model selection metric passed to TrainingArguments.
     metric_for_best_model: str = "eval_loss"
     greater_is_better: bool = False
-    # Weight of profile-shape Pearson in calibration_shape_objective.
+    # Weight of profile-shape Pearson in calibration_shape_objective and contrast_objective.
     calibration_shape_pearson_weight: float = 0.1
     # Number of strongest target bins used by the top-k Pearson metric.
     topk_bins: int = 256
+    # Cross-track specificity metrics: bins per region, per-bin log pseudocount, and the
+    # most active fraction of regions (by observed family mean signal) that are scored.
+    contrast_region_bins: int = 16
+    contrast_pseudocount: float = 0.1
+    contrast_active_fraction: float = 0.1
     # Stop training when eval metric has not improved for this many eval calls.
     # None disables early stopping.
     early_stopping_patience: int | None = None

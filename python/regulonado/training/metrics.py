@@ -18,10 +18,71 @@ def _safe_corr(x: np.ndarray, y: np.ndarray) -> float:
     return float("nan") if not np.isfinite(r) else r
 
 
-def make_preprocess_logits_for_metrics(topk_bins: int) -> Callable:
+def _specificity_stats(
+    p: torch.Tensor,
+    t: torch.Tensor,
+    family_weights: torch.Tensor | None,
+    *,
+    region_bins: int,
+    pseudocount: float,
+    active_fraction: float,
+) -> torch.Tensor:
+    """Per-track sufficient stats ``[B, T, 6]`` for cross-track specificity.
+
+    Specificity is a track's log region signal minus the group-balanced family mean,
+    ``c_t = log(y_t + ps) - Σ_s w_s log(y_s + ps)``. Stats cover the most active
+    ``active_fraction`` of regions per example (by observed family mean signal) and stay
+    zero for tracks outside every contrast family.
+    """
+    batch, n_tracks, length = p.shape
+    stats = torch.zeros((batch, n_tracks, 6), dtype=torch.float32, device=p.device)
+    n_regions = length // region_bins
+    if family_weights is None or family_weights.shape[0] == 0 or n_regions == 0:
+        return stats
+    usable = n_regions * region_bins
+    region_p = p.float()[..., :usable].reshape(batch, n_tracks, n_regions, region_bins).sum(-1)
+    region_t = t.float()[..., :usable].reshape(batch, n_tracks, n_regions, region_bins).sum(-1)
+    offset = pseudocount * region_bins
+    log_p = torch.log(region_p.clamp_min(0.0) + offset)
+    log_t = torch.log(region_t.clamp_min(0.0) + offset)
+    n_active = max(1, int(round(active_fraction * n_regions)))
+    for row in family_weights.to(device=p.device, dtype=torch.float32):
+        members = row > 0
+        member_weights = row[members]
+        member_log_p = log_p[:, members]
+        member_log_t = log_t[:, members]
+        centred_p = member_log_p - torch.einsum("t,btr->br", member_weights, member_log_p)[:, None]
+        centred_t = member_log_t - torch.einsum("t,btr->br", member_weights, member_log_t)[:, None]
+        family_signal = torch.einsum(
+            "t,btr->br", member_weights, region_t[:, members].clamp_min(0.0)
+        )
+        threshold = family_signal.topk(n_active, dim=-1).values[:, -1:]
+        active = ((family_signal >= threshold) & (family_signal > 0)).to(torch.float32)[:, None]
+        stats[:, members] = torch.stack(
+            [
+                (centred_p * active).sum(-1),
+                (centred_t * active).sum(-1),
+                (centred_p * centred_t * active).sum(-1),
+                (centred_p * centred_p * active).sum(-1),
+                (centred_t * centred_t * active).sum(-1),
+                active.sum(-1).expand(-1, member_weights.numel()),
+            ],
+            dim=-1,
+        )
+    return stats
+
+
+def make_preprocess_logits_for_metrics(
+    topk_bins: int,
+    *,
+    contrast_family_weights: torch.Tensor | None = None,
+    contrast_region_bins: int = 16,
+    contrast_pseudocount: float = 0.1,
+    contrast_active_fraction: float = 0.1,
+) -> Callable:
     """Return a preprocess_logits_for_metrics function that accumulates Pearson sufficient stats.
 
-    Returns [B, T, 25] per batch:
+    Returns [B, T, 31] per batch:
       cols 0-5:  (sum_p, sum_t, sum_pt, sum_p², sum_t², n)  over all bins  — per-bin Pearson
       cols 6-11: same statistics restricted to the top-K bins by target signal
       cols 12-17: (sp, st, sp*st, sp², st², 1.0)  where sp/st are per-example
@@ -29,6 +90,8 @@ def make_preprocess_logits_for_metrics(topk_bins: int) -> Callable:
       cols 18-19: per-example q99 prediction and target values
       cols 20-24: (sum_log_p, sum_log_t, sum_log_p*log_t, sum_log_p², n)
                    over bins — sufficient stats for dispersion_slope
+      cols 25-30: (sum_c_p, sum_c_t, sum_c_p*c_t, sum_c_p², sum_c_t², n) over active
+                   regions — cross-track specificity stats (see _specificity_stats)
     """
 
     def preprocess(logits: torch.Tensor | tuple, labels: torch.Tensor) -> torch.Tensor:
@@ -68,8 +131,16 @@ def make_preprocess_logits_for_metrics(topk_bins: int) -> Callable:
         log_t_sum = log_t.sum(-1).to(dtype=p.dtype)
         log_pt_sum = (log_p * log_t).sum(-1).to(dtype=p.dtype)
         log_p2_sum = (log_p * log_p).sum(-1).to(dtype=p.dtype)
+        specificity = _specificity_stats(
+            p,
+            t,
+            contrast_family_weights,
+            region_bins=contrast_region_bins,
+            pseudocount=contrast_pseudocount,
+            active_fraction=contrast_active_fraction,
+        ).to(dtype=p.dtype)
 
-        return torch.stack(
+        base = torch.stack(
             [
                 sp,
                 st,
@@ -99,6 +170,7 @@ def make_preprocess_logits_for_metrics(topk_bins: int) -> Callable:
             ],
             dim=-1,
         )
+        return torch.cat([base, specificity], dim=-1)
 
     return preprocess
 
@@ -121,9 +193,9 @@ def make_compute_metrics(
         return np.divide(num, denom, out=result, where=denom > 0)
 
     def compute_metrics(eval_pred: EvalPrediction) -> dict[str, float]:
-        # predictions: [N, T, 25] — sufficient stats accumulated over the full eval set
+        # predictions: [N, T, 31] — sufficient stats accumulated over the full eval set
         stats = np.asarray(eval_pred.predictions, dtype=np.float64)
-        s = stats.sum(axis=0)  # [T, 25] global sums
+        s = stats.sum(axis=0)  # [T, 31] global sums
 
         r_all = _pearson_from_stats(s[:, 0], s[:, 1], s[:, 2], s[:, 3], s[:, 4], s[:, 5])
         r_topk = _pearson_from_stats(s[:, 6], s[:, 7], s[:, 8], s[:, 9], s[:, 10], s[:, 11])
@@ -161,6 +233,27 @@ def make_compute_metrics(
         objective_pearson = float(np.median(np.nan_to_num(r_all, nan=0.0)))
         abs_log_ratio = float(abs(np.median(log_ratios))) if log_ratios.size else float("nan")
 
+        # Cross-track specificity per track. The slope regresses predicted on observed
+        # specificity; the sd ratio is the stretch a post-hoc rescale would need to undo.
+        cn = s[:, 30]
+        r_contrast = _pearson_from_stats(s[:, 25], s[:, 26], s[:, 27], s[:, 28], s[:, 29], cn)
+        var_contrast_p = np.maximum(cn * s[:, 28] - s[:, 25] ** 2, 0.0)
+        var_contrast_t = cn * s[:, 29] - s[:, 26] ** 2
+        cov_contrast = cn * s[:, 27] - s[:, 25] * s[:, 26]
+        has_contrast = var_contrast_t > 1e-12
+        contrast_slopes = np.divide(
+            cov_contrast, var_contrast_t, out=np.full(n_tracks, np.nan), where=has_contrast
+        )
+        contrast_sd_ratios = np.sqrt(
+            np.divide(
+                var_contrast_p, var_contrast_t, out=np.full(n_tracks, np.nan), where=has_contrast
+            )
+        )
+        fin_contrast = r_contrast[np.isfinite(r_contrast)]
+        fin_contrast_slopes = contrast_slopes[np.isfinite(contrast_slopes)]
+        fin_contrast_sd_ratios = contrast_sd_ratios[np.isfinite(contrast_sd_ratios)]
+        contrast_pearson = float(np.median(fin_contrast)) if fin_contrast.size else float("nan")
+
         return {
             "pearson_bin_median": float(np.median(fin_all)) if fin_all.size else float("nan"),
             f"pearson_top{topk_n}_median": (
@@ -182,6 +275,21 @@ def make_compute_metrics(
             "amplitude_ratio_median": float(np.median(amplitude_ratios))
             if amplitude_ratios.size
             else float("nan"),
+            "contrast_pearson_median": contrast_pearson,
+            "contrast_slope_median": float(np.median(fin_contrast_slopes))
+            if fin_contrast_slopes.size
+            else float("nan"),
+            "contrast_sd_ratio_median": float(np.median(fin_contrast_sd_ratios))
+            if fin_contrast_sd_ratios.size
+            else float("nan"),
+            # Cell-type differences first, with total calibration and profile shape as guards.
+            "contrast_objective": (
+                abs_log_ratio
+                - contrast_pearson
+                - calibration_shape_pearson_weight * objective_pearson
+                if np.isfinite(abs_log_ratio) and np.isfinite(contrast_pearson)
+                else float("nan")
+            ),
             "dispersion_slope": float(np.median(finite_slopes))
             if finite_slopes.size
             else float("nan"),

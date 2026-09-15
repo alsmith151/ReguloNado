@@ -405,6 +405,26 @@ class TestBuildCollateAndLoss:
         loss = loss_fn(pred, target)
         assert loss.item() == pytest.approx(1.0)
 
+    def test_contrast_weight_adds_cross_track_term(self) -> None:
+        records = [
+            {"assay_class": "ATAC", "group": "a"},
+            {"assay_class": "ATAC", "group": "b"},
+        ]
+        loss_cfg = {"name": "mse", "contrast_weight": 1.0, "contrast_region_bins": 2}
+        cfg = {"model": {"use_track_metadata": False}, "data": {}, "loss": loss_cfg}
+        _, loss_fn, _, _ = _build_collate_and_loss(cfg, records)
+        target = torch.tensor([[[4.0, 4.0, 4.0, 4.0], [1.0, 1.0, 1.0, 1.0]]])
+        shared = torch.full_like(target, 2.5)
+        mse = torch.nn.functional.mse_loss(shared, target).item()
+        assert loss_fn(shared, target).item() > mse + 0.01
+        assert loss_fn(target, target).item() == pytest.approx(0.0, abs=1e-5)
+
+    def test_contrast_weight_without_track_labels_raises(self) -> None:
+        loss_cfg = {"name": "mse", "contrast_weight": 1.0}
+        cfg = {"model": {"use_track_metadata": False}, "data": {}, "loss": loss_cfg}
+        with pytest.raises(ValueError, match="contrast_weight"):
+            _build_collate_and_loss(cfg, self.RECORDS)
+
     def test_unsupported_loss_name_raises(self) -> None:
         cfg = {"model": {"use_track_metadata": False}, "data": {}, "loss": {"name": "bogus"}}
         with pytest.raises(ValueError, match="Unsupported loss name"):

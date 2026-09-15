@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import torch
 import torch.nn.functional as F
 
@@ -333,3 +335,84 @@ def paired_binwise_log2fc_loss(
         delta=delta,
         reduction="mean",
     )
+
+
+def contrast_family_weights(
+    families: Sequence[object | None],
+    groups: Sequence[object | None],
+) -> torch.Tensor:
+    """Group-balanced averaging weights ``[F, T]`` for cross-track specificity.
+
+    Tracks sharing a family label (for example ``assay_class``) are compared with one
+    another. Each distinct group (cell type) in a family receives equal total weight,
+    split evenly across its replicate tracks, so heavily replicated cell types do not
+    dominate the family mean. Tracks missing either label are left out, and families with
+    fewer than two groups are omitted because they contain no cross-group contrast.
+    """
+    if len(families) != len(groups):
+        raise ValueError(
+            "families and groups need one label per track, "
+            f"got {len(families)} and {len(groups)}"
+        )
+    n_tracks = len(families)
+    members_by_family: dict[str, list[tuple[int, str]]] = {}
+    for index, (family, group) in enumerate(zip(families, groups)):
+        if family is not None and group is not None:
+            members_by_family.setdefault(str(family), []).append((index, str(group)))
+
+    rows: list[torch.Tensor] = []
+    for family in sorted(members_by_family):
+        members = members_by_family[family]
+        group_sizes: dict[str, int] = {}
+        for _, group in members:
+            group_sizes[group] = group_sizes.get(group, 0) + 1
+        if len(group_sizes) < 2:
+            continue
+        row = torch.zeros(n_tracks, dtype=torch.float32)
+        for index, group in members:
+            row[index] = 1.0 / (len(group_sizes) * group_sizes[group])
+        rows.append(row)
+    if not rows:
+        return torch.zeros((0, n_tracks), dtype=torch.float32)
+    return torch.stack(rows)
+
+
+def track_contrast_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    family_weights: torch.Tensor,
+    *,
+    region_bins: int = 16,
+    epsilon: float = 1e-6,
+) -> torch.Tensor:
+    """Count-weighted KL between observed and predicted signal allocation across tracks.
+
+    Bins are summed into ``region_bins``-wide regions. Within each region and contrast
+    family (rows of ``family_weights``, see :func:`contrast_family_weights`), the observed
+    allocation ``p_t ∝ w_t · y_t`` over member tracks is compared with the predicted
+    allocation ``q_t ∝ w_t · ŷ_t``. The loss is zero whenever predictions are proportional
+    to targets within a family, so it constrains cell-type differences and leaves the
+    shared magnitude to the base loss. Regions are weighted by observed family signal, as
+    in the multinomial profile term.
+    """
+    batch, n_tracks, length = pred.shape
+    n_regions = length // region_bins
+    if family_weights.shape[0] == 0 or n_regions == 0:
+        return pred.sum() * 0.0
+    usable = n_regions * region_bins
+    region_pred = (
+        pred.float()[..., :usable].reshape(batch, n_tracks, n_regions, region_bins).sum(-1)
+    )
+    region_true = (
+        target.float()[..., :usable].reshape(batch, n_tracks, n_regions, region_bins).sum(-1)
+    )
+    weights = family_weights.to(device=pred.device, dtype=region_pred.dtype)[None, :, :, None]
+    weighted_true = weights * region_true.clamp_min(0.0)[:, None]
+    weighted_pred = weights * region_pred.clamp_min(0.0)[:, None] + epsilon * (weights > 0)
+    family_mass = weighted_true.sum(dim=2)  # [B, F, R]
+    p_true = weighted_true / family_mass.unsqueeze(2).clamp_min(epsilon)
+    log_q = torch.log(weighted_pred.clamp_min(epsilon * epsilon)) - torch.log(
+        weighted_pred.sum(dim=2, keepdim=True)
+    )
+    kl = (torch.xlogy(p_true, p_true) - p_true * log_q).sum(dim=2)
+    return (family_mass * kl).sum() / family_mass.sum().clamp_min(epsilon)
