@@ -62,7 +62,17 @@ def poisson_multinomial_loss(
     rescale: bool = False,
     weight_range: float = 0.0,
     weight_exp: float = 1.0,
+    reduction: str = "mean",
 ) -> torch.Tensor:
+    """Poisson-multinomial loss.
+
+    Args:
+        reduction: "mean" (default) returns the usual scalar, averaged over both batch
+            and track dimensions. "none" instead averages over the batch dimension only
+            and returns a per-track loss vector ``[T]`` — used by callers that apply
+            their own per-track weighting (e.g. learnable track loss weights) before
+            the final reduction.
+    """
     seq_len = target.shape[-1]
     y_true = target.float() + epsilon
     y_pred = pred.float() + epsilon
@@ -74,13 +84,17 @@ def poisson_multinomial_loss(
         weights = (1.0 + weight_range * positions.abs()).pow(weight_exp)
     else:
         weights = 1.0
+    # [B, T, 1] -> [B, T]: per-(example, track) Poisson NLL on the summed total count.
     poisson_term = (
-        F.poisson_nll_loss(s_pred, s_true, log_input=False, eps=0.0, reduction="mean") / seq_len
+        F.poisson_nll_loss(s_pred, s_true, log_input=False, eps=0.0, reduction="none").squeeze(-1)
+        / seq_len
     )
     multinomial_term = -(y_true * torch.log(p_pred) * weights).sum(dim=-1) / seq_len
-    combined_loss = multinomial_term + poisson_weight * poisson_term
+    combined_loss = multinomial_term + poisson_weight * poisson_term  # [B, T]
     if rescale:
         combined_loss = combined_loss * 2.0 / (1.0 + poisson_weight)
+    if reduction == "none":
+        return combined_loss.mean(dim=0)  # [T]
     return combined_loss.mean()
 
 
@@ -89,6 +103,7 @@ def poisson_multinomial_binwise_loss(
     target: torch.Tensor,
     poisson_weight: float = 1.0,
     epsilon: float = 1e-6,
+    reduction: str = "mean",
 ) -> torch.Tensor:
     """Multinomial profile term + a PER-BIN Poisson NLL term.
 
@@ -106,18 +121,39 @@ def poisson_multinomial_binwise_loss(
         poisson_weight: weight on the per-bin Poisson term relative to the multinomial term.
             The per-bin Poisson is the workhorse here, so this defaults to 1.0 (vs 0.2 for the
             total-count variant).
+        reduction: "mean" (default) returns the usual scalar. "none" instead averages over
+            the batch and bin dimensions only and returns a per-track loss vector ``[T]`` —
+            used by callers that apply their own per-track weighting before the final
+            reduction.
     """
     seq_len = target.shape[-1]
     y_true = target.float() + epsilon
     y_pred = pred.float() + epsilon
     s_pred = y_pred.sum(dim=-1, keepdim=True)
     p_pred = y_pred / s_pred
-    multinomial_term = -(y_true * torch.log(p_pred)).sum(dim=-1).mean() / seq_len
-    # Per-bin Poisson NLL; reduction="mean" already averages over bins, so no /seq_len here.
+    multinomial_term = -(y_true * torch.log(p_pred)).sum(dim=-1) / seq_len  # [B, T]
+    # Per-bin Poisson NLL, kept at [B, T, L] so it can be reduced per track below.
     poisson_term = F.poisson_nll_loss(
-        y_pred, target.float(), log_input=False, eps=0.0, full=False, reduction="mean"
-    )
-    return multinomial_term + poisson_weight * poisson_term
+        y_pred, target.float(), log_input=False, eps=0.0, full=False, reduction="none"
+    ).mean(dim=-1)  # [B, T]
+    combined_loss = multinomial_term + poisson_weight * poisson_term  # [B, T]
+    if reduction == "none":
+        return combined_loss.mean(dim=0)  # [T]
+    return combined_loss.mean()
+
+
+def kendall_track_weighted_loss(per_track_loss: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
+    """Combine a per-track loss vector into a scalar with learnable per-track uncertainty.
+
+    Homoscedastic uncertainty weighting (Kendall et al., 2018): each track's loss is
+    divided by a learned variance ``exp(log_var)`` and the log-variance is added back as a
+    regulariser, so a track can only shrink its effective weight by paying a matching log
+    penalty — this stops the trivial solution of driving every weight to zero. Requires
+    ``per_track_loss`` to still carry a track dimension (see the ``reduction="none"``
+    option on :func:`poisson_multinomial_loss` / :func:`poisson_multinomial_binwise_loss`).
+    """
+    precision = torch.exp(-log_var)
+    return (per_track_loss * precision + log_var).mean()
 
 
 def transfer_calibration_loss(

@@ -131,6 +131,41 @@ def test_group_is_excluded_from_shared_channel_identity():
     assert build_condition_shared_track_index(records, condition_source="group") == [0, 0]
 
 
+def test_shared_channel_identity_ignores_per_track_technical_fields():
+    # tracks.parquet-derived records carry per-file fields (path, resolved_path,
+    # background) alongside assay_class/group. None of the "preferred" condition-collapse
+    # fields (assay_type, source, cell_line, ...) exist under those exact names here, so
+    # this exercises the fallback branch: it must skip path/resolved_path/background
+    # (near-unique per track) rather than let them defeat the collapse entirely.
+    records = [
+        {
+            "track_index": 0,
+            "group": "NK_cell",
+            "assay_class": "ATAC",
+            "path": "/data/a.bigWig",
+            "resolved_path": "/ceph/data/a.bigWig",
+            "background": 0.165,
+        },
+        {
+            "track_index": 1,
+            "group": "B_cell",
+            "assay_class": "ATAC",
+            "path": "/data/b.bigWig",
+            "resolved_path": "/ceph/data/b.bigWig",
+            "background": 0.412,
+        },
+        {
+            "track_index": 2,
+            "group": "K-562",
+            "assay_class": "ChIP",
+            "path": "/data/c.bigWig",
+            "resolved_path": "/ceph/data/c.bigWig",
+            "background": 0.775,
+        },
+    ]
+    assert build_condition_shared_track_index(records, condition_source="group") == [0, 0, 1]
+
+
 def test_film_head_accepts_optional_metadata():
     head = FiLMPerturbHead(
         in_ch=8,

@@ -20,11 +20,21 @@ _CONDITION_COLLAPSE_IGNORED_FIELDS = {
     "scale_factors",
     "clip_hard",
     "clip_soft",
+    # Per-file/per-track technical fields, not condition metadata. Near-unique per
+    # track, so leaving them in the fallback candidate set collapses base-channel
+    # sharing to a no-op (every track ends up in its own singleton group).
+    "path",
+    "resolved_path",
+    "bigwig_path",
+    "background",
+    "sample_id",
 }
 
 _CONDITION_COLLAPSE_PREFERRED_FIELDS = (
     "assay_type_id",
     "assay_type",
+    "assay_class",
+    "assay",
     "source_id",
     "source",
     "cell_line_id",

@@ -44,6 +44,7 @@ from regulonado.training.config import TrainerConfig
 from regulonado.training.data import WindowParquetDataset
 from regulonado.training.losses import (
     contrast_family_weights,
+    kendall_track_weighted_loss,
     log1p_huber_loss,
     poisson_multinomial_binwise_loss,
     poisson_multinomial_loss,
@@ -450,6 +451,7 @@ def _build_loss_fn(
     clip_hard: np.ndarray,
     labels_already_scaled: bool,
     contrast_weights: torch.Tensor | None = None,
+    track_log_var: torch.nn.Parameter | None = None,
 ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
     """Build the configured base loss, plus the cross-track contrast term when weighted."""
     base_loss = _build_base_loss_fn(
@@ -457,6 +459,7 @@ def _build_loss_fn(
         scale_factors=scale_factors,
         clip_hard=clip_hard,
         labels_already_scaled=labels_already_scaled,
+        track_log_var=track_log_var,
     )
     contrast_weight = float(loss_cfg.get("contrast_weight") or 0.0)
     if contrast_weight <= 0.0:
@@ -478,10 +481,21 @@ def _build_base_loss_fn(
     scale_factors: np.ndarray,
     clip_hard: np.ndarray,
     labels_already_scaled: bool,
+    track_log_var: torch.nn.Parameter | None = None,
 ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
     loss_name = str(loss_cfg.get("name", "poisson_multinomial"))
     poisson_weight = float(loss_cfg.get("poisson_weight", 0.2))
     huber_delta = float(loss_cfg.get("delta", 1.0))
+    learn_track_weights = bool(loss_cfg.get("learn_track_weights", False))
+    if learn_track_weights and loss_name not in {"poisson_multinomial", "poisson_multinomial_binwise"}:
+        raise ValueError(
+            f"loss.learn_track_weights is only supported for poisson_multinomial and "
+            f"poisson_multinomial_binwise, got loss.name={loss_name!r}"
+        )
+    if learn_track_weights and track_log_var is None:
+        raise ValueError(
+            "loss.learn_track_weights is set but no track_log_var parameter was supplied"
+        )
 
     if loss_name == "scaled_poisson_multinomial":
         if labels_already_scaled:
@@ -502,6 +516,18 @@ def _build_base_loss_fn(
     if loss_name == "poisson_multinomial":
         weight_range = float(loss_cfg.get("weight_range", 0.0))
         weight_exp = float(loss_cfg.get("weight_exp", 1.0))
+        if learn_track_weights:
+            return lambda pred, target: kendall_track_weighted_loss(
+                poisson_multinomial_loss(
+                    pred,
+                    target,
+                    poisson_weight=poisson_weight,
+                    weight_range=weight_range,
+                    weight_exp=weight_exp,
+                    reduction="none",
+                ),
+                track_log_var,
+            )
         return lambda pred, target: poisson_multinomial_loss(
             pred,
             target,
@@ -510,6 +536,16 @@ def _build_base_loss_fn(
             weight_exp=weight_exp,
         )
     if loss_name == "poisson_multinomial_binwise":
+        if learn_track_weights:
+            return lambda pred, target: kendall_track_weighted_loss(
+                poisson_multinomial_binwise_loss(
+                    pred,
+                    target,
+                    poisson_weight=poisson_weight,
+                    reduction="none",
+                ),
+                track_log_var,
+            )
         return lambda pred, target: poisson_multinomial_binwise_loss(
             pred,
             target,
@@ -1340,6 +1376,7 @@ def _build_model_with_logging(
 def _build_collate_and_loss(
     cfg: Mapping[str, Any],
     records: Sequence[Mapping[str, Any]],
+    model: torch.nn.Module | None = None,
 ) -> tuple[
     Callable[[list[dict[str, Any]]], dict[str, torch.Tensor]],
     Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
@@ -1350,6 +1387,12 @@ def _build_collate_and_loss(
 
     The scale factors and background arrays are also needed later by the eval-plot
     callback, so they are returned alongside the loss function rather than recomputed.
+
+    When ``cfg["loss"]["learn_track_weights"]`` is set, a learnable per-track
+    log-variance parameter (Kendall et al. uncertainty weighting) is registered on
+    ``model`` as ``track_loss_log_var`` — assigning an ``nn.Parameter`` attribute on an
+    ``nn.Module`` auto-registers it, so it is picked up by the trainer's optimizer
+    without any other wiring.
     """
     track_metadata_tensors = (
         constant_track_metadata(
@@ -1367,12 +1410,19 @@ def _build_collate_and_loss(
         or cfg["data"].get("apply_squash", True)
         or cfg["data"].get("apply_clip", True)
     )
+    track_log_var: torch.nn.Parameter | None = None
+    if bool(cfg["loss"].get("learn_track_weights", False)):
+        if model is None:
+            raise ValueError("loss.learn_track_weights requires a model to attach the parameter to")
+        track_log_var = torch.nn.Parameter(torch.zeros(len(records)))
+        model.track_loss_log_var = track_log_var
     loss_fn = _build_loss_fn(
         cfg["loss"],
         scale_factors=scale_factors,
         clip_hard=clip_hard,
         labels_already_scaled=labels_already_scaled,
         contrast_weights=_contrast_weights_from_records(records),
+        track_log_var=track_log_var,
     )
     return collate_fn, loss_fn, scale_factors, background
 
@@ -1602,7 +1652,7 @@ def run_training(
     _resolve_empirical_output_bias(cfg, dataset_dict, len(records), seed=seed)
 
     model = _build_model_with_logging(cfg, metadata, records, adapter_builder, rank=rank)
-    collate_fn, loss_fn, scale_factors, background = _build_collate_and_loss(cfg, records)
+    collate_fn, loss_fn, scale_factors, background = _build_collate_and_loss(cfg, records, model)
 
     output_dir = Path(str(cfg.get("output_dir") or Path.cwd() / "outputs"))
     output_dir.mkdir(parents=True, exist_ok=True)

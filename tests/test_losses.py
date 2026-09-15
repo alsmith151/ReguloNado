@@ -5,8 +5,10 @@ import pytest
 import torch
 from regulonado.training.losses import (
     contrast_family_weights,
+    kendall_track_weighted_loss,
     log1p_huber_loss,
     paired_binwise_log2fc_loss,
+    poisson_multinomial_binwise_loss,
     poisson_multinomial_loss,
     poisson_nll_loss,
     scaled_poisson_multinomial_loss,
@@ -82,6 +84,49 @@ def test_poisson_multinomial_zero_weight_collapses_to_multinomial() -> None:
         manual = -(y_t * torch.log(p_pred)).sum(-1) / L
         expected = manual.mean()
     assert abs(loss_w0.item() - expected.item()) < 1e-4
+
+
+def test_poisson_multinomial_reduction_none_shape_and_matches_mean() -> None:
+    pred = _rand_pos(B, T, L)
+    tgt = _rand_pos(B, T, L)
+    per_track = poisson_multinomial_loss(pred, tgt, reduction="none")
+    assert per_track.shape == (T,)
+    scalar = poisson_multinomial_loss(pred, tgt)
+    assert abs(per_track.mean().item() - scalar.item()) < 1e-4
+
+
+def test_poisson_multinomial_binwise_reduction_none_shape_and_matches_mean() -> None:
+    pred = _rand_pos(B, T, L)
+    tgt = _rand_pos(B, T, L)
+    per_track = poisson_multinomial_binwise_loss(pred, tgt, reduction="none")
+    assert per_track.shape == (T,)
+    scalar = poisson_multinomial_binwise_loss(pred, tgt)
+    assert abs(per_track.mean().item() - scalar.item()) < 1e-4
+
+
+def test_kendall_track_weighted_loss_zero_log_var_matches_mean() -> None:
+    per_track = torch.rand(T) + 0.1
+    log_var = torch.zeros(T)
+    weighted = kendall_track_weighted_loss(per_track, log_var)
+    assert abs(weighted.item() - per_track.mean().item()) < 1e-6
+
+
+def test_kendall_track_weighted_loss_gradient_flows_to_log_var() -> None:
+    per_track = (torch.rand(T) + 0.1).detach()
+    log_var = torch.zeros(T, requires_grad=True)
+    kendall_track_weighted_loss(per_track, log_var).backward()
+    assert log_var.grad is not None
+    assert torch.all(torch.isfinite(log_var.grad))
+
+
+def test_kendall_track_weighted_loss_discourages_trivial_weight_collapse() -> None:
+    # Driving log_var very negative (huge precision) blows up the per-track loss term
+    # unless the true per-track loss is ~0; the log_var regulariser prevents a track
+    # from freely shrinking its weight to escape a real loss.
+    per_track = torch.full((T,), 1.0)
+    low_var = kendall_track_weighted_loss(per_track, torch.full((T,), -5.0))
+    zero_var = kendall_track_weighted_loss(per_track, torch.zeros(T))
+    assert low_var.item() > zero_var.item()
 
 
 # ---------------------------------------------------------------------------
