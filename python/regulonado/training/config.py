@@ -20,8 +20,6 @@ class DataConfig:
     apply_scale: bool = True
     apply_squash: bool = True
     apply_clip: bool = True
-    streaming: bool = False
-    shuffle_buffer_ram_gb: float = 8.0
     enable_rc_aug: bool = False
     context_length: int = 524288
     n_pred_bins: int = 6144
