@@ -73,6 +73,8 @@ def _track_index_sort_key(record: Mapping[str, object], default: int) -> int:
 
 def build_condition_shared_track_index(
     track_records: Sequence[Mapping[str, object]],
+    *,
+    condition_source: str = "condition_id",
 ) -> list[int]:
     """Build a track index that groups tracks by shared condition metadata.
 
@@ -105,9 +107,11 @@ def build_condition_shared_track_index(
         track_records,
         key=lambda record: _track_index_sort_key(record, len(track_records)),
     )
+    ignored_fields = _CONDITION_COLLAPSE_IGNORED_FIELDS | {condition_source}
     available_fields = [
         field
         for field in _CONDITION_COLLAPSE_PREFERRED_FIELDS
+        if field not in ignored_fields
         if any(record.get(field) is not None for record in ordered_records)
     ]
 
@@ -117,7 +121,7 @@ def build_condition_shared_track_index(
                 key
                 for record in ordered_records
                 for key, value in record.items()
-                if key not in _CONDITION_COLLAPSE_IGNORED_FIELDS and value is not None
+                if key not in ignored_fields and value is not None
             }
         )
 

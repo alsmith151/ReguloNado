@@ -125,6 +125,7 @@ class TestComputeMetrics:
         assert "pearson_bin_median" in metrics
         assert "pearson_total_median" in metrics
         assert "abs_log_ratio_total_median" in metrics
+        assert "calibration_shape_objective" in metrics
         assert any("pearson_top" in k for k in metrics)
 
     def test_pearson_in_range(self):
@@ -150,6 +151,21 @@ class TestComputeMetrics:
         m = compute_metrics(eval_pred)
         assert m["pearson_bin_median"] == pytest.approx(1.0, abs=1e-4)
         assert m["abs_log_ratio_total_median"] == pytest.approx(0.0, abs=1e-6)
+        assert m["calibration_shape_objective"] == pytest.approx(-0.1, abs=1e-4)
+
+    def test_flat_prediction_uses_zero_pearson_in_balanced_objective(self):
+        """A calibrated but flat profile must not receive a shape reward."""
+        preprocess = make_preprocess_logits_for_metrics(topk_bins=8)
+        compute_metrics = make_compute_metrics(n_tracks=2, calibration_shape_pearson_weight=0.25)
+        signal = torch.ones(3, 2, 20)
+
+        from transformers import EvalPrediction
+
+        eval_pred = EvalPrediction(predictions=preprocess(signal, signal).numpy(), label_ids=None)
+        m = compute_metrics(eval_pred)
+        assert np.isnan(m["pearson_bin_median"])
+        assert m["abs_log_ratio_total_median"] == pytest.approx(0.0, abs=1e-6)
+        assert m["calibration_shape_objective"] == pytest.approx(0.0, abs=1e-6)
 
     def test_against_scipy_pearson(self):
         """Sufficient-stats Pearson must match scipy on the same flat data."""

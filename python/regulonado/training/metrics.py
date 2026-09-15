@@ -105,6 +105,7 @@ def make_preprocess_logits_for_metrics(topk_bins: int) -> Callable:
 
 def make_compute_metrics(
     n_tracks: int,
+    calibration_shape_pearson_weight: float = 0.1,
 ) -> Callable[[EvalPrediction], dict[str, float]]:
     def _pearson_from_stats(
         sp: np.ndarray,
@@ -154,6 +155,11 @@ def make_compute_metrics(
             slope_num, slope_den, out=np.full(n_tracks, np.nan), where=slope_den > 1e-12
         )
         finite_slopes = slopes[np.isfinite(slopes)]
+        # Keep the historical Pearson metric's NaN-excluding median for reporting,
+        # but score undefined (flat) tracks as zero so they cannot disappear from
+        # the sweep objective.
+        objective_pearson = float(np.median(np.nan_to_num(r_all, nan=0.0)))
+        abs_log_ratio = float(abs(np.median(log_ratios))) if log_ratios.size else float("nan")
 
         return {
             "pearson_bin_median": float(np.median(fin_all)) if fin_all.size else float("nan"),
@@ -167,8 +173,11 @@ def make_compute_metrics(
             "log_ratio_total_median": float(np.median(log_ratios))
             if log_ratios.size
             else float("nan"),
-            "abs_log_ratio_total_median": (
-                float(abs(np.median(log_ratios))) if log_ratios.size else float("nan")
+            "abs_log_ratio_total_median": abs_log_ratio,
+            "calibration_shape_objective": (
+                abs_log_ratio - calibration_shape_pearson_weight * objective_pearson
+                if np.isfinite(abs_log_ratio)
+                else float("nan")
             ),
             "amplitude_ratio_median": float(np.median(amplitude_ratios))
             if amplitude_ratios.size

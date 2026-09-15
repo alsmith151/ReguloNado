@@ -22,6 +22,8 @@ data:
 
 model:
   use_track_metadata: false
+  # Categorical condition identity for FiLM heads: condition_id or freeform group.
+  condition_source: condition_id
   share_condition_base_channels: false
   metadata_hidden: 32
   activation_type: softplus
@@ -57,6 +59,7 @@ trainer:
   checkpoint_every_n_steps: null
   metric_for_best_model: eval_loss
   greater_is_better: false
+  calibration_shape_pearson_weight: 0.1
   topk_bins: 256
   early_stopping_patience: null
   early_stopping_threshold: 0.0

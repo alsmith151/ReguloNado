@@ -291,6 +291,41 @@ def infer_cardinality_any(records: Sequence[Mapping[str, Any]], *keys: str) -> i
     return 0
 
 
+def _usable_group_label(value: Any) -> str | None:
+    """Return a canonical freeform group label, or None for an unusable value."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return None
+    label = str(value).strip()
+    return label or None
+
+
+def resolved_condition_ids(
+    records: Sequence[Mapping[str, Any]], condition_source: str = "condition_id"
+) -> list[int]:
+    """Resolve the categorical condition IDs passed to metadata-aware heads.
+
+    ``group`` values are intentionally opaque labels. Sorting their distinct
+    normalized values makes the encoding stable across track-table row order.
+    """
+    if condition_source == "condition_id":
+        return _track_array(records, "condition_id", dtype=np.int64, fill_value=-1).tolist()
+    if condition_source != "group":
+        raise ValueError(
+            "model.condition_source must be 'condition_id' or 'group', "
+            f"got {condition_source!r}"
+        )
+
+    labels = [_usable_group_label(record.get("group")) for record in records]
+    vocabulary = sorted({label for label in labels if label is not None})
+    if not vocabulary:
+        raise ValueError(
+            "model.condition_source='group' requires at least one non-empty "
+            "'group' value in tracks.parquet"
+        )
+    encoded = {label: index for index, label in enumerate(vocabulary)}
+    return [encoded[label] if label is not None else -1 for label in labels]
+
+
 # Metadata key(s) per model input, most preferred first. `source_id` is the
 # current name for the biological source of a track (cell line, primary cells,
 # tissue, organoid); `cell_line_id` is its narrower predecessor, kept so datasets
@@ -305,9 +340,14 @@ _TRACK_METADATA_FIELD_MAP = {
 }
 
 
-def constant_track_metadata_values(records: Sequence[Mapping[str, Any]]) -> dict[str, list]:
+def constant_track_metadata_values(
+    records: Sequence[Mapping[str, Any]], *, condition_source: str = "condition_id"
+) -> dict[str, list]:
     values: dict[str, list] = {}
     for out_key, keys in _TRACK_METADATA_FIELD_MAP.items():
+        if out_key == "track_condition_ids":
+            values[out_key] = resolved_condition_ids(records, condition_source)
+            continue
         if out_key == "track_timepoint_minutes":
             array = _track_array(records, *keys, dtype=np.float32, fill_value=float("nan"))
             if np.all(np.isnan(array)):
@@ -321,9 +361,13 @@ def constant_track_metadata_values(records: Sequence[Mapping[str, Any]]) -> dict
     return values
 
 
-def constant_track_metadata(records: Sequence[Mapping[str, Any]]) -> dict[str, torch.Tensor]:
+def constant_track_metadata(
+    records: Sequence[Mapping[str, Any]], *, condition_source: str = "condition_id"
+) -> dict[str, torch.Tensor]:
     tensors: dict[str, torch.Tensor] = {}
-    for out_key, values in constant_track_metadata_values(records).items():
+    for out_key, values in constant_track_metadata_values(
+        records, condition_source=condition_source
+    ).items():
         if out_key == "track_timepoint_minutes":
             tensors[out_key] = torch.as_tensor(
                 [float("nan") if value is None else value for value in values],
@@ -562,11 +606,22 @@ def _build_regulonado_config(
     backbone_cfg = cfg["backbone"]
     data_cfg = cfg.get("data", {})
     use_track_metadata = bool(model_cfg.get("use_track_metadata", False))
+    condition_source = str(model_cfg.get("condition_source", "condition_id"))
+    if condition_source not in {"condition_id", "group"}:
+        raise ValueError(
+            "model.condition_source must be 'condition_id' or 'group', "
+            f"got {condition_source!r}"
+        )
+    condition_ids = (
+        resolved_condition_ids(records, condition_source) if use_track_metadata else []
+    )
     target_length = int(metadata.get("n_pred_bins", 0)) or None
 
     shared_track_index: list[int] = []
     if bool(model_cfg.get("share_condition_base_channels", True)) and use_track_metadata:
-        shared_track_index = build_condition_shared_track_index(records)
+        shared_track_index = build_condition_shared_track_index(
+            records, condition_source=condition_source
+        )
 
     head_type = str(head_cfg.get("type", "residual_film"))
 
@@ -619,8 +674,13 @@ def _build_regulonado_config(
         n_tracks=len(records),
         feature_dim=int(getattr(backbone, "feature_dim", 1920)),
         use_track_metadata=use_track_metadata,
+        condition_source=condition_source,
         activation_type=str(model_cfg.get("activation_type", "softplus")),
-        num_conditions=infer_cardinality(records, "condition_id") if use_track_metadata else 0,
+        num_conditions=(
+            max(condition_ids, default=-1) + 1
+            if use_track_metadata
+            else 0
+        ),
         num_cell_lines=(
             infer_cardinality_any(records, "source_id", "cell_line_id") if use_track_metadata else 0
         ),
@@ -632,7 +692,11 @@ def _build_regulonado_config(
         n_pred_bins=int(metadata.get("n_pred_bins", data_cfg.get("n_pred_bins", 6_144))),
         bin_size=int(metadata.get("bin_size", 32)),
         track_names=track_names,
-        track_metadata=constant_track_metadata_values(records) if use_track_metadata else {},
+        track_metadata=(
+            constant_track_metadata_values(records, condition_source=condition_source)
+            if use_track_metadata
+            else {}
+        ),
         data_path=str(cfg["data"]["path"]),
     )
 
@@ -1249,7 +1313,10 @@ def _build_collate_and_loss(
     callback, so they are returned alongside the loss function rather than recomputed.
     """
     track_metadata_tensors = (
-        constant_track_metadata(records)
+        constant_track_metadata(
+            records,
+            condition_source=str(cfg["model"].get("condition_source", "condition_id")),
+        )
         if bool(cfg["model"].get("use_track_metadata", False))
         else {}
     )
@@ -1546,7 +1613,9 @@ def run_training(
         optimizers=(optimizer, scheduler),
         callbacks=callbacks,
         loss_fn=loss_fn,
-        compute_metrics=make_compute_metrics(len(records)),
+        compute_metrics=make_compute_metrics(
+            len(records), trainer_cfg.calibration_shape_pearson_weight
+        ),
         preprocess_logits_for_metrics=make_preprocess_logits_for_metrics(topk_bins),
     )
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(slots=True)
@@ -30,6 +30,9 @@ class ModelConfig:
     """Settings for the Regulonado wrapper around a backbone and head."""
 
     use_track_metadata: bool = False
+    # Metadata field used as the categorical condition identity for FiLM heads.
+    # ``group`` is an opaque freeform tracks.parquet label encoded at training time.
+    condition_source: Literal["condition_id", "group"] = "condition_id"
     share_condition_base_channels: bool = False
     metadata_hidden: int = 32
     activation_type: str = "softplus"
@@ -152,6 +155,8 @@ class TrainerConfig:
     # Best-model selection metric passed to TrainingArguments.
     metric_for_best_model: str = "eval_loss"
     greater_is_better: bool = False
+    # Weight of profile-shape Pearson in calibration_shape_objective.
+    calibration_shape_pearson_weight: float = 0.1
     # Number of strongest target bins used by the top-k Pearson metric.
     topk_bins: int = 256
     # Stop training when eval metric has not improved for this many eval calls.

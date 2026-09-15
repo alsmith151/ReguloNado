@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 import torch
 import torch.nn as nn
 from regulonado.metrics import (
@@ -26,7 +27,13 @@ from regulonado.tracks_table import write_track_table
 from regulonado.training.config import TrainerConfig
 from regulonado.training.data import stack_batch_tensors
 from regulonado.training.losses import scaled_poisson_multinomial_loss
-from regulonado.training.runner import _build_optimizer, _normalise_checkpoint_mode, run_training
+from regulonado.training.runner import (
+    _build_optimizer,
+    _normalise_checkpoint_mode,
+    constant_track_metadata_values,
+    resolved_condition_ids,
+    run_training,
+)
 from regulonado.training.transforms import get_transform
 
 
@@ -92,6 +99,36 @@ def test_condition_shared_track_index_collapses_non_condition_axes():
     ]
 
     assert build_condition_shared_track_index(records) == [0, 0, 1, 1]
+
+
+def test_group_condition_source_is_stably_encoded_and_persistable():
+    records = [
+        {"track_index": 0, "condition_id": 8, "group": " treatment "},
+        {"track_index": 1, "condition_id": 3, "group": "cell_type"},
+        {"track_index": 2, "condition_id": 1, "group": "treatment"},
+        {"track_index": 3, "condition_id": 2, "group": ""},
+    ]
+
+    # Sorted opaque labels are stable even if track rows arrive in a different order.
+    assert resolved_condition_ids(records, "group") == [1, 0, 1, -1]
+    assert constant_track_metadata_values(records, condition_source="group")[
+        "track_condition_ids"
+    ] == [1, 0, 1, -1]
+    # Existing condition_id behavior remains unchanged by default.
+    assert resolved_condition_ids(records) == [8, 3, 1, 2]
+
+
+def test_group_condition_source_requires_usable_label():
+    with pytest.raises(ValueError, match="non-empty 'group' value"):
+        resolved_condition_ids([{"group": None}, {"group": "  "}], "group")
+
+
+def test_group_is_excluded_from_shared_channel_identity():
+    records = [
+        {"track_index": 0, "group": "A", "project": "shared"},
+        {"track_index": 1, "group": "B", "project": "shared"},
+    ]
+    assert build_condition_shared_track_index(records, condition_source="group") == [0, 0]
 
 
 def test_film_head_accepts_optional_metadata():
@@ -293,7 +330,7 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
     # 'condition' is a label, not an id — categorical ids are derived by sorted
     # factorisation at load time (see tracks_table.to_track_records), which is
     # why the two tables below use different label sets rather than literal ids.
-    def _write_tracks(path, conditions, scale_factors):
+    def _write_tracks(path, conditions, scale_factors, groups):
         write_track_table(
             pd.DataFrame(
                 {
@@ -301,6 +338,7 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
                     "status": ["included", "included"],
                     "track_index": [0, 1],
                     "condition": conditions,
+                    "group": groups,
                     "assay": ["atac", "atac"],
                     "scale_factor": scale_factors,
                 }
@@ -312,9 +350,9 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
             shift_max_bp=0,
         )
 
-    _write_tracks(data_dir / "tracks.parquet", ["a", "b"], [1.0, 1.0])
+    _write_tracks(data_dir / "tracks.parquet", ["a", "b"], [1.0, 1.0], ["x", "y"])
     enriched_metadata = tmp_path / "tracks.enriched.parquet"
-    _write_tracks(enriched_metadata, ["z", "a"], [2.0, 3.0])
+    _write_tracks(enriched_metadata, ["z", "a"], [2.0, 3.0], ["beta", "alpha"])
 
     summary = run_training(
         {
@@ -333,6 +371,7 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
             "backbone": {"name": "borzoi", "config_overrides": {}},
             "model": {
                 "use_track_metadata": True,
+                "condition_source": "group",
                 "share_condition_base_channels": True,
                 "metadata_hidden": 8,
                 "activation_type": "softplus",
@@ -380,6 +419,7 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
 
     saved_config = RegulonadoConfig.from_pretrained(tmp_path / "run")
     assert saved_config.track_names == ["t0", "t1"]
-    # Enriched labels ["z", "a"] sort to ["a", "z"] -> a=0, z=1, so t0("z")=1, t1("a")=0 —
-    # distinct from the dataset-copy's ["a", "b"] -> [0, 1], proving metadata_path won.
+    # Opaque group labels ["beta", "alpha"] sort to ["alpha", "beta"], so t0=1 and t1=0.
+    # This proves the enriched metadata path drives the persisted FiLM IDs.
     assert saved_config.track_metadata["track_condition_ids"] == [1, 0]
+    assert saved_config.condition_source == "group"

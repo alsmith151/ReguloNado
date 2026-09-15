@@ -32,6 +32,7 @@ class RegulonadoConfig(PretrainedConfig):
         feature_dim: int = 1920,
         # Track metadata conditioning
         use_track_metadata: bool = False,
+        condition_source: str = "condition_id",
         activation_type: str = "softplus",
         num_conditions: int = 0,
         num_cell_lines: int = 0,
@@ -64,6 +65,7 @@ class RegulonadoConfig(PretrainedConfig):
         self.n_tracks = n_tracks
         self.feature_dim = feature_dim
         self.use_track_metadata = use_track_metadata
+        self.condition_source = condition_source
         self.activation_type = activation_type
         self.num_conditions = num_conditions
         self.num_cell_lines = num_cell_lines
