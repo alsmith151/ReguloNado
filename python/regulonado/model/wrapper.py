@@ -95,6 +95,15 @@ class RegulonadoModel(PreTrainedModel):
             self.head = _build_head(config)
         self.post_init()
 
+    def _init_weights(self, module: nn.Module) -> None:
+        """Leave every module with the initialisation its constructor gave it.
+
+        ``post_init`` otherwise applies transformers' generic init (normal(0.02) weights,
+        zero biases) to the head, erasing the empirical output-bias seeding, zeroed output
+        weights, and zero-initialised metadata modulation layers. The Borzoi/Enformer
+        backbone is a nested ``PreTrainedModel`` and keeps its own init dispatch.
+        """
+
     def forward(self, input_ids: torch.Tensor, **head_kwargs: torch.Tensor | None) -> torch.Tensor:
         # Workers hand off uint8 tokens (A0 C1 G2 T3, N/pad>=4); one-hot encoding happens
         # here, on the GPU. A float input is already one-hot (attribution/design/predict
@@ -173,10 +182,8 @@ def _build_head(config: RegulonadoConfig) -> nn.Module:
         head_kwargs["refinement_kernel"] = config.refinement_kernel
     if config.head_type == "transfer_mlp" and config.mlp_hidden is not None:
         head_kwargs["mlp_hidden"] = config.mlp_hidden
-    if config.head_type == "transfer_mlp" and config.output_bias_init is not None:
-        head_kwargs["output_bias_init"] = config.output_bias_init
-    if config.head_type == "transfer_mlp":
-        head_kwargs["zero_output_weights"] = config.zero_output_weights
+    head_kwargs["output_bias_init"] = config.output_bias_init
+    head_kwargs["zero_output_weights"] = config.zero_output_weights
     return build_transfer_learning_head(
         head_type=config.head_type,
         activation_type=config.activation_type,

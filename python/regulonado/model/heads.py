@@ -49,6 +49,42 @@ _CONDITION_COLLAPSE_PREFERRED_FIELDS = (
 )
 
 
+def _initialise_output_layer(
+    layer: nn.Conv1d,
+    *,
+    n_tracks: int,
+    output_bias_init: float | Sequence[float] | None,
+    zero_output_weights: bool,
+    shared_track_index: torch.Tensor | None = None,
+) -> None:
+    """Seed an output projection's bias per track and optionally zero its weights.
+
+    ``output_bias_init`` holds one pre-activation value per track (or one scalar). When
+    tracks share base output channels, each channel takes the mean of its member tracks'
+    values; per-track differences are then left to the metadata modulation to learn.
+    """
+    if output_bias_init is not None:
+        bias = layer.bias
+        assert bias is not None
+        values = torch.as_tensor(output_bias_init, dtype=bias.dtype).reshape(-1)
+        if values.numel() == 1:
+            values = values.expand(n_tracks)
+        if values.numel() != n_tracks:
+            raise ValueError("output_bias_init must be scalar or contain one value per track")
+        if shared_track_index is not None:
+            n_channels = bias.numel()
+            sums = torch.zeros(n_channels, dtype=bias.dtype).index_add_(
+                0, shared_track_index.cpu(), values
+            )
+            counts = torch.bincount(shared_track_index.cpu(), minlength=n_channels).to(bias.dtype)
+            values = sums / counts.clamp_min(1.0)
+        with torch.no_grad():
+            bias.copy_(values.reshape_as(bias))
+    if zero_output_weights:
+        with torch.no_grad():
+            layer.weight.zero_()
+
+
 class _ClampedExp(nn.Module):
     def __init__(self, max_logit: float = 20.0):
         super().__init__()
@@ -343,6 +379,8 @@ class _PerturbHeadBase(nn.Module):
         num_targets: int,
         condition_shared_track_index: Sequence[int] | None = None,
         activation_type: ActivationType = "softplus",
+        output_bias_init: float | Sequence[float] | None = None,
+        zero_output_weights: bool = False,
     ):
         """Initialize the perturbation head base.
 
@@ -374,6 +412,10 @@ class _PerturbHeadBase(nn.Module):
         activation_type : ActivationType, optional
             Output activation function: "softplus" (default), "softplus_beta2",
             "exp", or "identity".
+        output_bias_init : float | Sequence[float] | None, optional
+            Pre-activation output bias, scalar or one value per track.
+        zero_output_weights : bool, optional
+            Zero the output projection weights so the head starts constant.
 
         Raises
         ------
@@ -402,6 +444,13 @@ class _PerturbHeadBase(nn.Module):
             nn.GELU(),
             nn.Dropout1d(dropout),
             nn.Conv1d(hidden, n_base_tracks, 1),
+        )
+        _initialise_output_layer(
+            self.proj[3],
+            n_tracks=n_tracks,
+            output_bias_init=output_bias_init,
+            zero_output_weights=zero_output_weights,
+            shared_track_index=self.condition_shared_track_index,
         )
         if activation_type == "softplus_beta2":
             self.activation: nn.Module = nn.Softplus(beta=2)
@@ -498,6 +547,8 @@ class PerturbHead(_PerturbHeadBase):
         dropout: float = 0.0,
         condition_shared_track_index: Sequence[int] | None = None,
         activation_type: ActivationType = "softplus",
+        output_bias_init: float | Sequence[float] | None = None,
+        zero_output_weights: bool = False,
     ):
         super().__init__(
             in_ch=in_ch,
@@ -512,6 +563,8 @@ class PerturbHead(_PerturbHeadBase):
             num_targets=num_targets,
             condition_shared_track_index=condition_shared_track_index,
             activation_type=activation_type,
+            output_bias_init=output_bias_init,
+            zero_output_weights=zero_output_weights,
         )
         self.metadata_to_bias = nn.Linear(metadata_hidden, 1) if use_track_metadata else None
         if self.metadata_to_bias is not None:
@@ -620,6 +673,8 @@ class FiLMPerturbHead(_PerturbHeadBase):
         dropout: float = 0.0,
         condition_shared_track_index: Sequence[int] | None = None,
         activation_type: ActivationType = "softplus",
+        output_bias_init: float | Sequence[float] | None = None,
+        zero_output_weights: bool = False,
     ):
         super().__init__(
             in_ch=in_ch,
@@ -634,6 +689,8 @@ class FiLMPerturbHead(_PerturbHeadBase):
             num_targets=num_targets,
             condition_shared_track_index=condition_shared_track_index,
             activation_type=activation_type,
+            output_bias_init=output_bias_init,
+            zero_output_weights=zero_output_weights,
         )
         self.metadata_to_scale = nn.Linear(metadata_hidden, 1) if use_track_metadata else None
         self.metadata_to_shift = nn.Linear(metadata_hidden, 1) if use_track_metadata else None
@@ -750,6 +807,8 @@ class LogFiLMPerturbHead(_PerturbHeadBase):
         dropout: float = 0.0,
         condition_shared_track_index: Sequence[int] | None = None,
         activation_type: ActivationType = "softplus",
+        output_bias_init: float | Sequence[float] | None = None,
+        zero_output_weights: bool = False,
     ):
         super().__init__(
             in_ch=in_ch,
@@ -764,6 +823,8 @@ class LogFiLMPerturbHead(_PerturbHeadBase):
             num_targets=num_targets,
             condition_shared_track_index=condition_shared_track_index,
             activation_type=activation_type,
+            output_bias_init=output_bias_init,
+            zero_output_weights=zero_output_weights,
         )
         self.metadata_to_log_scale = (
             nn.Linear(metadata_hidden, hidden) if use_track_metadata else None
@@ -893,6 +954,8 @@ class ResidualFiLMPerturbHead(_PerturbHeadBase):
         condition_shared_track_index: Sequence[int] | None = None,
         refinement_kernel: int = 9,
         activation_type: ActivationType = "softplus",
+        output_bias_init: float | Sequence[float] | None = None,
+        zero_output_weights: bool = False,
     ):
         super().__init__(
             in_ch=in_ch,
@@ -907,6 +970,8 @@ class ResidualFiLMPerturbHead(_PerturbHeadBase):
             num_targets=num_targets,
             condition_shared_track_index=condition_shared_track_index,
             activation_type=activation_type,
+            output_bias_init=output_bias_init,
+            zero_output_weights=zero_output_weights,
         )
         self.metadata_to_log_scale = (
             nn.Linear(metadata_hidden, hidden) if use_track_metadata else None
@@ -1065,19 +1130,12 @@ class TransferMLPPerturbHead(nn.Module):
             nn.Dropout1d(dropout),
             nn.Conv1d(hidden, n_tracks, 1),
         )
-        if output_bias_init is not None:
-            bias = self.proj[-1].bias
-            assert bias is not None
-            values = torch.as_tensor(output_bias_init, dtype=bias.dtype)
-            if values.numel() == 1:
-                values = values.expand(n_tracks)
-            if values.numel() != n_tracks:
-                raise ValueError("output_bias_init must be scalar or contain one value per track")
-            with torch.no_grad():
-                bias.copy_(values.reshape_as(bias))
-        if zero_output_weights:
-            with torch.no_grad():
-                self.proj[-1].weight.zero_()
+        _initialise_output_layer(
+            self.proj[-1],
+            n_tracks=n_tracks,
+            output_bias_init=output_bias_init,
+            zero_output_weights=zero_output_weights,
+        )
         if activation_type == "softplus_beta2":
             self.activation: nn.Module = nn.Softplus(beta=2)
         elif activation_type == "exp":

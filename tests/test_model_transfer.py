@@ -573,3 +573,48 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
     # This proves the enriched metadata path drives the persisted FiLM IDs.
     assert saved_config.track_metadata["track_condition_ids"] == [1, 0]
     assert saved_config.condition_source == "group"
+
+
+@pytest.mark.parametrize("head_type", ["transfer_mlp", "film", "log_film", "bias"])
+def test_model_construction_keeps_head_output_initialisation(head_type: str) -> None:
+    config = RegulonadoConfig(
+        feature_dim=8,
+        n_tracks=3,
+        head_type=head_type,
+        head_hidden=4,
+        output_bias_init=[0.5, 1.0, 1.5],
+        zero_output_weights=True,
+    )
+    model = RegulonadoModel(config, backbone=DummyAdapter())
+
+    output = model(torch.randn(2, 4, 6))
+
+    expected = torch.nn.functional.softplus(torch.tensor([0.5, 1.0, 1.5]))
+    torch.testing.assert_close(output, expected.view(1, 3, 1).expand(2, 3, 6))
+
+
+def test_shared_base_channels_average_member_track_output_bias() -> None:
+    head = FiLMPerturbHead(
+        in_ch=8,
+        hidden=4,
+        n_tracks=3,
+        use_track_metadata=True,
+        num_conditions=2,
+        condition_shared_track_index=[0, 0, 1],
+        output_bias_init=[1.0, 3.0, 5.0],
+        zero_output_weights=True,
+    )
+
+    torch.testing.assert_close(head.proj[3].bias, torch.tensor([2.0, 5.0]))
+    assert not head.proj[3].weight.any()
+
+
+def test_model_construction_keeps_film_modulation_identity_at_init() -> None:
+    config = RegulonadoConfig(
+        feature_dim=8, n_tracks=2, head_type="film", head_hidden=4, use_track_metadata=True,
+        num_conditions=2,
+    )
+    model = RegulonadoModel(config, backbone=DummyAdapter())
+
+    assert not model.head.metadata_to_scale.weight.any()
+    assert not model.head.metadata_to_shift.weight.any()
