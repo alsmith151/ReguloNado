@@ -1,4 +1,5 @@
 """Unit tests for regulonado.training.losses."""
+
 from __future__ import annotations
 
 import pytest
@@ -16,6 +17,7 @@ from regulonado.training.losses import (
     topk_additive_loss,
     topk_reweight_loss,
     track_contrast_correlation_loss,
+    track_contrast_magnitude_loss,
     transfer_calibration_loss,
 )
 
@@ -506,3 +508,56 @@ def test_specificity_stats_ranks_regions_by_strongest_group() -> None:
     assert stats[0, :, 5].eq(1.0).all()
     assert stats[0, 0, 1] > 0
     assert (stats[0, 1:, 1] < 0).all()
+
+
+# ---------------------------------------------------------------------------
+# track_contrast_magnitude_loss
+# ---------------------------------------------------------------------------
+
+
+def test_contrast_magnitude_zero_for_perfect_prediction() -> None:
+    tgt = _rand_pos(B, T, L)
+    loss = track_contrast_magnitude_loss(
+        tgt.detach().clone(), tgt, _contrast_weights(), region_bins=8, active_fraction=1.0
+    )
+    assert loss.shape == ()
+    assert loss.item() < 1e-6
+
+
+def test_contrast_magnitude_penalises_compression_that_correlation_ignores() -> None:
+    """Halving the predicted specificity spread: correlation ~perfect, magnitude positive."""
+    pred, target = _log_linear_batch(k=0.5, region_bins=8)
+    kwargs = dict(region_bins=8, active_fraction=1.0)
+    correlation = track_contrast_correlation_loss(pred, target, _contrast_weights(), **kwargs)
+    magnitude = track_contrast_magnitude_loss(pred, target, _contrast_weights(), **kwargs)
+    assert correlation.item() < 1e-3
+    assert magnitude.item() > 1e-3
+
+
+def test_contrast_magnitude_grows_with_compression() -> None:
+    kwargs = dict(region_bins=8, active_fraction=1.0)
+    losses = [
+        track_contrast_magnitude_loss(
+            *_log_linear_batch(k=k, region_bins=8), _contrast_weights(), **kwargs
+        ).item()
+        for k in (0.9, 0.5, 0.0)
+    ]
+    assert losses[0] < losses[1] < losses[2]
+
+
+def test_contrast_magnitude_gradient_finite_and_nonzero() -> None:
+    pred = _rand_pos(B, T, L)
+    tgt = _rand_pos(B, T, L)
+    track_contrast_magnitude_loss(pred, tgt, _contrast_weights(), region_bins=8).backward()
+    assert pred.grad is not None
+    assert torch.isfinite(pred.grad).all()
+    assert (pred.grad != 0).any()
+
+
+def test_contrast_magnitude_without_families_is_zero_with_gradient() -> None:
+    pred = _rand_pos(B, T, L)
+    tgt = _rand_pos(B, T, L)
+    loss = track_contrast_magnitude_loss(pred, tgt, torch.zeros(0, 0, T), region_bins=8)
+    loss.backward()
+    assert loss.item() == pytest.approx(0.0)
+    assert pred.grad is not None

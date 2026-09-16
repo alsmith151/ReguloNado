@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -413,30 +413,23 @@ def contrast_group_weights(
     return weights
 
 
-def specificity_stats(
+def _family_specificity(
     p: torch.Tensor,
     t: torch.Tensor,
-    group_weights: torch.Tensor | None,
+    group_weights: torch.Tensor,
     *,
     region_bins: int,
     pseudocount: float,
     active_fraction: float,
-) -> torch.Tensor:
-    """Per-track sufficient stats ``[B, T, 6]`` for cross-track specificity.
+) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Yield ``(members, centred_p, centred_t, active)`` for each contrast family.
 
-    Specificity is a track's log region signal minus the group-balanced family mean,
-    ``c_t = log(y_t + ps) - Σ_s w_s log(y_s + ps)``. Stats cover the most active
-    ``active_fraction`` of regions per example, ranked by the strongest group's
-    replicate-mean observed signal: a region open in one cell type ranks with the shared
-    peaks rather than at 1/n_groups of its signal. Tracks outside every contrast family
-    stay zero. ``group_weights`` comes from :func:`contrast_group_weights`.
-    Differentiable w.r.t. ``p``.
+    ``members`` is a ``[T]`` bool mask; ``centred_*`` are ``[B, M, R]`` log region signals
+    minus the group-balanced family mean; ``active`` is a ``[B, 1, R]`` float mask of the
+    regions scored for that family (see :func:`specificity_stats`).
     """
     batch, n_tracks, length = p.shape
-    stats = torch.zeros((batch, n_tracks, 6), dtype=torch.float32, device=p.device)
     n_regions = length // region_bins
-    if group_weights is None or group_weights.shape[0] == 0 or n_regions == 0:
-        return stats
     usable = n_regions * region_bins
     region_p = p.float()[..., :usable].reshape(batch, n_tracks, n_regions, region_bins).sum(-1)
     region_t = t.float()[..., :usable].reshape(batch, n_tracks, n_regions, region_bins).sum(-1)
@@ -459,6 +452,40 @@ def specificity_stats(
         active = ((strongest_group_signal >= threshold) & (strongest_group_signal > 0)).to(
             torch.float32
         )[:, None]
+        yield members, centred_p, centred_t, active
+
+
+def specificity_stats(
+    p: torch.Tensor,
+    t: torch.Tensor,
+    group_weights: torch.Tensor | None,
+    *,
+    region_bins: int,
+    pseudocount: float,
+    active_fraction: float,
+) -> torch.Tensor:
+    """Per-track sufficient stats ``[B, T, 6]`` for cross-track specificity.
+
+    Specificity is a track's log region signal minus the group-balanced family mean,
+    ``c_t = log(y_t + ps) - Σ_s w_s log(y_s + ps)``. Stats cover the most active
+    ``active_fraction`` of regions per example, ranked by the strongest group's
+    replicate-mean observed signal: a region open in one cell type ranks with the shared
+    peaks rather than at 1/n_groups of its signal, and a track whose own cell type is closed
+    there contributes a negative ``c_t``. Tracks outside every contrast family stay zero.
+    ``group_weights`` comes from :func:`contrast_group_weights`. Differentiable w.r.t. ``p``.
+    """
+    batch, n_tracks, length = p.shape
+    stats = torch.zeros((batch, n_tracks, 6), dtype=torch.float32, device=p.device)
+    if group_weights is None or group_weights.shape[0] == 0 or length // region_bins == 0:
+        return stats
+    for members, centred_p, centred_t, active in _family_specificity(
+        p,
+        t,
+        group_weights,
+        region_bins=region_bins,
+        pseudocount=pseudocount,
+        active_fraction=active_fraction,
+    ):
         stats[:, members] = torch.stack(
             [
                 (centred_p * active).sum(-1),
@@ -466,11 +493,48 @@ def specificity_stats(
                 (centred_p * centred_t * active).sum(-1),
                 (centred_p * centred_p * active).sum(-1),
                 (centred_t * centred_t * active).sum(-1),
-                active.sum(-1).expand(-1, member_weights.numel()),
+                active.sum(-1).expand(-1, centred_p.shape[1]),
             ],
             dim=-1,
         )
     return stats
+
+
+def track_contrast_magnitude_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    group_weights: torch.Tensor,
+    *,
+    region_bins: int = 16,
+    pseudocount: float = 0.1,
+    active_fraction: float = 0.1,
+    delta: float = 1.0,
+) -> torch.Tensor:
+    """Huber loss between predicted and observed specificity ``c`` on the scored regions.
+
+    The same centred log deviations as :func:`track_contrast_correlation_loss`, compared
+    directly rather than correlated, so shrinking every cell-type difference (a perfect
+    correlation with ``contrast_sd_ratio`` below one) is penalised. ``delta`` is in natural-log
+    units: deviations beyond an e-fold error grow linearly. Mean over active (region, track)
+    pairs across families; zero, with a gradient, when there is nothing to score.
+    """
+    if group_weights.shape[0] == 0 or target.shape[-1] // region_bins == 0:
+        return pred.sum() * 0.0
+    total = pred.new_zeros((), dtype=torch.float32)
+    count = pred.new_zeros((), dtype=torch.float32)
+    for _, centred_p, centred_t, active in _family_specificity(
+        pred,
+        target,
+        group_weights,
+        region_bins=region_bins,
+        pseudocount=pseudocount,
+        active_fraction=active_fraction,
+    ):
+        huber = F.huber_loss(centred_p, centred_t, delta=delta, reduction="none")
+        total = total + (huber * active).sum()
+        count = count + active.sum() * centred_p.shape[1]
+    # No host sync on count; the zero-weighted pred term keeps a gradient path when empty.
+    return total / count.clamp_min(1.0) + pred.sum() * 0.0
 
 
 def _pearson_from_stats_torch(stats: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

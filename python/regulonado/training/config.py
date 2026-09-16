@@ -88,6 +88,10 @@ class LossConfig:
     # unset/0 disables it. Region geometry (bins, pseudocount, active fraction) comes from
     # ``trainer.contrast_*`` — shared with the metric that defines the same quantity.
     contrast_weight: float | None = None
+    # Weight of the Huber term on the same specificity values, compared directly: penalises
+    # predicted cell-type differences that are right in rank but too small (contrast_sd_ratio
+    # below one), which the correlation term cannot see. Unset/0 disables it.
+    contrast_magnitude_weight: float | None = None
     # Kendall et al. homoscedastic uncertainty weighting across tracks for the base loss.
     learn_track_weights: bool | None = None
 
@@ -168,9 +172,9 @@ class TrainerConfig:
     # Number of strongest target bins used by the top-k Pearson metric.
     topk_bins: int = 256
     # Cross-track specificity region geometry: bins per region, per-bin log pseudocount, and
-    # the most active fraction of regions (by observed family mean signal) that are scored.
-    # Drives both the contrast_* metrics and, when loss.contrast_weight > 0, the loss term —
-    # single source of truth so the two compute the same function.
+    # the most active fraction of regions (by the strongest group's observed signal) that are
+    # scored. Drives the contrast_* metrics and both contrast loss terms — single source of
+    # truth so they compute the same function.
     contrast_region_bins: int = 16
     contrast_pseudocount: float = 0.1
     contrast_active_fraction: float = 0.1

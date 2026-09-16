@@ -158,7 +158,7 @@ preemption isolation matters more than Bayesian adaptivity.
 
 ## Cross-track contrast
 
-`loss.contrast_weight` and `trainer.contrast_*` (`contrast_region_bins`,
+`loss.contrast_weight`, `loss.contrast_magnitude_weight` and `trainer.contrast_*` (`contrast_region_bins`,
 `contrast_pseudocount`, `contrast_active_fraction`) are one coupled knob set, not
 two independent ones. The `trainer.contrast_*` values define the region geometry
 for cross-track specificity — group-balanced log deviations over the most active
@@ -176,6 +176,14 @@ its signal and would lose to every shared peak; ranked by its strongest group, i
 competes on its own height. Active regions therefore cover cell-type-specific sites in
 both directions — open in a track's cell type (positive specificity) and open elsewhere
 but not there (negative) — rather than mostly constitutive peaks.
+
+`loss.contrast_weight` optimises `1 - mean(r)`, which is scale-free: predictions that rank
+cell-type differences perfectly but shrink them all (`contrast_sd_ratio` below one) cost it
+nothing. `loss.contrast_magnitude_weight` adds a Huber loss between predicted and observed
+specificity on the same regions, in natural-log units, so predicted effect sizes have to
+match in size and not only in order. Set it when the differences are read quantitatively —
+synthetic-enhancer design scores designs by how much more active the target group is — and
+watch `contrast_sd_ratio_median` move towards one.
 
 ## Evaluation metrics
 

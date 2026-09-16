@@ -54,6 +54,7 @@ from regulonado.training.losses import (
     topk_additive_loss,
     topk_reweight_loss,
     track_contrast_correlation_loss,
+    track_contrast_magnitude_loss,
     transfer_calibration_loss,
 )
 from regulonado.training.metrics import (
@@ -470,25 +471,33 @@ def _build_loss_fn(
         track_log_var=track_log_var,
     )
     contrast_weight = float(loss_cfg.get("contrast_weight") or 0.0)
-    if contrast_weight <= 0.0:
+    magnitude_weight = float(loss_cfg.get("contrast_magnitude_weight") or 0.0)
+    if contrast_weight <= 0.0 and magnitude_weight <= 0.0:
         return base_loss
     if contrast_weights is None or contrast_weights.shape[0] == 0:
         raise ValueError(
-            "loss.contrast_weight requires tracks labelled with assay_class and group, "
-            "with at least two groups sharing one assay_class"
+            "loss.contrast_weight and loss.contrast_magnitude_weight require tracks labelled "
+            "with assay_class and group, with at least two groups sharing one assay_class"
         )
-    return lambda pred, target: (
-        base_loss(pred, target)
-        + contrast_weight
-        * track_contrast_correlation_loss(
-            pred,
-            target,
-            contrast_weights,
-            region_bins=contrast_region_bins,
-            pseudocount=contrast_pseudocount,
-            active_fraction=contrast_active_fraction,
-        )
+    geometry = dict(
+        region_bins=contrast_region_bins,
+        pseudocount=contrast_pseudocount,
+        active_fraction=contrast_active_fraction,
     )
+
+    def loss_fn(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        loss = base_loss(pred, target)
+        if contrast_weight > 0.0:
+            loss = loss + contrast_weight * track_contrast_correlation_loss(
+                pred, target, contrast_weights, **geometry
+            )
+        if magnitude_weight > 0.0:
+            loss = loss + magnitude_weight * track_contrast_magnitude_loss(
+                pred, target, contrast_weights, **geometry
+            )
+        return loss
+
+    return loss_fn
 
 
 def _build_base_loss_fn(

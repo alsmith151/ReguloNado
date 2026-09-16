@@ -128,9 +128,11 @@ def test_contrast_weight_override_composes_for_every_loss(loss_name: str) -> Non
                 "+experiment=head_only",
                 f"loss={loss_name}",
                 "loss.contrast_weight=0.5",
+                "loss.contrast_magnitude_weight=0.25",
             ],
         )
     assert cfg.loss.contrast_weight == 0.5
+    assert cfg.loss.contrast_magnitude_weight == 0.25
 
 
 def test_loss_config_covers_every_loss_cfg_key() -> None:

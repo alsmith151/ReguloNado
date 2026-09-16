@@ -593,6 +593,51 @@ class TestBuildCollateAndLoss:
         _, loss_fn_b, _, _ = _build_collate_and_loss(cfg_b, records)
         assert loss_fn_a(pred, target).item() != pytest.approx(loss_fn_b(pred, target).item())
 
+    def test_contrast_magnitude_weight_adds_shrinkage_penalty(self) -> None:
+        """Compressed-but-correlated predictions cost nothing under the correlation term
+        alone, and are penalised once contrast_magnitude_weight is set."""
+        records = [
+            {"assay_class": "ATAC", "group": "a"},
+            {"assay_class": "ATAC", "group": "b"},
+            {"assay_class": "ATAC", "group": "c"},
+        ]
+        trainer_cfg = {"contrast_region_bins": 2, "contrast_active_fraction": 1.0}
+        torch.manual_seed(0)
+        target = torch.rand(4, 3, 8) + 0.5
+        # Shrink each track towards the per-region mean across tracks: same ranking,
+        # less spread, which the correlation term is nearly blind to.
+        mean_over_tracks = target.mean(dim=1, keepdim=True)
+
+        def build(loss_cfg: dict) -> object:
+            cfg = {
+                "model": {"use_track_metadata": False},
+                "data": {},
+                "loss": loss_cfg,
+                "trainer": trainer_cfg,
+            }
+            return _build_collate_and_loss(cfg, records)[1]
+
+        correlation_only = build({"name": "mse", "contrast_weight": 1.0})
+        with_magnitude = build(
+            {"name": "mse", "contrast_weight": 1.0, "contrast_magnitude_weight": 1.0}
+        )
+
+        def penalty(keep: float) -> float:
+            compressed = mean_over_tracks + keep * (target - mean_over_tracks)
+            return (
+                with_magnitude(compressed, target).item()
+                - correlation_only(compressed, target).item()
+            )
+
+        # Positive, and larger the more the predicted differences are shrunk.
+        assert 0.0 < penalty(0.5) < penalty(0.2) < penalty(0.0)
+
+    def test_contrast_magnitude_weight_alone_requires_track_labels(self) -> None:
+        loss_cfg = {"name": "mse", "contrast_magnitude_weight": 1.0}
+        cfg = {"model": {"use_track_metadata": False}, "data": {}, "loss": loss_cfg}
+        with pytest.raises(ValueError, match="contrast_magnitude_weight"):
+            _build_collate_and_loss(cfg, self.RECORDS)
+
     def test_contrast_weight_without_track_labels_raises(self) -> None:
         loss_cfg = {"name": "mse", "contrast_weight": 1.0}
         cfg = {"model": {"use_track_metadata": False}, "data": {}, "loss": loss_cfg}

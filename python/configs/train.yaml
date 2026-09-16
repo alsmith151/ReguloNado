@@ -34,6 +34,7 @@ model:
 # name/poisson_weight.
 loss:
   contrast_weight: 0.0
+  contrast_magnitude_weight: 0.0
   learn_track_weights: false
 
 trainer:
