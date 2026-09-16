@@ -302,7 +302,7 @@ def _run_tiny_attribution(out_dir: Path) -> str:
 
     seed = _attr_seed()
     context = _attr_motif_context()
-    readout = TrackReadout(_MotifEnsemble(), track_index=1, bins=seed.bins)
+    readout = TrackReadout(_MotifEnsemble(), track_indices=[1], bins=seed.bins)
     result = ism_scan(readout, seed, context, batch_size=32)
     cores, diagnostics = call_cores(
         result.importance,
