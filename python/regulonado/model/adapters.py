@@ -122,8 +122,9 @@ class BaseBackboneAdapter(nn.Module):
         the output side.
 
         Freeze-policy settings that unfreeze stages "from the end" operate on
-        this ordered sequence. For example, Borzoi returns transformer blocks
-        followed by ``final_joined_convs``, and Enformer returns transformer
+        this ordered sequence. For example, Borzoi returns transformer blocks,
+        then its ``unet1``/``unet0`` upsampling stages, then
+        ``final_joined_convs``, and Enformer returns transformer
         blocks followed by ``final_pointwise``.
 
         Yields
@@ -154,37 +155,44 @@ class BorzoiBackboneAdapter(BaseBackboneAdapter):
         super().__init__()
         self.model = model
         self.feature_dim = 1920
-        # FlashZoi's flash_attn kernels require uniform half precision and CANNOT run
-        # under torch.autocast: flash_attn builds its rotary cos/sin cache with
-        # torch.outer *inside* the autocast region, which corrupts it to NaN on every
-        # torch/flash_attn version tested (torch 2.6-2.8, flash 2.7-2.8). So we keep the
-        # flash backbone in bf16 and run it with autocast disabled (see forward_features).
-        # Casting here — at build time, before the optimizer is created and before any
-        # DDP wrap — keeps param dtypes consistent for the optimizer and DDP reducer.
-        # The prediction head stays fp32 (the wrapper feeds it features.float()).
-        if getattr(model, "flashed", False):
-            self.model = self.model.to(torch.bfloat16)
+        # Parameters stay float32 (the checkpoint dtype is whatever it was saved in, so
+        # cast explicitly). Casting the backbone to bf16 instead makes AdamW update bf16
+        # weights directly: bf16's relative resolution is ~0.8%, so any step smaller than
+        # ~0.4% of |w| rounds to zero and larger ones are quantised. float32 weights are
+        # the master copy; forward_features supplies the bf16 compute via autocast.
+        self.model = self.model.float()
 
     def forward_features(self, input_ids: torch.Tensor) -> torch.Tensor:
         param_dtype = next(self.model.parameters()).dtype
-        if input_ids.is_cuda and param_dtype in (torch.bfloat16, torch.float16):
-            # Half-precision flash backbone: run with autocast explicitly disabled so the
-            # rotary cache is computed in fp32 (finite) rather than under autocast (NaN).
-            with torch.autocast(device_type="cuda", enabled=False):
-                features = self.model.get_embs_after_crop(input_ids.to(param_dtype))
-                features = self.model.final_joined_convs(features)
-            return features
-        # Non-flash / CPU path: plain fp32, no autocast (Borzoi's own attention is
-        # numerically stable in fp32; autocast fp16 here overflows the conv tower).
-        features = self.model.get_embs_after_crop(input_ids.to(param_dtype))
+        input_ids = input_ids.to(param_dtype)
+        if input_ids.is_cuda:
+            # Always bf16, never torch.get_autocast_dtype("cuda"): outside an enclosing
+            # autocast region that returns float16, which overflows Borzoi's conv tower.
+            # flash_attn needs half-precision q/k/v, which autocast's Linear casts give it;
+            # its rotary cache is built in float32 (torch.outer is not an autocast op) and
+            # cast to the q dtype. This also overrides an enclosing fp16 autocast.
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                features = self.model.get_embs_after_crop(input_ids)
+                return self.model.final_joined_convs(features)
+        # CPU path (non-flash Borzoi only; flash_attn has no CPU kernels): plain float32.
+        features = self.model.get_embs_after_crop(input_ids)
         return self.model.final_joined_convs(features)
 
     def iter_named_blocks(self) -> Iterable[tuple[str, nn.Module]]:
+        """Stages in data-flow order: transformer blocks, the two U-Net upsampling
+        stages (each merging a conv-tower skip connection back in), then
+        ``final_joined_convs``. Each U-Net stage groups its upsampling conv, the
+        horizontal conv on its skip branch, and the separable conv after the merge.
+        """
         if hasattr(self.model, "transformer") and isinstance(
             self.model.transformer, (nn.ModuleList, nn.Sequential)
         ):
             for index, block in enumerate(self.model.transformer):
                 yield f"transformer.{index}", block
+        for level in (1, 0):
+            names = (f"upsampling_unet{level}", f"horizontal_conv{level}", f"separable{level}")
+            if all(hasattr(self.model, name) for name in names):
+                yield f"unet{level}", nn.ModuleList(getattr(self.model, name) for name in names)
         if hasattr(self.model, "final_joined_convs"):
             yield "final_joined_convs", self.model.final_joined_convs
 

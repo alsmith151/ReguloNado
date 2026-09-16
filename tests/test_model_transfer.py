@@ -241,6 +241,97 @@ def test_borzoi_adapter_normalizes_backbone_interface():
     ]
 
 
+class DummyBorzoiUNetModule(DummyBorzoiModule):
+    def __init__(self):
+        super().__init__()
+        for level in (1, 0):
+            setattr(self, f"upsampling_unet{level}", nn.Conv1d(8, 8, 1))
+            setattr(self, f"horizontal_conv{level}", nn.Conv1d(8, 8, 1))
+            setattr(self, f"separable{level}", nn.Conv1d(8, 8, 1))
+
+
+def test_borzoi_adapter_keeps_float32_master_weights_for_half_checkpoints():
+    # A bf16 backbone would make AdamW round small updates to zero; the adapter must
+    # restore float32 weights regardless of the dtype the checkpoint was loaded in.
+    adapter = BorzoiBackboneAdapter(DummyBorzoiModule().to(torch.bfloat16))
+
+    assert {parameter.dtype for parameter in adapter.parameters()} == {torch.float32}
+    features = adapter.forward_features(torch.randn(2, 8, 12, dtype=torch.bfloat16))
+    assert features.dtype == torch.float32
+
+
+def test_borzoi_adapter_stages_include_unet_upsampling_path():
+    adapter = BorzoiBackboneAdapter(DummyBorzoiUNetModule())
+
+    assert [name for name, _ in adapter.iter_named_blocks()] == [
+        "transformer.0",
+        "transformer.1",
+        "unet1",
+        "unet0",
+        "final_joined_convs",
+    ]
+
+
+def test_freeze_policy_unfreezes_unet_stages_between_transformer_and_output():
+    model = RegulonadoModel(
+        backbone=BorzoiBackboneAdapter(DummyBorzoiUNetModule()),
+        head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
+    )
+    model.apply_freeze_policy(
+        FreezePolicy(freeze_backbone=True, unfreeze_backbone_stages_from_output_end=4)
+    )
+
+    trainable = {
+        name.split(".")[1]
+        for name, parameter in model.backbone.named_parameters()
+        if parameter.requires_grad
+    }
+    assert trainable == {
+        "transformer",
+        "upsampling_unet1",
+        "horizontal_conv1",
+        "separable1",
+        "upsampling_unet0",
+        "horizontal_conv0",
+        "separable0",
+        "final_joined_convs",
+    }
+    assert not model.backbone.model.transformer[0].weight.requires_grad
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="flash_attn needs CUDA")
+def test_flashed_borzoi_trains_in_float32_under_bf16_autocast():
+    pytest.importorskip("flash_attn")
+    from borzoi_pytorch.config_borzoi import BorzoiConfig
+
+    from regulonado.model.adapters import Borzoi
+
+    torch.manual_seed(0)
+    adapter = BorzoiBackboneAdapter(
+        Borzoi(BorzoiConfig(depth=1, flashed=True, bins_to_return=1024))
+    ).cuda()
+    layer_norm = adapter.model.transformer[0][0].fn[0]
+    before = layer_norm.weight.detach().clone()
+    optimizer = torch.optim.AdamW(adapter.parameters(), lr=1e-4, weight_decay=0.0)
+
+    one_hot = torch.nn.functional.one_hot(
+        torch.randint(0, 4, (1, 65536), device="cuda"), num_classes=4
+    ).permute(0, 2, 1)
+    features = adapter.forward_features(one_hot)
+    assert torch.isfinite(features).all()
+    features.float().square().mean().backward()
+    assert all(
+        parameter.grad is None or torch.isfinite(parameter.grad).all()
+        for parameter in adapter.parameters()
+    )
+    optimizer.step()
+
+    assert layer_norm.weight.dtype == torch.float32
+    # LayerNorm gains sit near 1.0, where a 1e-4 step is below bf16 resolution and
+    # would round away without float32 master weights.
+    assert not torch.equal(layer_norm.weight.detach(), before)
+
+
 def test_enformer_adapter_transposes_sequence_axes():
     adapter = EnformerBackboneAdapter(DummyEnformerModule())
     features = adapter.forward_features(torch.randn(2, 4, 16))

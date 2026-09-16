@@ -31,7 +31,7 @@ class DesignState:
 
 def _to_numpy(value) -> np.ndarray:
     if hasattr(value, "detach"):
-        # flashzoi runs in bf16 (BorzoiBackboneAdapter); numpy has no bfloat16, so cast
+        # flashzoi features come out of bf16 autocast (BorzoiBackboneAdapter); numpy has no bfloat16, so cast
         # to float32 before crossing the torch/numpy boundary.
         value = value.detach().float().cpu().numpy()
     return np.asarray(value, dtype=np.float64)
