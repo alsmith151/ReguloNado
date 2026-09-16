@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -289,3 +290,80 @@ class EvalExampleDiagnostics(TrainerCallback):
             int(state.global_step),
             track_names=self._track_names,
         )
+
+
+class PerTrackMetricsReport(TrainerCallback):
+    """Write the per-track values behind each evaluation's median metrics.
+
+    ``record`` is the ``per_track_sink`` of ``make_compute_metrics``. Validation evals
+    write ``per_track_metrics/validation_step_<step>.csv``; the final test-split
+    ``predict`` writes ``per_track_metrics/test.csv`` and, when W&B is active, puts the
+    test metrics in the run summary and one ``test/per_track_metrics`` table rather than
+    adding step-series panels.
+    """
+
+    def __init__(self, *, output_dir: Path, records: Sequence[Mapping[str, Any]]) -> None:
+        self._dir = output_dir / "per_track_metrics"
+        self._track_columns = {
+            "track_name": [
+                str(r.get("track_name") or Path(str(r.get("bigwig_path") or f"track_{i}")).stem)
+                for i, r in enumerate(records)
+            ],
+            "group": [str(r.get("group") or "") for r in records],
+            "assay_class": [str(r.get("assay_class") or "") for r in records],
+        }
+        self._latest: dict[str, np.ndarray] | None = None
+
+    def record(self, per_track: Mapping[str, np.ndarray]) -> None:
+        self._latest = dict(per_track)
+
+    def _rows(self) -> tuple[list[str], list[list[Any]]]:
+        assert self._latest is not None
+        columns = [*self._track_columns, *self._latest]
+        values = [*self._track_columns.values(), *(v.tolist() for v in self._latest.values())]
+        return columns, [list(row) for row in zip(*values, strict=True)]
+
+    def _write_csv(self, name: str) -> tuple[list[str], list[list[Any]]]:
+        columns, rows = self._rows()
+        self._dir.mkdir(parents=True, exist_ok=True)
+        with (self._dir / f"{name}.csv").open("w", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(columns)
+            writer.writerows(rows)
+        return columns, rows
+
+    def on_evaluate(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs: Any,
+    ) -> None:
+        if self._latest is not None and state.is_world_process_zero:
+            self._write_csv(f"validation_step_{int(state.global_step)}")
+        self._latest = None
+
+    def on_predict(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        metrics: Mapping[str, float] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if self._latest is None or not state.is_world_process_zero:
+            self._latest = None
+            return
+        columns, rows = self._write_csv("test")
+        self._latest = None
+        try:
+            import wandb
+        except ModuleNotFoundError:
+            return
+        if wandb.run is None:
+            return
+        # "test_<metric>" -> "test/<metric>", matching HF's eval/<metric> naming.
+        wandb.run.summary.update(
+            {key.replace("test_", "test/", 1): value for key, value in (metrics or {}).items()}
+        )
+        wandb.log({"test/per_track_metrics": wandb.Table(columns=columns, data=rows)})

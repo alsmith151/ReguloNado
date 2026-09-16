@@ -38,12 +38,13 @@ from regulonado.model import (
 from regulonado.training.callbacks import (
     EvalExampleDiagnostics,
     LRLogCallback,
+    PerTrackMetricsReport,
     WandbConfigCallback,
 )
 from regulonado.training.config import TrainerConfig
 from regulonado.training.data import WindowParquetDataset
 from regulonado.training.losses import (
-    contrast_family_weights,
+    contrast_group_weights,
     kendall_track_weighted_loss,
     log1p_huber_loss,
     poisson_multinomial_binwise_loss,
@@ -441,8 +442,8 @@ def _build_collate_fn(
 
 
 def _contrast_weights_from_records(records: Sequence[Mapping[str, Any]]) -> torch.Tensor:
-    """Group-balanced cross-track contrast weights keyed by ``assay_class`` and ``group``."""
-    return contrast_family_weights(
+    """Per-group replicate-averaging contrast weights keyed by ``assay_class`` and ``group``."""
+    return contrast_group_weights(
         [record.get("assay_class") for record in records],
         [record.get("group") for record in records],
     )
@@ -1723,6 +1724,28 @@ def _run_training_loop(
     logger.info(f"[rank {rank}] trainer.train() returned after {perf_counter() - t0:.1f}s")
 
 
+def _evaluate_test_split(
+    trainer: "RegulonadoTrainer",
+    test_dataset: Any,
+    *,
+    rank: int,
+) -> dict[str, float] | None:
+    """Score the final (best, when selection is on) model once on the untouched test split.
+
+    Uses ``predict`` rather than ``evaluate`` so the one-off result lands in the run
+    summary instead of step-series panels, and so it cannot reach early stopping or
+    best-checkpoint selection.
+    """
+    if test_dataset is None:
+        return None
+    t0 = perf_counter()
+    metrics = trainer.predict(test_dataset, metric_key_prefix="test").metrics
+    logger.info(
+        f"[rank {rank}] test split scored in {perf_counter() - t0:.1f}s | rows={len(test_dataset)}"
+    )
+    return {key: float(value) for key, value in metrics.items()}
+
+
 def _finalize_trainer_outputs(
     trainer: "RegulonadoTrainer",
     output_dir: Path,
@@ -1755,6 +1778,7 @@ def _build_training_summary(
     records: Sequence[Mapping[str, Any]],
     trainer_cfg: TrainerConfig,
     history: dict[str, list[float]],
+    test_metrics: Mapping[str, float] | None,
 ) -> dict[str, Any]:
     """Assemble the training summary dict and write it to ``output_dir/training_summary.json``."""
     summary = {
@@ -1768,6 +1792,7 @@ def _build_training_summary(
         "resume_from_checkpoint": trainer_cfg.resume_from_checkpoint,
         "init_weights_from_checkpoint": trainer_cfg.init_weights_from_checkpoint,
         "history": history,
+        "test_metrics": dict(test_metrics) if test_metrics is not None else None,
     }
     (output_dir / "training_summary.json").write_text(json.dumps(summary, indent=2))
     return summary
@@ -1884,9 +1909,20 @@ def run_training(
         seed=seed,
     )
     val_dataset = dataset_dict.get("validation")
-    callbacks = _build_training_callbacks(
-        cfg, trainer_cfg, val_dataset, collate_fn, scale_factors, background, records, output_dir
-    )
+    per_track_report = PerTrackMetricsReport(output_dir=output_dir, records=records)
+    callbacks = [
+        *_build_training_callbacks(
+            cfg,
+            trainer_cfg,
+            val_dataset,
+            collate_fn,
+            scale_factors,
+            background,
+            records,
+            output_dir,
+        ),
+        per_track_report,
+    ]
     topk_bins = int(cfg["trainer"].get("topk_bins", 256))
     trainer = RegulonadoTrainer(
         model=model,
@@ -1898,11 +1934,13 @@ def run_training(
         callbacks=callbacks,
         loss_fn=loss_fn,
         compute_metrics=make_compute_metrics(
-            len(records), trainer_cfg.calibration_shape_pearson_weight
+            len(records),
+            trainer_cfg.calibration_shape_pearson_weight,
+            per_track_sink=per_track_report.record,
         ),
         preprocess_logits_for_metrics=make_preprocess_logits_for_metrics(
             topk_bins,
-            contrast_family_weights=_contrast_weights_from_records(records),
+            contrast_group_weights=_contrast_weights_from_records(records),
             contrast_region_bins=trainer_cfg.contrast_region_bins,
             contrast_pseudocount=trainer_cfg.contrast_pseudocount,
             contrast_active_fraction=trainer_cfg.contrast_active_fraction,
@@ -1910,10 +1948,11 @@ def run_training(
     )
 
     _run_training_loop(trainer, trainer_cfg, schedule, rank=rank)
+    test_metrics = _evaluate_test_split(trainer, dataset_dict.get("test"), rank=rank)
     history = _finalize_trainer_outputs(trainer, output_dir)
 
     return _build_training_summary(
-        cfg, output_dir, seed, metadata_path, records, trainer_cfg, history
+        cfg, output_dir, seed, metadata_path, records, trainer_cfg, history, test_metrics
     )
 
 

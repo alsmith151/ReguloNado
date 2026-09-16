@@ -653,12 +653,15 @@ class TestBuildTrainingSummary:
         }
         trainer_cfg = TrainerConfig()
         history = {"train/loss": [1.0], "eval/loss": []}
-        summary = _build_training_summary(cfg, tmp_path, 42, None, [{}, {}], trainer_cfg, history)
+        summary = _build_training_summary(
+            cfg, tmp_path, 42, None, [{}, {}], trainer_cfg, history, {"test_loss": 0.5}
+        )
         assert summary["n_tracks"] == 2
         assert summary["seed"] == 42
         assert summary["backbone"] == "borzoi"
         assert summary["head"] == "transfer_mlp"
         assert summary["history"] == history
+        assert summary["test_metrics"] == {"test_loss": 0.5}
 
         written = json.loads((tmp_path / "training_summary.json").read_text())
         assert written == summary

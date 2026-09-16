@@ -163,12 +163,53 @@ preemption isolation matters more than Bayesian adaptivity.
 two independent ones. The `trainer.contrast_*` values define the region geometry
 for cross-track specificity — group-balanced log deviations over the most active
 fraction of regions per example — and that same definition is used both by the
-`contrast_*` eval metrics (`contrast_pearson_median`, `contrast_slope_median`,
-`contrast_sd_ratio_median`) and, when `loss.contrast_weight > 0`, by the training
+`contrast_*` eval metrics (`contrast_pearson_median`, `contrast_sd_ratio_median`)
+and, when `loss.contrast_weight > 0`, by the training
 loss term. The loss term optimises `1 - mean(r)` of exactly the quantity
 `contrast_pearson_median` reports (the loss reduces per-track r with `mean`, the
 metric with `median`), so raising `loss.contrast_weight` should move
 `contrast_pearson_median` directly rather than a proxy for it.
+
+Regions are ranked by the strongest group's replicate-averaged observed signal, not the
+family mean. With 20 groups, a region open in one cell type has a family mean of 1/20 of
+its signal and would lose to every shared peak; ranked by its strongest group, it
+competes on its own height. Active regions therefore cover cell-type-specific sites in
+both directions — open in a track's cell type (positive specificity) and open elsewhere
+but not there (negative) — rather than mostly constitutive peaks.
+
+## Evaluation metrics
+
+Each metric is computed per track over the whole evaluation set, then reduced to the
+median across tracks. W&B shows them as `eval/<metric>`. Every metric answers one
+question; the checkpoint-selection objectives combine them.
+
+| Metric | Question | Ideal | Reading a miss |
+| --- | --- | --- | --- |
+| `loss` | Training objective on held-out windows | lower | Only comparable between runs with the same loss settings |
+| `pearson_bin_median` | Is the profile shape right, bin by bin? | 1 | Peaks misplaced or smeared |
+| `pearson_top256_median` | Is shape right where the signal is? (top 256 target bins per window) | 1 | Low while `pearson_bin` is high: background fitted, peaks not |
+| `pearson_total_median` | Does each window get the right amount of signal relative to other windows? | 1 | Strong and weak loci not told apart |
+| `total_ratio_median` | Is overall scale calibrated? (predicted total / observed total) | 1 | Below 1: systematic under-prediction |
+| `abs_log_ratio_total_median` | `\|log total_ratio\|`, the calibration error an objective can minimise | 0 | Same as `total_ratio_median`, sign dropped |
+| `amplitude_ratio_median` | Are peak heights right? (predicted / observed 99th-percentile bin per window) | 1 | Below 1 with `total_ratio` near 1: peaks flattened into background |
+| `dispersion_slope_median` | Is the dynamic range right? (slope of log prediction on log target) | 1 | Below 1: compressed towards the mean; a pure scale error leaves it at 1 |
+| `contrast_pearson_median` | Are cell-type differences ranked right? ([Cross-track contrast](#cross-track-contrast)) | 1 | Model predicts a shared profile for every cell type |
+| `contrast_sd_ratio_median` | Are cell-type differences the right size? | 1 | Below 1: differences shrunk; a post-hoc stretch by 1/ratio would undo it |
+| `contrast_objective` | Selection objective: `abs_log_ratio - contrast_pearson - w * pearson_bin` | lower | Use as `metric_for_best_model` when contrast families exist |
+| `calibration_shape_objective` | Selection objective without contrast: `abs_log_ratio - w * pearson_bin` | lower | Fallback when tracks carry no `assay_class`/`group` families |
+
+`w` is `trainer.calibration_shape_pearson_weight`. `dispersion_slope_median` adds
+`log_pseudocount` (0.1) to both sides so zero-count bins do not dominate it.
+
+Per-track values behind every median are written to
+`per_track_metrics/validation_step_<step>.csv` after each evaluation, with the track's
+`group` and `assay_class`, so a median can be broken down without adding W&B panels.
+
+When the dataset has a `test` split, the final model (the best checkpoint when
+selection is on) is scored on it once after training. The result goes to
+`training_summary.json` under `test_metrics`, to `per_track_metrics/test.csv`, and to
+the W&B run summary as `test/<metric>` with one `test/per_track_metrics` table. It
+never reaches early stopping or checkpoint selection.
 
 ## Read the output
 

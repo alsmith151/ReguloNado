@@ -174,11 +174,11 @@ class TestComputeMetrics:
         Region-constant signals make region sums exact, and predictions keep each family
         member's centred log signal multiplied by ``compression``.
         """
-        from regulonado.training.losses import contrast_family_weights
+        from regulonado.training.losses import contrast_group_weights
         from transformers import EvalPrediction
 
         B, T, R, region_bins = 6, 4, 16, 4
-        weights = contrast_family_weights(["A", "A", "A", "B"], ["g1", "g2", "g3", "g4"])
+        weights = contrast_group_weights(["A", "A", "A", "B"], ["g1", "g2", "g3", "g4"])
         rng = torch.Generator()
         rng.manual_seed(7)
         log_t = torch.randn(B, T, R, generator=rng) + 6.0
@@ -190,7 +190,7 @@ class TestComputeMetrics:
 
         preprocess = make_preprocess_logits_for_metrics(
             topk_bins=8,
-            contrast_family_weights=weights,
+            contrast_group_weights=weights,
             contrast_region_bins=region_bins,
             contrast_active_fraction=1.0,
         )
@@ -201,13 +201,11 @@ class TestComputeMetrics:
     def test_specificity_perfect_prediction(self):
         m = self._specificity_metrics(compression=1.0)
         assert m["contrast_pearson_median"] == pytest.approx(1.0, abs=1e-4)
-        assert m["contrast_slope_median"] == pytest.approx(1.0, abs=1e-3)
         assert m["contrast_sd_ratio_median"] == pytest.approx(1.0, abs=1e-3)
 
     def test_specificity_compressed_differences_keep_rank_but_shrink_spread(self):
         m = self._specificity_metrics(compression=0.5)
         assert m["contrast_pearson_median"] == pytest.approx(1.0, abs=1e-3)
-        assert m["contrast_slope_median"] == pytest.approx(0.5, abs=0.01)
         assert m["contrast_sd_ratio_median"] == pytest.approx(0.5, abs=0.01)
         assert np.isfinite(m["contrast_objective"])
 
@@ -215,6 +213,68 @@ class TestComputeMetrics:
         metrics = self._run()
         assert np.isnan(metrics["contrast_pearson_median"])
         assert np.isnan(metrics["contrast_objective"])
+
+    @staticmethod
+    def _dispersion_metrics(exponent: float, scale: float) -> dict[str, float]:
+        """Predictions ``scale * target**exponent`` over a wide positive signal range."""
+        from transformers import EvalPrediction
+
+        rng = torch.Generator()
+        rng.manual_seed(3)
+        target = torch.exp(torch.rand(4, 3, 64, generator=rng) * 6.0 + 2.0)
+        pred = scale * target**exponent
+        # A negligible pseudocount isolates the regression from its offset.
+        preprocess = make_preprocess_logits_for_metrics(topk_bins=8, log_pseudocount=1e-6)
+        stats = preprocess(pred, target).numpy()
+        return make_compute_metrics(n_tracks=3)(EvalPrediction(predictions=stats, label_ids=None))
+
+    def test_dispersion_slope_is_one_for_pure_scale_error(self):
+        m = self._dispersion_metrics(exponent=1.0, scale=0.5)
+        assert m["dispersion_slope_median"] == pytest.approx(1.0, abs=1e-3)
+
+    def test_dispersion_slope_below_one_for_compressed_predictions(self):
+        """log(pred) regressed on log(target): halving the log range gives slope 0.5."""
+        m = self._dispersion_metrics(exponent=0.5, scale=1.0)
+        assert m["dispersion_slope_median"] == pytest.approx(0.5, abs=1e-3)
+
+    def test_zero_target_bins_do_not_dominate_dispersion_slope(self):
+        """Exact zeros sit at log(pseudocount), not log(1e-8), so the slope stays near one."""
+        from transformers import EvalPrediction
+
+        rng = torch.Generator()
+        rng.manual_seed(5)
+        target = torch.rand(4, 2, 64, generator=rng) * 10.0
+        target[..., ::2] = 0.0
+        pred = target.clone()
+        pred[..., ::2] = 0.05  # small non-zero background where the target is exactly zero
+        stats = make_preprocess_logits_for_metrics(topk_bins=8)(pred, target).numpy()
+        m = make_compute_metrics(n_tracks=2)(EvalPrediction(predictions=stats, label_ids=None))
+        assert 0.8 < m["dispersion_slope_median"] <= 1.0
+
+    def test_per_track_sink_receives_arrays_behind_medians(self):
+        from transformers import EvalPrediction
+
+        received: dict[str, np.ndarray] = {}
+        logits, labels = _make_batch(B=4, T=5, L=24)
+        stats = make_preprocess_logits_for_metrics(topk_bins=8)(logits, labels).numpy()
+        m = make_compute_metrics(n_tracks=5, per_track_sink=received.update)(
+            EvalPrediction(predictions=stats, label_ids=None)
+        )
+        assert set(received) == {
+            "pearson_bin",
+            "pearson_top8",
+            "pearson_total",
+            "total_ratio",
+            "amplitude_ratio",
+            "dispersion_slope",
+            "contrast_pearson",
+            "contrast_sd_ratio",
+        }
+        assert all(values.shape == (5,) for values in received.values())
+        assert np.median(received["pearson_bin"]) == pytest.approx(m["pearson_bin_median"])
+        assert np.median(received["dispersion_slope"]) == pytest.approx(
+            m["dispersion_slope_median"]
+        )
 
     def test_against_scipy_pearson(self):
         """Sufficient-stats Pearson must match scipy on the same flat data."""
@@ -273,10 +333,10 @@ class TestComputeMetrics:
 class TestContrastLossMetricAgreement:
     @staticmethod
     def _generate(compression: float, region_bins: int, seed: int = 7):
-        from regulonado.training.losses import contrast_family_weights
+        from regulonado.training.losses import contrast_group_weights
 
         B, T, R = 6, 4, 16
-        weights = contrast_family_weights(["A", "A", "A", "B"], ["g1", "g2", "g3", "g4"])
+        weights = contrast_group_weights(["A", "A", "A", "B"], ["g1", "g2", "g3", "g4"])
         rng = torch.Generator()
         rng.manual_seed(seed)
         log_t = torch.randn(B, T, R, generator=rng) + 6.0
@@ -309,7 +369,7 @@ class TestContrastLossMetricAgreement:
 
         preprocess = make_preprocess_logits_for_metrics(
             topk_bins=8,
-            contrast_family_weights=weights,
+            contrast_group_weights=weights,
             contrast_region_bins=region_bins,
             contrast_pseudocount=0.1,
             contrast_active_fraction=active_fraction,

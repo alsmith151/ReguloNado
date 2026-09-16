@@ -27,7 +27,7 @@ from regulonado.tracks_table import write_track_table
 from regulonado.training.config import TrainerConfig
 from regulonado.training.data import stack_batch_tensors
 from regulonado.training.losses import (
-    contrast_family_weights,
+    contrast_group_weights,
     poisson_multinomial_binwise_loss,
     scaled_poisson_multinomial_loss,
     track_contrast_correlation_loss,
@@ -199,12 +199,12 @@ def test_cpu_film_binwise_contrast_forward_backward_is_finite():
         track_condition_ids=torch.tensor([0, 1, 2, 3]),
     )
     targets = torch.rand_like(predictions) * 5
-    weights = contrast_family_weights(
+    weights = contrast_group_weights(
         ["ATAC", "ATAC", "ATAC", "CUT&RUN"],
         ["cell-a", "cell-b", "cell-c", "cell-a"],
     )
-    assert weights.shape == (1, 4)
-    assert weights[:, 3].eq(0).all()
+    assert weights.shape == (1, 3, 4)
+    assert weights[..., 3].eq(0).all()
     loss = poisson_multinomial_binwise_loss(predictions, targets, poisson_weight=0.122)
     loss = loss + 0.5 * track_contrast_correlation_loss(
         predictions,
@@ -564,6 +564,7 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
     (data_dir / "README.md").write_text("# fixture dataset\n")
     _write_parquet_split(data_dir, "train", n_rows=4, context=12, n_tracks=2)
     _write_parquet_split(data_dir, "validation", n_rows=2, context=12, n_tracks=2)
+    _write_parquet_split(data_dir, "test", n_rows=2, context=12, n_tracks=2)
 
     # 'condition' is a label, not an id — categorical ids are derived by sorted
     # factorisation at load time (see tracks_table.to_track_records), which is
@@ -650,6 +651,11 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
     assert summary["history"]["train/loss"]
     assert summary["metadata_path"] == str(enriched_metadata)
     assert (tmp_path / "run" / "training_summary.json").exists()
+    assert "test_pearson_bin_median" in summary["test_metrics"]
+    test_report = (tmp_path / "run" / "per_track_metrics" / "test.csv").read_text().splitlines()
+    assert test_report[0].startswith("track_name,group,assay_class,pearson_bin,")
+    assert len(test_report) == 3
+    assert list((tmp_path / "run" / "per_track_metrics").glob("validation_step_*.csv"))
     assert (tmp_path / "run" / "provenance.json").exists()
     assert (tmp_path / "run" / "resolved_config.json").exists()
     assert (tmp_path / "run" / "config.json").exists()

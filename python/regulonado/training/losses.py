@@ -377,49 +377,46 @@ def paired_binwise_log2fc_loss(
     )
 
 
-def contrast_family_weights(
+def contrast_group_weights(
     families: Sequence[object | None],
     groups: Sequence[object | None],
 ) -> torch.Tensor:
-    """Group-balanced averaging weights ``[F, T]`` for cross-track specificity.
+    """Replicate-averaging weights ``[F, G, T]`` for cross-track specificity.
 
     Tracks sharing a family label (for example ``assay_class``) are compared with one
-    another. Each distinct group (cell type) in a family receives equal total weight,
-    split evenly across its replicate tracks, so heavily replicated cell types do not
-    dominate the family mean. Tracks missing either label are left out, and families with
-    fewer than two groups are omitted because they contain no cross-group contrast.
+    another. ``weights[f, g]`` averages the replicate tracks of family ``f``'s ``g``-th group
+    (cell type), so each group's row sums to one. Families with fewer groups than the
+    largest are padded with all-zero rows. Tracks missing either label are left out, and
+    families with fewer than two groups are omitted because they contain no cross-group
+    contrast.
     """
     if len(families) != len(groups):
         raise ValueError(
             f"families and groups need one label per track, got {len(families)} and {len(groups)}"
         )
     n_tracks = len(families)
-    members_by_family: dict[str, list[tuple[int, str]]] = {}
+    members_by_family: dict[str, dict[str, list[int]]] = {}
     for index, (family, group) in enumerate(zip(families, groups)):
         if family is not None and group is not None:
-            members_by_family.setdefault(str(family), []).append((index, str(group)))
+            by_group = members_by_family.setdefault(str(family), {})
+            by_group.setdefault(str(group), []).append(index)
 
-    rows: list[torch.Tensor] = []
-    for family in sorted(members_by_family):
-        members = members_by_family[family]
-        group_sizes: dict[str, int] = {}
-        for _, group in members:
-            group_sizes[group] = group_sizes.get(group, 0) + 1
-        if len(group_sizes) < 2:
-            continue
-        row = torch.zeros(n_tracks, dtype=torch.float32)
-        for index, group in members:
-            row[index] = 1.0 / (len(group_sizes) * group_sizes[group])
-        rows.append(row)
-    if not rows:
-        return torch.zeros((0, n_tracks), dtype=torch.float32)
-    return torch.stack(rows)
+    families_with_contrast = [
+        by_group for _, by_group in sorted(members_by_family.items()) if len(by_group) >= 2
+    ]
+    n_groups = max((len(by_group) for by_group in families_with_contrast), default=0)
+    weights = torch.zeros((len(families_with_contrast), n_groups, n_tracks), dtype=torch.float32)
+    for f, by_group in enumerate(families_with_contrast):
+        for g, group in enumerate(sorted(by_group)):
+            indices = by_group[group]
+            weights[f, g, indices] = 1.0 / len(indices)
+    return weights
 
 
 def specificity_stats(
     p: torch.Tensor,
     t: torch.Tensor,
-    family_weights: torch.Tensor | None,
+    group_weights: torch.Tensor | None,
     *,
     region_bins: int,
     pseudocount: float,
@@ -429,13 +426,16 @@ def specificity_stats(
 
     Specificity is a track's log region signal minus the group-balanced family mean,
     ``c_t = log(y_t + ps) - Σ_s w_s log(y_s + ps)``. Stats cover the most active
-    ``active_fraction`` of regions per example (by observed family mean signal) and stay
-    zero for tracks outside every contrast family. Differentiable w.r.t. ``p``.
+    ``active_fraction`` of regions per example, ranked by the strongest group's
+    replicate-mean observed signal: a region open in one cell type ranks with the shared
+    peaks rather than at 1/n_groups of its signal. Tracks outside every contrast family
+    stay zero. ``group_weights`` comes from :func:`contrast_group_weights`.
+    Differentiable w.r.t. ``p``.
     """
     batch, n_tracks, length = p.shape
     stats = torch.zeros((batch, n_tracks, 6), dtype=torch.float32, device=p.device)
     n_regions = length // region_bins
-    if family_weights is None or family_weights.shape[0] == 0 or n_regions == 0:
+    if group_weights is None or group_weights.shape[0] == 0 or n_regions == 0:
         return stats
     usable = n_regions * region_bins
     region_p = p.float()[..., :usable].reshape(batch, n_tracks, n_regions, region_bins).sum(-1)
@@ -444,18 +444,21 @@ def specificity_stats(
     log_p = torch.log(region_p.clamp_min(0.0) + offset)
     log_t = torch.log(region_t.clamp_min(0.0) + offset)
     n_active = max(1, int(round(active_fraction * n_regions)))
-    for row in family_weights.to(device=p.device, dtype=torch.float32):
-        members = row > 0
-        member_weights = row[members]
+    for family in group_weights.to(device=p.device, dtype=torch.float32):
+        family = family[family.sum(-1) > 0]  # drop padding rows -> [G, T]
+        members = family.sum(0) > 0
+        family = family[:, members]  # [G, M]
+        member_weights = family.sum(0) / family.shape[0]  # each group 1/G, split over replicates
         member_log_p = log_p[:, members]
         member_log_t = log_t[:, members]
         centred_p = member_log_p - torch.einsum("t,btr->br", member_weights, member_log_p)[:, None]
         centred_t = member_log_t - torch.einsum("t,btr->br", member_weights, member_log_t)[:, None]
-        family_signal = torch.einsum(
-            "t,btr->br", member_weights, region_t[:, members].clamp_min(0.0)
-        )
-        threshold = family_signal.topk(n_active, dim=-1).values[:, -1:]
-        active = ((family_signal >= threshold) & (family_signal > 0)).to(torch.float32)[:, None]
+        group_signal = torch.einsum("gt,btr->bgr", family, region_t[:, members].clamp_min(0.0))
+        strongest_group_signal = group_signal.max(dim=1).values  # [B, R]
+        threshold = strongest_group_signal.topk(n_active, dim=-1).values[:, -1:]
+        active = ((strongest_group_signal >= threshold) & (strongest_group_signal > 0)).to(
+            torch.float32
+        )[:, None]
         stats[:, members] = torch.stack(
             [
                 (centred_p * active).sum(-1),
@@ -491,7 +494,7 @@ def _pearson_from_stats_torch(stats: torch.Tensor) -> tuple[torch.Tensor, torch.
 def track_contrast_correlation_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
-    family_weights: torch.Tensor,
+    group_weights: torch.Tensor,
     *,
     region_bins: int = 16,
     pseudocount: float = 0.1,
@@ -506,12 +509,12 @@ def track_contrast_correlation_loss(
     metric reports ``median``.
     """
     n_regions = target.shape[-1] // region_bins
-    if family_weights.shape[0] == 0 or n_regions == 0:
+    if group_weights.shape[0] == 0 or n_regions == 0:
         return pred.sum() * 0.0
     stats = specificity_stats(
         pred,
         target,
-        family_weights,
+        group_weights,
         region_bins=region_bins,
         pseudocount=pseudocount,
         active_fraction=active_fraction,

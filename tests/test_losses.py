@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 import torch
 from regulonado.training.losses import (
-    contrast_family_weights,
+    contrast_group_weights,
     kendall_track_weighted_loss,
     log1p_huber_loss,
     paired_binwise_log2fc_loss,
@@ -337,22 +337,35 @@ def test_paired_log2fc_perfect_pred_near_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
-# contrast_family_weights / track_contrast_correlation_loss
+# contrast_group_weights / track_contrast_correlation_loss
 # ---------------------------------------------------------------------------
 
 
-def test_contrast_family_weights_balance_groups_and_drop_single_group_families() -> None:
-    weights = contrast_family_weights(["A", "A", "A", "B", None], ["x", "x", "y", "z", "w"])
-    assert weights.shape == (1, 5)
-    torch.testing.assert_close(weights[0], torch.tensor([0.25, 0.25, 0.5, 0.0, 0.0]))
+def test_contrast_group_weights_average_replicates_and_drop_single_group_families() -> None:
+    weights = contrast_group_weights(["A", "A", "A", "B", None], ["x", "x", "y", "z", "w"])
+    assert weights.shape == (1, 2, 5)
+    torch.testing.assert_close(weights[0, 0], torch.tensor([0.5, 0.5, 0.0, 0.0, 0.0]))
+    torch.testing.assert_close(weights[0, 1], torch.tensor([0.0, 0.0, 1.0, 0.0, 0.0]))
 
 
-def test_contrast_family_weights_empty_without_contrast() -> None:
-    assert contrast_family_weights([None, None], ["x", "y"]).shape == (0, 2)
+def test_contrast_group_weights_pad_smaller_families() -> None:
+    weights = contrast_group_weights(["A", "A", "A", "B", "B"], ["x", "y", "z", "x", "y"])
+    assert weights.shape == (2, 3, 5)
+    assert weights[1, 2].eq(0).all()
+
+
+def test_contrast_group_weights_empty_without_contrast() -> None:
+    assert contrast_group_weights([None, None], ["x", "y"]).shape == (0, 0, 2)
 
 
 def _contrast_weights() -> torch.Tensor:
-    return contrast_family_weights(["A", "A", "A", "A"], ["g1", "g2", "g3", "g3"])
+    return contrast_group_weights(["A", "A", "A", "A"], ["g1", "g2", "g3", "g3"])
+
+
+def _family_mean_weights() -> torch.Tensor:
+    """Group-balanced family-mean weights ``[T]`` for the single ``_contrast_weights`` family."""
+    groups = _contrast_weights()[0]
+    return groups.sum(0) / groups.shape[0]
 
 
 def _region_expand(region_values: torch.Tensor, region_bins: int) -> torch.Tensor:
@@ -370,7 +383,7 @@ def _log_linear_batch(
     The offset is negligible at this magnitude, so the log-linear relationship built here
     survives the implementation's own log/exp round trip almost exactly."""
     torch.manual_seed(seed)
-    weights = _contrast_weights()[0]
+    weights = _family_mean_weights()
     offset = pseudocount * region_bins
     t_values = torch.rand(n_batches, T) * 50 + 50
     log_t = torch.log(t_values + offset)
@@ -437,7 +450,7 @@ def test_track_contrast_correlation_gradient_finite_and_nonzero() -> None:
 def test_track_contrast_correlation_without_families_is_zero_with_gradient() -> None:
     pred = _rand_pos(B, T, L)
     tgt = _rand_pos(B, T, L)
-    loss = track_contrast_correlation_loss(pred, tgt, torch.zeros(0, T), region_bins=8)
+    loss = track_contrast_correlation_loss(pred, tgt, torch.zeros(0, 0, T), region_bins=8)
     loss.backward()
     assert loss.item() == pytest.approx(0.0)
     assert pred.grad is not None
@@ -461,9 +474,8 @@ def test_specificity_stats_active_selection_uses_observed_signal_only() -> None:
         n_regions = scrambled.shape[-1] // region_bins
         usable_t = tgt.detach()[..., : n_regions * region_bins]
         region_t = usable_t.reshape(B, T, n_regions, region_bins).sum(-1)
-        row = weights[0]
-        members = row > 0
-        family_signal = torch.einsum("t,btr->br", row[members], region_t[:, members].clamp_min(0.0))
+        group_signal = torch.einsum("gt,btr->bgr", weights[0], region_t.clamp_min(0.0))
+        family_signal = group_signal.max(dim=1).values
         n_active = max(1, round(0.25 * n_regions))
         threshold = family_signal.topk(n_active, dim=-1).values[:, -1:]
         active = (family_signal >= threshold) & (family_signal > 0)
@@ -474,3 +486,23 @@ def test_specificity_stats_active_selection_uses_observed_signal_only() -> None:
 
     scrambled_stats = specificity_stats(scrambled, tgt, weights, **kwargs)
     torch.testing.assert_close(baseline, scrambled_stats)
+
+
+def test_specificity_stats_ranks_regions_by_strongest_group() -> None:
+    """A region open in one cell type outranks a shared peak with a higher family mean."""
+    region_bins, n_groups = 4, 4
+    weights = contrast_group_weights(["A"] * n_groups, [f"g{i}" for i in range(n_groups)])
+    # Columns are regions. Region 0: shared peak, 10 in every group (mean 10, max 10).
+    # Region 1: specific to g0, 30 there and 0 elsewhere (mean 7.5, max 30).
+    # Region 2: background, 1 everywhere.
+    region_t = torch.tensor(
+        [[10.0, 30.0, 1.0], [10.0, 0.0, 1.0], [10.0, 0.0, 1.0], [10.0, 0.0, 1.0]]
+    )
+    target = _region_expand(region_t[None], region_bins).reshape(1, n_groups, -1)
+    stats = specificity_stats(
+        target, target, weights, region_bins=region_bins, pseudocount=0.1, active_fraction=1 / 3
+    )
+    # One active region, and it is the specific one: g0 sits above the family mean.
+    assert stats[0, :, 5].eq(1.0).all()
+    assert stats[0, 0, 1] > 0
+    assert (stats[0, 1:, 1] < 0).all()
