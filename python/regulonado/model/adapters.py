@@ -67,7 +67,6 @@ def _require_pretrained_or_explicit_random(spec: BackboneSpec, example: str) -> 
         )
 
 
-
 class Borzoi(_Borzoi):
     """Thin subclass that adapts upstream Borzoi to transformers v5 weight loading.
 
@@ -89,6 +88,12 @@ class Borzoi(_Borzoi):
     (``is_remote_code`` in 5.12, ``is_custom_code`` by 5.17). Passing it by keyword
     raised ``TypeError`` on 5.17, and falling back to the flagless call re-initialised
     ~100 loaded tensors — NaN at the first flash-attention block.
+
+    ``from_pretrained`` also replaces non-persistent buffers with uninitialised memory
+    and relies on ``_init_weights`` to refill them. flash_attn's ``RotaryEmbedding``
+    keeps ``inv_freq`` that way (it is not in the checkpoint) and upstream
+    ``_init_weights`` ignores it, leaving garbage rotary frequencies — NaN out of
+    ``rotary_emb`` in every FlashZoi forward. ``_init_weights`` recomputes them.
     """
 
     def __init__(self, config):
@@ -97,6 +102,17 @@ class Borzoi(_Borzoi):
 
     def _initialize_weights(self, module, _is_custom_code: bool = True):
         return super()._initialize_weights(module, True)
+
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        if hasattr(module, "_compute_inv_freq") and isinstance(
+            getattr(module, "inv_freq", None), torch.Tensor
+        ):
+            with torch.no_grad():
+                module.inv_freq.copy_(module._compute_inv_freq(device=module.inv_freq.device))
+            # Drop any cos/sin tables built from the uninitialised frequencies.
+            module._seq_len_cached = 0
+            module._cos_cached = None
 
 
 class BaseBackboneAdapter(nn.Module):

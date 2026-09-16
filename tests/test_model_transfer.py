@@ -396,6 +396,54 @@ def test_flashed_borzoi_trains_in_float32_under_bf16_autocast():
     assert not torch.equal(layer_norm.weight.detach(), before)
 
 
+class _StubRotaryEmbedding(nn.Module):
+    """flash_attn RotaryEmbedding's buffer layout: inv_freq is non-persistent."""
+
+    def __init__(self, dim: int = 8, base: float = 20000.0):
+        super().__init__()
+        self.dim, self.base = dim, base
+        self.register_buffer("inv_freq", self._compute_inv_freq(), persistent=False)
+        self._seq_len_cached = 0
+        self._cos_cached = None
+
+    def _compute_inv_freq(self, device=None):
+        return 1.0 / (
+            self.base
+            ** (torch.arange(0, self.dim, 2, device=device, dtype=torch.float32) / self.dim)
+        )
+
+
+def test_borzoi_init_weights_recomputes_rotary_frequencies():
+    # from_pretrained swaps non-persistent buffers for uninitialised memory and relies
+    # on _init_weights to refill them; garbage inv_freq gave NaN out of rotary_emb.
+    from regulonado.model.adapters import Borzoi
+
+    rotary = _StubRotaryEmbedding()
+    expected = rotary.inv_freq.clone()
+    rotary.inv_freq.fill_(float("nan"))
+    rotary._seq_len_cached, rotary._cos_cached = 4, torch.zeros(1)
+
+    Borzoi._init_weights(Borzoi.__new__(Borzoi), rotary)
+
+    assert torch.equal(rotary.inv_freq, expected)
+    assert rotary._seq_len_cached == 0 and rotary._cos_cached is None
+
+
+def test_flashed_borzoi_from_pretrained_restores_rotary_frequencies(tmp_path):
+    pytest.importorskip("flash_attn")
+    from borzoi_pytorch.config_borzoi import BorzoiConfig
+    from flash_attn.layers.rotary import RotaryEmbedding
+    from regulonado.model.adapters import Borzoi
+
+    Borzoi(BorzoiConfig(depth=1, flashed=True, bins_to_return=1024)).save_pretrained(tmp_path)
+    loaded = Borzoi.from_pretrained(tmp_path)
+
+    rotaries = [module for module in loaded.modules() if isinstance(module, RotaryEmbedding)]
+    assert rotaries
+    for rotary in rotaries:
+        assert torch.equal(rotary.inv_freq, rotary._compute_inv_freq(device=rotary.inv_freq.device))
+
+
 def test_enformer_adapter_transposes_sequence_axes():
     adapter = EnformerBackboneAdapter(DummyEnformerModule())
     features = adapter.forward_features(torch.randn(2, 4, 16))
