@@ -523,3 +523,26 @@ class TestBuildTrainingSummary:
 
         written = json.loads((tmp_path / "training_summary.json").read_text())
         assert written == summary
+
+
+@pytest.mark.parametrize(("saved_log_var", "target_log_var"), [(True, False), (False, True)])
+def test_warm_start_tolerates_learned_track_weight_mismatch(
+    tmp_path, saved_log_var: bool, target_log_var: bool
+) -> None:
+    from safetensors.torch import save_file
+
+    from regulonado.training.runner import load_model_weights_only
+
+    source = torch.nn.Linear(2, 2)
+    if saved_log_var:
+        source.track_loss_log_var = torch.nn.Parameter(torch.full((2,), 0.5))
+    save_file(dict(source.state_dict()), str(tmp_path / "model.safetensors"))
+
+    target = torch.nn.Linear(2, 2)
+    if target_log_var:
+        target.track_loss_log_var = torch.nn.Parameter(torch.zeros(2))
+    load_model_weights_only(target, tmp_path)
+
+    torch.testing.assert_close(target.weight, source.weight)
+    if target_log_var:
+        torch.testing.assert_close(target.track_loss_log_var, torch.zeros(2))

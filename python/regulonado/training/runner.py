@@ -139,6 +139,11 @@ def load_model_weights_only(model: torch.nn.Module, checkpoint: str | Path) -> N
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     # num_batches_tracked are non-trainable BatchNorm counters; safe to ignore.
     unexpected = [k for k in unexpected if not k.endswith("num_batches_tracked")]
+    # track_loss_log_var is loss state registered only when loss.learn_track_weights is
+    # set, so phases may legitimately differ: a fresh one starts at zero, a stale one is
+    # dropped.
+    missing = [k for k in missing if k != "track_loss_log_var"]
+    unexpected = [k for k in unexpected if k != "track_loss_log_var"]
     if unexpected:
         raise RuntimeError(f"Unexpected checkpoint keys when warm-starting: {unexpected[:10]}")
     if missing:
