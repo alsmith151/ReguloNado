@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from regulonado.dataset.build import _COMPLEMENT, make_transform
 from regulonado.model import RegulonadoModel, one_hot_sequence_tokens
-from regulonado.model.heads import TransferMLPPerturbHead
+from regulonado.model.heads import TransferMLPHead
 
 
 def _one_hot_np(tokens: np.ndarray) -> np.ndarray:
@@ -141,7 +141,7 @@ class TestRegulonadoModelUint8Input:
     def test_uint8_tokens_and_float_one_hot_give_the_same_output(self) -> None:
         model = RegulonadoModel(
             backbone=_DummyAdapter(),
-            head=TransferMLPPerturbHead(in_ch=4, hidden=4, n_tracks=2),
+            head=TransferMLPHead(in_ch=4, hidden=4, n_tracks=2),
         )
         model.eval()
         tokens = torch.tensor([[0, 1, 2, 3, 4]], dtype=torch.uint8)

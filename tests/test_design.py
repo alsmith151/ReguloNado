@@ -567,7 +567,7 @@ def test_adalead_seeded_from_endogenous_sequence_and_correct_length():
 
 def _make_checkpoint(tmp_path, name, *, n_pred_bins=N_PRED_BINS):
     from regulonado.model import RegulonadoConfig as ModelConfig
-    from regulonado.model import RegulonadoModel, TransferMLPPerturbHead
+    from regulonado.model import RegulonadoModel, TransferMLPHead
 
     config = ModelConfig(
         backbone_type="tiny",
@@ -582,7 +582,7 @@ def _make_checkpoint(tmp_path, name, *, n_pred_bins=N_PRED_BINS):
         track_names=["alpha", "beta"],
     )
     model = RegulonadoModel(
-        config, backbone=_TinyBackbone(), head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2)
+        config, backbone=_TinyBackbone(), head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2)
     )
     out_dir = tmp_path / name
     model.save_pretrained(out_dir, safe_serialization=True)

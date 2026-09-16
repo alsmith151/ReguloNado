@@ -6,7 +6,7 @@ from typing import Literal
 import torch
 import torch.nn as nn
 
-HeadType = Literal["bias", "film", "log_film", "residual_film", "transfer_mlp"]
+HeadType = Literal["bias", "film", "hidden_film", "residual_film", "transfer_mlp"]
 ActivationType = Literal["softplus", "softplus_beta2", "exp", "identity"]
 
 _CONDITION_COLLAPSE_IGNORED_FIELDS = {
@@ -356,8 +356,8 @@ class TrackMetadataEncoder(nn.Module):
         return encoded_metadata.to(dtype=dtype)
 
 
-class _PerturbHeadBase(nn.Module):
-    """Base class for perturbation prediction heads.
+class _MetadataHeadBase(nn.Module):
+    """Base class for metadata-conditioned track prediction heads.
 
     Common initialization for all head variants. Subclasses override ``forward``
     to apply different modulation strategies (bias offset, FiLM, residual, MLP).
@@ -382,7 +382,7 @@ class _PerturbHeadBase(nn.Module):
         output_bias_init: float | Sequence[float] | None = None,
         zero_output_weights: bool = False,
     ):
-        """Initialize the perturbation head base.
+        """Initialize the metadata-conditioned head base.
 
         Parameters
         ----------
@@ -496,9 +496,8 @@ class _PerturbHeadBase(nn.Module):
         return self.metadata_encoder(device=device, dtype=dtype, **metadata_ids)
 
 
-class PerturbHead(_PerturbHeadBase):
-    """Simple perturbation head: projects to logits and optionally adds
-    metadata-derived bias.
+class MetadataBiasHead(_MetadataHeadBase):
+    """Projects to per-track logits and optionally adds a metadata-derived bias.
 
     When metadata is disabled, this head reduces to a pure projection. When
     enabled, each track receives a scalar bias term conditioned on its metadata
@@ -623,10 +622,10 @@ class PerturbHead(_PerturbHeadBase):
         return self.activation(logits)
 
 
-class FiLMPerturbHead(_PerturbHeadBase):
-    """FiLM-modulated perturbation head: applies feature-wise affine transform.
+class FiLMHead(_MetadataHeadBase):
+    """Applies a metadata-derived affine transform (FiLM) to per-track logits.
 
-    When metadata is disabled, identical to PerturbHead. When enabled, applies
+    When metadata is disabled, identical to MetadataBiasHead. When enabled, applies
     metadata-derived scale (multiplicative) and shift (additive) to the logits
     before activation: ``output = activation(logits * scale + shift)``.
 
@@ -756,7 +755,7 @@ class FiLMPerturbHead(_PerturbHeadBase):
         return self.activation(logits)
 
 
-class LogFiLMPerturbHead(_PerturbHeadBase):
+class HiddenFiLMHead(_MetadataHeadBase):
     """FiLM modulation in log space: scales hidden features before projection.
 
     More expressive than FiLM on logits. Metadata-derived scaling factors (in
@@ -900,13 +899,13 @@ class LogFiLMPerturbHead(_PerturbHeadBase):
         return self.activation(logits)
 
 
-class ResidualFiLMPerturbHead(_PerturbHeadBase):
+class ResidualFiLMHead(_MetadataHeadBase):
     """Residual FiLM with refinement: log-space scaling plus learned refinement.
 
     Combines log-space per-track scaling with residual connections and
     depth-wise separable convolutions for local context refinement. This is
     the most expressive head variant, allowing per-track and per-position
-    modulation followed by learned perturbation-specific filtering.
+    modulation followed by learned condition-specific filtering.
 
     Parameters
     ----------
@@ -1080,7 +1079,7 @@ class ResidualFiLMPerturbHead(_PerturbHeadBase):
         return self.activation(logits)
 
 
-class TransferMLPPerturbHead(nn.Module):
+class TransferMLPHead(nn.Module):
     """Simple MLP projection head: no metadata or FiLM modulation.
 
     Pure feed-forward network with two hidden layers and gating. Does not
@@ -1178,7 +1177,7 @@ def build_transfer_learning_head(
     Parameters
     ----------
     head_type : HeadType
-        Type of head to build: "bias", "film", "log_film", "residual_film",
+        Type of head to build: "bias", "film", "hidden_film", "residual_film",
         or "transfer_mlp".
     activation_type : ActivationType, optional
         Output activation function, by default "softplus".
@@ -1207,11 +1206,11 @@ def build_transfer_learning_head(
     ... )  # doctest: +SKIP
     """
     constructors: dict[HeadType, type[nn.Module]] = {
-        "bias": PerturbHead,
-        "film": FiLMPerturbHead,
-        "log_film": LogFiLMPerturbHead,
-        "residual_film": ResidualFiLMPerturbHead,
-        "transfer_mlp": TransferMLPPerturbHead,
+        "bias": MetadataBiasHead,
+        "film": FiLMHead,
+        "hidden_film": HiddenFiLMHead,
+        "residual_film": ResidualFiLMHead,
+        "transfer_mlp": TransferMLPHead,
     }
     try:
         constructor = constructors[head_type]

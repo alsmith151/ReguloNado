@@ -529,9 +529,8 @@ class TestBuildTrainingSummary:
 def test_warm_start_tolerates_learned_track_weight_mismatch(
     tmp_path, saved_log_var: bool, target_log_var: bool
 ) -> None:
-    from safetensors.torch import save_file
-
     from regulonado.training.runner import load_model_weights_only
+    from safetensors.torch import save_file
 
     source = torch.nn.Linear(2, 2)
     if saved_log_var:

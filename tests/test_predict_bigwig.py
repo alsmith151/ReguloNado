@@ -23,7 +23,7 @@ from regulonado.inference import (
     model_track_metadata,
     resolve_tracks,
 )
-from regulonado.model import RegulonadoConfig, RegulonadoModel, TransferMLPPerturbHead
+from regulonado.model import RegulonadoConfig, RegulonadoModel, TransferMLPHead
 
 # Small geometry for fast tests: 4 bins of 10 bp => 40 bp prediction window,
 # context 100 bp.
@@ -248,7 +248,7 @@ def test_load_model_for_inference_prefers_hf_model_dir(tmp_path, monkeypatch):
     model = RegulonadoModel(
         config,
         backbone=TinyBackbone(),
-        head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
     )
     model.save_pretrained(tmp_path, safe_serialization=True)
 
@@ -315,7 +315,7 @@ def test_load_model_for_inference_legacy_run_root_returns_regulonado_model(
             n_tracks=2,
         ),
         backbone=TinyBackbone(),
-        head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
     )
     model.save_pretrained(checkpoint, safe_serialization=True)
 
@@ -336,7 +336,7 @@ def test_model_track_metadata_from_config_uses_prediction_tensors():
             }
         ),
         backbone=TinyBackbone(),
-        head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
     )
 
     metadata = model_track_metadata(model, "cpu")

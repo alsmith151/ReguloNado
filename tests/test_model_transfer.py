@@ -15,12 +15,12 @@ from regulonado.metrics import (
 from regulonado.model import (
     BorzoiBackboneAdapter,
     EnformerBackboneAdapter,
-    FiLMPerturbHead,
+    FiLMHead,
     FreezePolicy,
     RegulonadoConfig,
     RegulonadoModel,
-    ResidualFiLMPerturbHead,
-    TransferMLPPerturbHead,
+    ResidualFiLMHead,
+    TransferMLPHead,
     build_condition_shared_track_index,
 )
 from regulonado.tracks_table import write_track_table
@@ -167,7 +167,7 @@ def test_shared_channel_identity_ignores_per_track_technical_fields():
 
 
 def test_film_head_accepts_optional_metadata():
-    head = FiLMPerturbHead(
+    head = FiLMHead(
         in_ch=8,
         hidden=4,
         n_tracks=3,
@@ -181,15 +181,15 @@ def test_film_head_accepts_optional_metadata():
 
 
 def test_residual_and_transfer_heads_produce_expected_shapes():
-    residual_head = ResidualFiLMPerturbHead(in_ch=8, hidden=8, n_tracks=2)
-    transfer_head = TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2, mlp_hidden=6)
+    residual_head = ResidualFiLMHead(in_ch=8, hidden=8, n_tracks=2)
+    transfer_head = TransferMLPHead(in_ch=8, hidden=4, n_tracks=2, mlp_hidden=6)
     inputs = torch.randn(2, 8, 12)
     assert residual_head(inputs).shape == (2, 2, 12)
     assert transfer_head(inputs).shape == (2, 2, 12)
 
 
 def test_transfer_head_accepts_per_track_output_bias_initialization():
-    head = TransferMLPPerturbHead(
+    head = TransferMLPHead(
         in_ch=8,
         hidden=4,
         n_tracks=2,
@@ -202,7 +202,7 @@ def test_transfer_head_accepts_per_track_output_bias_initialization():
 def test_transfer_head_can_start_as_empirical_mean_constant():
     means = torch.tensor([0.25, 1.5])
     bias = torch.log(torch.expm1(means))
-    head = TransferMLPPerturbHead(
+    head = TransferMLPHead(
         in_ch=8,
         hidden=4,
         n_tracks=2,
@@ -217,7 +217,7 @@ def test_transfer_head_can_start_as_empirical_mean_constant():
 def test_freeze_policy_unfreezes_last_block_only():
     backbone = DummyBackbone()
     model = RegulonadoModel(
-        backbone=backbone, head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2)
+        backbone=backbone, head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2)
     )
     model.apply_freeze_policy(
         FreezePolicy(freeze_backbone=True, unfreeze_backbone_stages_from_output_end=1)
@@ -275,7 +275,7 @@ def test_borzoi_adapter_stages_include_unet_upsampling_path():
 def test_freeze_policy_unfreezes_unet_stages_between_transformer_and_output():
     model = RegulonadoModel(
         backbone=BorzoiBackboneAdapter(DummyBorzoiUNetModule()),
-        head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
     )
     model.apply_freeze_policy(
         FreezePolicy(freeze_backbone=True, unfreeze_backbone_stages_from_output_end=4)
@@ -305,7 +305,7 @@ def test_train_mode_keeps_frozen_backbone_batchnorm_statistics_fixed():
     module.final_joined_convs = nn.Sequential(nn.Conv1d(8, 8, 1), nn.BatchNorm1d(8))
     model = RegulonadoModel(
         backbone=BorzoiBackboneAdapter(module),
-        head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
     )
     model.apply_freeze_policy(
         FreezePolicy(freeze_backbone=True, unfreeze_backbone_stages_from_output_end=1)
@@ -327,7 +327,6 @@ def test_train_mode_keeps_frozen_backbone_batchnorm_statistics_fixed():
 def test_flashed_borzoi_trains_in_float32_under_bf16_autocast():
     pytest.importorskip("flash_attn")
     from borzoi_pytorch.config_borzoi import BorzoiConfig
-
     from regulonado.model.adapters import Borzoi
 
     torch.manual_seed(0)
@@ -392,7 +391,7 @@ def test_scaled_poisson_multinomial_loss_is_finite():
 def test_optimizer_excludes_bias_and_norm_from_weight_decay():
     model = RegulonadoModel(
         backbone=DummyBackbone(),
-        head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
     )
     cfg = TrainerConfig(learning_rate=1e-3, backbone_learning_rate=1e-4, weight_decay=0.1)
     optimizer = _build_optimizer(model, cfg)
@@ -418,7 +417,7 @@ def test_regulonado_model_save_pretrained_roundtrip(tmp_path, monkeypatch):
     model = RegulonadoModel(
         config,
         backbone=DummyBackbone(),
-        head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
     )
     model.save_pretrained(tmp_path, safe_serialization=True)
 
@@ -575,7 +574,7 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
     assert saved_config.condition_source == "group"
 
 
-@pytest.mark.parametrize("head_type", ["transfer_mlp", "film", "log_film", "bias"])
+@pytest.mark.parametrize("head_type", ["transfer_mlp", "film", "hidden_film", "bias"])
 def test_model_construction_keeps_head_output_initialisation(head_type: str) -> None:
     config = RegulonadoConfig(
         feature_dim=8,
@@ -594,7 +593,7 @@ def test_model_construction_keeps_head_output_initialisation(head_type: str) -> 
 
 
 def test_shared_base_channels_average_member_track_output_bias() -> None:
-    head = FiLMPerturbHead(
+    head = FiLMHead(
         in_ch=8,
         hidden=4,
         n_tracks=3,
@@ -626,7 +625,7 @@ def test_lr_log_labels_groups_by_parameter_family_not_position():
 
     model = RegulonadoModel(
         backbone=DummyBackbone(),
-        head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
     )
     # Frozen backbone: only head groups exist, which positional labels called "backbone".
     for parameter in model.backbone.parameters():
