@@ -1169,7 +1169,10 @@ def _build_training_arguments(
         save_steps=save_steps if save_strategy == "steps" else None,
         save_total_limit=2 if save_strategy == "steps" else None,
         gradient_checkpointing=False,
-        ddp_find_unused_parameters=False,
+        # Metadata heads build submodules (timepoint MLP, per-field embeddings) that only
+        # run when the dataset carries that field, so some trainable parameters get no
+        # gradient; DDP must detect them rather than wait for their reduction.
+        ddp_find_unused_parameters=True,
         remove_unused_columns=False,
         label_names=["labels"],
         report_to=trainer_cfg.report_to,
