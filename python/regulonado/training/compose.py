@@ -35,6 +35,17 @@ def _validate_training_config(config: DictConfig) -> None:
         # be converted to the declared type (for example batch_size=oops).
         validated = OmegaConf.merge(OmegaConf.structured(schema), config[section])
         OmegaConf.to_object(validated)
+    # With evaluation and checkpoints both enabled the trainer loads the best model at the
+    # end, which transformers only allows when checkpoints land on evaluation steps.
+    # Otherwise this surfaces as a ValueError after a GPU job has already started.
+    eval_steps = config.trainer.get("eval_every_n_steps")
+    checkpoint_steps = config.trainer.get("checkpoint_every_n_steps")
+    if eval_steps and checkpoint_steps and checkpoint_steps % eval_steps != 0:
+        raise ValueError(
+            f"trainer.checkpoint_every_n_steps ({checkpoint_steps}) must be a multiple of "
+            f"trainer.eval_every_n_steps ({eval_steps}); the best model can only be "
+            "restored from a checkpoint saved at an evaluation step"
+        )
 
 
 def resolved_training_config(preset: str, overrides: list[str]) -> str:

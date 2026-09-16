@@ -22,9 +22,9 @@ CONFIG_SPEC.loader.exec_module(CONFIG_MODULE)
 TrainerConfig = CONFIG_MODULE.TrainerConfig
 PRESETS = {
     "head_only": (0, "poisson_multinomial"),
-    "unfreeze_output": (2, "poisson_multinomial"),
-    "deep_finetune": (4, "poisson_multinomial"),
-    "peak_finetune": (2, "topk_additive"),
+    "unfreeze_output": (4, "poisson_multinomial"),
+    "deep_finetune": (6, "poisson_multinomial"),
+    "peak_finetune": (4, "topk_additive"),
 }
 
 
@@ -164,3 +164,23 @@ def test_run_training_rejects_unknown_trainer_setting_before_dataset_io() -> Non
     }
     with pytest.raises(ValueError, match="Invalid trainer configuration"):
         run_training(config)
+
+
+@pytest.mark.parametrize(
+    ("eval_steps", "checkpoint_steps", "valid"), [(150, 500, False), (250, 500, True)]
+)
+def test_checkpoint_steps_must_land_on_eval_steps(
+    eval_steps: int, checkpoint_steps: int, valid: bool
+) -> None:
+    from regulonado.training.compose import resolved_training_config
+
+    overrides = [
+        "data.path=/dataset",
+        f"trainer.eval_every_n_steps={eval_steps}",
+        f"trainer.checkpoint_every_n_steps={checkpoint_steps}",
+    ]
+    if valid:
+        resolved_training_config("head_only", overrides)
+    else:
+        with pytest.raises(ValueError, match="must be a multiple of"):
+            resolved_training_config("head_only", overrides)

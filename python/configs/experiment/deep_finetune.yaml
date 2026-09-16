@@ -30,7 +30,8 @@ trainer:
   log_every_n_steps: 10
   evals_per_epoch: 4
   freeze_backbone: true
-  unfreeze_backbone_stages_from_output_end: 4
+  # transformer.5-7 + unet1 + unet0 + final_joined_convs
+  unfreeze_backbone_stages_from_output_end: 6
   report_to: [wandb]
   metric_for_best_model: pearson_bin_median
   greater_is_better: true
