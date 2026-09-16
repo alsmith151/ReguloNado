@@ -299,6 +299,30 @@ def test_freeze_policy_unfreezes_unet_stages_between_transformer_and_output():
     assert not model.backbone.model.transformer[0].weight.requires_grad
 
 
+def test_train_mode_keeps_frozen_backbone_batchnorm_statistics_fixed():
+    module = DummyBorzoiUNetModule()
+    module.transformer[0] = nn.BatchNorm1d(8)
+    module.final_joined_convs = nn.Sequential(nn.Conv1d(8, 8, 1), nn.BatchNorm1d(8))
+    model = RegulonadoModel(
+        backbone=BorzoiBackboneAdapter(module),
+        head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
+    )
+    model.apply_freeze_policy(
+        FreezePolicy(freeze_backbone=True, unfreeze_backbone_stages_from_output_end=1)
+    )
+    frozen_norm = module.transformer[0]
+    trainable_norm = module.final_joined_convs[1]
+    running_mean = frozen_norm.running_mean.clone()
+
+    model.train()
+    frozen_norm(torch.randn(4, 8, 12) + 5.0)
+
+    assert not frozen_norm.training
+    assert trainable_norm.training
+    assert model.head.training
+    torch.testing.assert_close(frozen_norm.running_mean, running_mean)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="flash_attn needs CUDA")
 def test_flashed_borzoi_trains_in_float32_under_bf16_autocast():
     pytest.importorskip("flash_attn")

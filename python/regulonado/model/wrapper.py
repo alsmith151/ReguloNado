@@ -115,6 +115,24 @@ class RegulonadoModel(PreTrainedModel):
     def trunk_parameters(self) -> list[nn.Parameter]:
         return [p for p in self.backbone.parameters() if p.requires_grad]
 
+    def train(self, mode: bool = True) -> RegulonadoModel:
+        """Set train/eval mode, keeping BatchNorm in frozen backbone layers in eval mode.
+
+        ``requires_grad=False`` stops weight updates but not BatchNorm's running-stat
+        updates, and in train mode BatchNorm also normalises with per-batch statistics
+        rather than the pretrained ones. Frozen layers therefore behave as pretrained
+        only in eval mode. BatchNorm layers whose affine parameters are trainable keep
+        normal train-mode behaviour.
+        """
+        super().train(mode)
+        if mode:
+            for module in self.backbone.modules():
+                if isinstance(module, nn.modules.batchnorm._BatchNorm) and not any(
+                    parameter.requires_grad for parameter in module.parameters()
+                ):
+                    module.eval()
+        return self
+
     def apply_freeze_policy(self, policy: FreezePolicy) -> None:
         if policy.freeze_backbone:
             for p in self.backbone.parameters():
