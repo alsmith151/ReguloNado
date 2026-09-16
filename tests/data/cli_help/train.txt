@@ -31,6 +31,8 @@
 │ --no-wandb                                       Disable W&B reporting for this run              │
 │ --set                                   TEXT     Override one setting as KEY=VALUE (repeatable)  │
 │ --print-config                                   Print the resolved training config and exit     │
+│ --schedule-only                                  Read Parquet metadata, print the resolved       │
+│                                                  schedule, and exit before model setup           │
 │ --dry-run                                        Print the resolved command without running it   │
 │ --help                                           Show this message and exit.                     │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

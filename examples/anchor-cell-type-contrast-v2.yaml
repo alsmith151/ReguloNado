@@ -26,9 +26,9 @@ parameters:
   preset:
     value: head_only
   data.path:
-    value: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/data/interim/regulonado/dataset
+    value: /path/to/regulonado/dataset
   data.metadata_path:
-    value: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/data/interim/regulonado/dataset/tracks.parquet
+    value: /path/to/regulonado/dataset/tracks.parquet
   data.apply_squash:
     value: false
   data.enable_rc_aug:

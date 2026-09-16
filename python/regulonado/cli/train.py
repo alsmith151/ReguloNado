@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from shlex import join as shell_join
 from typing import Annotated, Optional
@@ -41,20 +42,21 @@ def sweep_train(
     sweep_workers = max(0, min(4, allocated_cpus))
     values.setdefault("trainer.num_workers", sweep_workers)
     values.setdefault("trainer.prefetch_factor", 1 if sweep_workers > 0 else None)
-    settings = []
-    for key, value in values.items():
-        # A sweep can select a config-group option and then tune a field that is
-        # absent from some options in that group.  Hydra's ``++`` operator works
-        # for both cases: it overrides an existing field or appends a missing
-        # one.  Keep top-level keys unchanged because entries such as ``loss``
-        # select a Hydra config-group option rather than an ordinary field.
-        override_key = f"++{key}" if "." in key else key
-        settings.append(
-            f"{override_key}={json.dumps(value, separators=(',', ':'))}"
-        )
+    from regulonado.training.overrides import hydra_override_items
+
+    settings = hydra_override_items(values)
 
     run_id = os.environ.get("WANDB_RUN_ID", "trial")
     output_dir = Path(configured_output or dataset.parent / "parameter-sweep" / "runs" / run_id)
+    # Every sweep trial validates its real dataset-backed update budget before
+    # constructing the backbone in the same allocated job.
+    train(
+        dataset=dataset,
+        output_dir=output_dir,
+        preset=preset,
+        settings=settings,
+        schedule_only=True,
+    )
     train(
         dataset=dataset,
         output_dir=output_dir,
@@ -140,6 +142,13 @@ def train(
         bool,
         typer.Option("--print-config", help="Print the resolved training config and exit"),
     ] = False,
+    schedule_only: Annotated[
+        bool,
+        typer.Option(
+            "--schedule-only",
+            help="Read Parquet metadata, print the resolved schedule, and exit before model setup",
+        ),
+    ] = False,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Print the resolved command without running it"),
@@ -191,7 +200,7 @@ def train(
             )
         overrides.append(setting)
 
-    if print_config:
+    if print_config or schedule_only:
         try:
             from regulonado.training.compose import resolved_training_config
         except ImportError as exc:
@@ -206,7 +215,15 @@ def train(
             raise typer.BadParameter(
                 f"Could not compose preset {preset!r}: {exc}", param_hint="--preset/--set"
             ) from exc
-        typer.echo(rendered)
+        if print_config:
+            typer.echo(rendered)
+            return
+        import yaml
+        from regulonado.training.runner import preflight_training_schedule
+
+        config = yaml.safe_load(rendered)
+        schedule = preflight_training_schedule(config, world_size=nproc_per_node)
+        typer.echo(json.dumps(asdict(schedule), indent=2))
         return
 
     if nproc_per_node > 1:

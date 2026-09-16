@@ -8,8 +8,8 @@ a flat ``max``.
 
 from __future__ import annotations
 
-import math
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -266,13 +266,20 @@ class SpecificityEnergy(nn.Module):
 
     def _summarize_predictions(self, preds: torch.Tensor) -> dict[str, object]:
         finite_preds = preds[torch.isfinite(preds)]
-        observed_min = float(finite_preds.min().detach().cpu()) if finite_preds.numel() else math.nan
-        observed_max = float(finite_preds.max().detach().cpu()) if finite_preds.numel() else math.nan
+        observed_min = (
+            float(finite_preds.min().detach().cpu()) if finite_preds.numel() else math.nan
+        )
+        observed_max = (
+            float(finite_preds.max().detach().cpu()) if finite_preds.numel() else math.nan
+        )
         if finite_preds.numel() and (observed_min < self.a_min or observed_max > self.a_max):
             logger.warning(
                 "Design prediction range [%g, %g] exceeds configured clamp bounds [%g, %g]; "
                 "predictions will be clipped before scoring.",
-                observed_min, observed_max, self.a_min, self.a_max,
+                observed_min,
+                observed_max,
+                self.a_min,
+                self.a_max,
             )
         preds = preds.clamp(self.a_min, self.a_max)
         preds = self.bend(preds)
@@ -375,9 +382,7 @@ class SpecificityEnergy(nn.Module):
             }
             target_gain_by_fold = group_gains[self.groups.target]
             other_gains = torch.stack([group_gains[name] for name in other_names], dim=-1)
-            positive_boosts = torch.relu(
-                other_gains - self.offtarget_boost_tolerance
-            )
+            positive_boosts = torch.relu(other_gains - self.offtarget_boost_tolerance)
             scaled_boosts = positive_boosts / self.offtarget_temperature
             # log-mean-exp is a smooth maximum whose baseline is exactly zero when every
             # positive boost is zero.

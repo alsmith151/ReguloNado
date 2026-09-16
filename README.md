@@ -7,7 +7,7 @@ internal Python API or Hydra syntax.
 
 ## Install
 
-Python 3.12 or 3.13 is required.
+Python 3.12 is required.
 
 ```bash
 pip install "regulonado[data]"       # build datasets
@@ -144,8 +144,8 @@ tracks at assembly rather than training on them. Each `train_phase` runs one tra
 are sequential within a run (later phases warm-start from the previous checkpoint), while separate
 runs can execute concurrently.
 
-The pipeline does not run prediction, create BigWigs, align reads, call peaks,
-or perform QC. Those are separate commands or upstream SeqNado work. It also
+The pipeline does not run prediction, create BigWigs, align reads, or call peaks.
+Those are separate commands or upstream SeqNado work. It also
 does not replace the standalone commands: use `regulonado dataset`,
 `regulonado normalization ...`, or `regulonado train` when you need to run one
 stage manually. Snakemake records outputs under `results_dir` and skips stages

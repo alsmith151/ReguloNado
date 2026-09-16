@@ -98,6 +98,23 @@ The dry run prints each run and phase with its model, seed, output directory,
 and dependency. Independent runs may execute concurrently. Phases are ordered
 within a run and never consume another run's checkpoint.
 
+Before allocating a GPU, resolve a single job against the built Parquet dataset:
+
+```bash
+regulonado train results/dataset --preset head_only --schedule-only \
+  --set trainer.max_epochs=2 --set trainer.evals_per_epoch=4
+```
+
+This reads only dataset metadata and prints the effective batch size, dropped
+rows, optimizer updates, warmup fraction, and exact logging/evaluation/checkpoint
+steps. Pass the same `--nproc-per-node` intended for the real job.
+
+The Snakemake pipeline performs this preflight automatically for every run and
+phase, writes the result to `results/train/<run>/<phase>/schedule.json`, and
+allows the GPU-backed `train_phase` job to start only after it succeeds. W&B
+sweep trials run the same check inside each allocated agent job before building
+their model.
+
 Outputs use `results/train/<run>/<phase>/`. If the workflow stops, fix the
 cause and run the same pipeline command again; completed outputs remain valid
 and Snakemake schedules only missing or stale work.

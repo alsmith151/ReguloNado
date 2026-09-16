@@ -9,7 +9,10 @@ from pathlib import Path
 
 from snakemake.utils import validate
 
+from regulonado.config.models import RegulonadoConfig
 
+
+RegulonadoConfig.model_validate(config)
 validate(config, str(Path(workflow.basedir) / "schemas" / "config.schema.yaml"))
 
 if config["scaling"]["method"] == "bamnado" and not config["inputs"].get("bam_dir"):
@@ -24,7 +27,7 @@ if config["scaling"]["method"] == "seqnado":
     # Naming a single project does not rescue an aggregated dataset: tracks from
     # the other projects have no entry in that project's table, so scaling would
     # fail once it ran. Reject it here instead.
-    if len(SEQNADO_PROJECTS) > 1 and not config["scaling"].get("seqnado_project"):
+    if len(SEQNADO_PROJECTS) > 1:
         raise ValueError(
             "scaling.method 'seqnado' reuses one project's normalisation factors, "
             f"but {len(SEQNADO_PROJECTS)} projects are configured. Use scaling.method "

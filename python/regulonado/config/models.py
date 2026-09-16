@@ -14,6 +14,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from regulonado.training.overrides import merge_training_settings
+
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 PHASE_PRESETS = ("head_only", "unfreeze_output", "deep_finetune", "peak_finetune")
@@ -202,6 +204,15 @@ class TrainConfig(BaseModel):
                 raise ValueError(
                     f"train.{label} names must be unique; repeated: {', '.join(duplicates)}"
                 )
+        for label, settings in [
+            ("train.common", self.common),
+            *((f"train.phases[{item.name}].settings", item.settings) for item in self.phases),
+            *((f"train.runs[{item.name}].settings", item.settings) for item in self.runs),
+        ]:
+            try:
+                merge_training_settings([settings])
+            except ValueError as exc:
+                raise ValueError(f"{label}: {exc}") from exc
         return self
 
 
@@ -548,16 +559,16 @@ class RegulonadoConfig(BaseModel):
     @model_validator(mode="after")
     def _anchor_disables_squash(self) -> "RegulonadoConfig":
         if self.scaling.method == "anchor" and self.train is not None:
-            common_squash = self.train.common.get("data.apply_squash", True)
-            phase_squash = [
-                phase.settings.get("data.apply_squash", common_squash)
-                for phase in self.train.phases
-            ]
-            if common_squash or any(phase_squash):
-                raise ValueError(
-                    "scaling.method='anchor' requires data.apply_squash=false in "
-                    "train.common or every phase settings"
-                )
+            for phase in self.train.phases:
+                for run in self.train.runs:
+                    settings = merge_training_settings(
+                        [self.train.common, phase.settings, run.settings]
+                    )
+                    if settings.get("data.apply_squash", True) is not False:
+                        raise ValueError(
+                            "scaling.method='anchor' requires data.apply_squash=false; "
+                            f"resolved true for run {run.name!r}, phase {phase.name!r}"
+                        )
         return self
 
     @model_validator(mode="after")
@@ -592,7 +603,7 @@ class RegulonadoConfig(BaseModel):
             # dataset either: the tracks from every other project have no entry
             # in that project's table, so scaling would fail once it ran. Reject
             # it here, where the message can name the fix.
-            if len(self.inputs.seqnado_projects) > 1 and not self.scaling.seqnado_project:
+            if len(self.inputs.seqnado_projects) > 1:
                 raise ValueError(
                     "scaling.method 'seqnado' reuses one project's normalisation "
                     "factors, which are only comparable within that project. With "

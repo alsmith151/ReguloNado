@@ -1,52 +1,77 @@
 """Independent, staged fine-tuning runs."""
 
-import json
 import re
 import shlex
 
-
-def _flatten_settings(settings, prefix=""):
-    flattened = {}
-    for key, value in settings.items():
-        name = f"{prefix}.{key}" if prefix else key
-        if isinstance(value, dict):
-            flattened.update(_flatten_settings(value, name))
-        else:
-            flattened[name] = value
-    return flattened
+from regulonado.training.overrides import hydra_override_items, merge_training_settings
 
 
 def _override_flags(wildcards):
     """Render merged settings as repeatable, shell-safe CLI overrides."""
     phase = PHASE_BY_NAME[wildcards.phase]
     run = RUN_BY_NAME[wildcards.run]
-    merged = {}
-    for settings in (
-        config["train"].get("common", {}),
-        phase.get("settings", {}),
-        run.get("settings", {}),
-    ):
-        merged.update(_flatten_settings(settings))
-
-    # Run identity always wins over generic settings.
-    merged["seed"] = run["seed"]
-    merged["backbone.pretrained_name"] = run["pretrained_model"]
+    merged = merge_training_settings(
+        [
+            config["train"].get("common", {}),
+            phase.get("settings", {}),
+            run.get("settings", {}),
+        ],
+        seed=run["seed"],
+        pretrained_model=run["pretrained_model"],
+    )
     merged.setdefault("trainer.wandb_project", "regulonado-training")
     merged.setdefault("trainer.wandb_group", f"{RESULTS.name}/{wildcards.run}")
     merged.setdefault("trainer.wandb_job_type", wildcards.phase)
     merged.setdefault("trainer.wandb_run_name", f"{wildcards.run}/{wildcards.phase}")
 
     flags = []
-    for key, value in sorted(merged.items()):
-        rendered = json.dumps(value, separators=(",", ":"))
-        flags.extend(("--set", shlex.quote(f"{key}={rendered}")))
+    for item in hydra_override_items(merged):
+        flags.extend(("--set", shlex.quote(item)))
     return " ".join(flags)
+
+
+rule train_schedule_preflight:
+    input:
+        dataset=str(training_dataset_dir() / "README.md"),
+        metadata=str(training_dataset_dir() / "tracks.parquet"),
+    params:
+        preset=lambda w: PHASE_BY_NAME[w.phase]["preset"],
+        data_dir=str(training_dataset_dir()),
+        nproc=config["train"]["nproc_per_node"],
+        overrides=_override_flags,
+    output:
+        schedule=str(TRAIN_DIR / "{run}" / "{phase}" / "schedule.json"),
+    threads:
+        1
+    resources:
+        gpu=0,
+        mem_mb=4000,
+        runtime=10,
+    wildcard_constraints:
+        run="|".join(re.escape(name) for name in RUN_NAMES),
+        phase="|".join(re.escape(name) for name in PHASE_NAMES),
+    log:
+        str(RESULTS / "logs" / "schedule_{run}_{phase}.log"),
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "$(dirname {output.schedule:q})" "$(dirname {log:q})"
+        regulonado train \
+            {params.data_dir:q} \
+            --preset {params.preset:q} \
+            --metadata {input.metadata:q} \
+            --nproc-per-node {params.nproc} \
+            {params.overrides} \
+            --schedule-only \
+            > {output.schedule:q} 2> {log:q}
+        """
 
 
 rule train_phase:
     input:
         dataset=str(training_dataset_dir() / "README.md"),
         metadata=str(training_dataset_dir() / "tracks.parquet"),
+        schedule=str(TRAIN_DIR / "{run}" / "{phase}" / "schedule.json"),
         previous=previous_phase_state,
     params:
         preset=lambda w: PHASE_BY_NAME[w.phase]["preset"],

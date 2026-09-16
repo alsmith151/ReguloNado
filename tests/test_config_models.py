@@ -121,13 +121,18 @@ def test_full_config_with_every_optional_key_validates():
             "bamnado_exogenous_prefix": "dm6_",
         },
         train=TrainConfig(
-            common={"trainer.max_epochs": 3},
+            common={"trainer": {"max_epochs": 3}},
             phases=[
                 TrainPhase(name="head", preset="head_only"),
                 TrainPhase(name="deep", preset="deep_finetune", settings={"seed": 1}),
             ],
             runs=[
-                TrainRun(name="run_a", seed=0, pretrained_model="model/a", settings={"lr": 1e-4})
+                TrainRun(
+                    name="run_a",
+                    seed=0,
+                    pretrained_model="model/a",
+                    settings={"trainer": {"learning_rate": 1e-4}},
+                )
             ],
         ),
     )
@@ -203,7 +208,39 @@ def test_duplicate_run_names_raise():
         )
 
 
-def test_seqnado_scaling_across_several_projects_needs_one_named():
+def test_training_settings_require_nested_canonical_syntax():
+    with pytest.raises(ValueError, match="obsolete dotted YAML syntax"):
+        TrainConfig(
+            common={"trainer.max_epochs": 2},
+            phases=[TrainPhase(name="head", preset="head_only")],
+            runs=[TrainRun(name="run_a", seed=0, pretrained_model="model/a")],
+        )
+
+
+def test_anchor_scaling_checks_every_resolved_phase_and_run() -> None:
+    base = {
+        "results_dir": "results",
+        "inputs": {"intervals": "intervals.bed", "fasta": "genome.fa", "bigwig_dir": "bw"},
+        "scaling": {
+            "method": "anchor",
+            "anchor_regions": "anchors.bed",
+            "background_regions": "background.bed",
+        },
+        "train": {
+            "common": {"data": {"apply_squash": False}},
+            "phases": [{"name": "head", "preset": "head_only"}],
+            "runs": [{"name": "run_a", "seed": 0, "pretrained_model": "model/a"}],
+        },
+    }
+    RegulonadoConfig.model_validate(base)
+
+    conflicting = copy.deepcopy(base)
+    conflicting["train"]["runs"][0]["settings"] = {"data": {"apply_squash": True}}
+    with pytest.raises(ValueError, match="resolved true for run 'run_a', phase 'head'"):
+        RegulonadoConfig.model_validate(conflicting)
+
+
+def test_seqnado_scaling_across_several_projects_is_rejected():
     projects = [
         SeqNadoProjectRef(name="expA", path="expA/seqnado_output"),
         SeqNadoProjectRef(name="expB", path="expB/seqnado_output"),
@@ -220,22 +257,21 @@ def test_seqnado_scaling_across_several_projects_needs_one_named():
         )
 
 
-def test_seqnado_scaling_with_a_named_project_is_accepted():
-    config = RegulonadoConfig(
-        results_dir="results",
-        inputs=InputsConfig(
-            intervals="intervals.bed",
-            fasta="genome.fa",
-            seqnado_projects=[
-                SeqNadoProjectRef(name="expA", path="expA/seqnado_output"),
-                SeqNadoProjectRef(name="expB", path="expB/seqnado_output"),
-            ],
-        ),
-        scaling={"method": "seqnado", "seqnado_project": "expA/seqnado_output"},
-        train=_train(),
-    )
-
-    _validate_against_schema(config.to_dict())
+def test_seqnado_scaling_with_a_named_project_is_still_rejected():
+    with pytest.raises(ValueError, match="only comparable within that project"):
+        RegulonadoConfig(
+            results_dir="results",
+            inputs=InputsConfig(
+                intervals="intervals.bed",
+                fasta="genome.fa",
+                seqnado_projects=[
+                    SeqNadoProjectRef(name="expA", path="expA/seqnado_output"),
+                    SeqNadoProjectRef(name="expB", path="expB/seqnado_output"),
+                ],
+            ),
+            scaling={"method": "seqnado", "seqnado_project": "expA/seqnado_output"},
+            train=_train(),
+        )
 
 
 def test_seqnado_scaling_with_exactly_one_project_is_accepted():

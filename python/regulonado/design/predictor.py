@@ -189,9 +189,7 @@ class FoldEnsemble:
         for spec, predictor in zip(self._specs[1:], predictors[1:]):
             label = spec.name or str(spec.checkpoint_dir)
             if predictor.track_names != first.track_names:
-                raise ValueError(
-                    f"Fold {label!r} has different track_names than {first_label!r}"
-                )
+                raise ValueError(f"Fold {label!r} has different track_names than {first_label!r}")
             geometry = (predictor.context_length, predictor.n_pred_bins, predictor.bin_size)
             first_geometry = (first.context_length, first.n_pred_bins, first.bin_size)
             if geometry != first_geometry:
@@ -223,7 +221,9 @@ class FoldEnsemble:
         for predictor in self._predictors:
             if self.mode == "sequential":
                 predictor.to(self.device)
-            grad, score = predictor.gradient(one_hot_context, track_indices, bins, reduction, topk_bins)
+            grad, score = predictor.gradient(
+                one_hot_context, track_indices, bins, reduction, topk_bins
+            )
             grads.append(grad)
             scores.append(score)
             if self.mode == "sequential":

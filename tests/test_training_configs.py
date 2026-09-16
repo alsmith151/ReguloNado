@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 hydra = pytest.importorskip("hydra")
 omegaconf = pytest.importorskip("omegaconf")
@@ -184,3 +185,40 @@ def test_checkpoint_steps_must_land_on_eval_steps(
     else:
         with pytest.raises(ValueError, match="must be a multiple of"):
             resolved_training_config("head_only", overrides)
+
+
+def test_selected_contrast_config_resolves_strict_production_settings() -> None:
+    from regulonado.config.models import RegulonadoConfig
+    from regulonado.training.compose import resolved_training_config
+    from regulonado.training.overrides import hydra_override_items, merge_training_settings
+
+    path = Path(__file__).parents[1] / "examples" / "contrast-correlation-deep-unfreeze.yaml"
+    raw = yaml.safe_load(path.read_text())
+    RegulonadoConfig.model_validate(raw)
+    phase = raw["train"]["phases"][0]
+    run = raw["train"]["runs"][0]
+    settings = merge_training_settings(
+        [raw["train"]["common"], phase["settings"], run["settings"]],
+        seed=run["seed"],
+        pretrained_model=run["pretrained_model"],
+    )
+    overrides = hydra_override_items(settings)
+    first_dotted = next(index for index, item in enumerate(overrides) if item.startswith("++"))
+    assert all("." not in item.split("=", 1)[0] for item in overrides[:first_dotted])
+    resolved = yaml.safe_load(
+        resolved_training_config(
+            phase["preset"],
+            ["data.path=/dataset", "output_dir=/output", *overrides],
+        )
+    )
+
+    assert resolved["trainer"]["max_epochs"] == 2
+    assert resolved["trainer"]["max_steps"] is None
+    assert resolved["trainer"]["evals_per_epoch"] == 4
+    assert resolved["trainer"]["eval_every_n_steps"] is None
+    assert resolved["trainer"]["checkpoint_every_n_steps"] is None
+    assert resolved["head"]["type"] == "film"
+    assert resolved["head"]["output_init"] == "empirical_mean_constant"
+    assert resolved["loss"]["name"] == "poisson_multinomial_binwise"
+    assert resolved["loss"]["contrast_weight"] == pytest.approx(0.5)
+    assert resolved["data"]["apply_squash"] is False

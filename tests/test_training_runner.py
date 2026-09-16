@@ -16,22 +16,25 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import torch
+from accelerate.data_loader import BatchSamplerShard
 from regulonado.training.config import TrainerConfig
 from regulonado.training.data import WindowParquetDataset
 from regulonado.training.runner import (
-    StepBudget,
+    RegulonadoTrainer,
     _build_collate_and_loss,
+    _build_scheduler_for_trainer,
     _build_training_arguments,
     _build_training_summary,
     _empirical_track_output_bias,
     _finalize_trainer_outputs,
     _prepare_dataset_splits,
     _resolve_empirical_output_bias,
-    _resolve_step_budget,
     _resolve_trainer_config,
+    _resolve_training_schedule,
     _validate_dataset_schema,
 )
-from torch.utils.data import Subset
+from torch.utils.data import BatchSampler, DataLoader, SequentialSampler, Subset
+from transformers import Trainer
 
 MINIMAL_CFG = {
     "data": {},
@@ -177,78 +180,214 @@ class TestWindowParquetDataset:
         assert [dataset[i]["interval"] for i in range(6)] == [f"chr1:{i}" for i in range(6)]
 
 
-def test_step_budget_counts_optimizer_steps_per_epoch() -> None:
+def _schedule(cfg: TrainerConfig, *, rows: int = 41_699, world_size: int = 1):
+    return _resolve_training_schedule(cfg, train_rows=rows, world_size=world_size, has_eval=True)
+
+
+def test_schedule_counts_optimizer_steps_per_epoch() -> None:
     cfg = TrainerConfig(batch_size=12, gradient_accumulation_steps=1, max_epochs=2)
 
-    budget = _resolve_step_budget(cfg, train_rows=41_699, world_size=1)
+    schedule = _schedule(cfg)
 
-    assert budget == StepBudget(steps_per_epoch=3_474, max_steps=6_948)
+    assert schedule.steps_per_epoch == 3_474
+    assert schedule.total_steps == 6_948
+    assert schedule.explicit_max_steps is None
+    assert schedule.effective_global_batch == 12
+    assert schedule.dropped_rows_per_epoch == 11
 
 
-def test_step_budget_divides_by_global_batch_and_accumulation() -> None:
+def test_schedule_divides_by_global_batch_and_accumulation() -> None:
     cfg = TrainerConfig(batch_size=4, gradient_accumulation_steps=3, max_epochs=1)
 
     # 1003 rows // (4 * 2 GPUs) = 125 batches -> ceil(125 / 3) = 42 updates.
-    budget = _resolve_step_budget(cfg, train_rows=1_003, world_size=2)
+    schedule = _schedule(cfg, rows=1_003, world_size=2)
 
-    assert budget == StepBudget(steps_per_epoch=42, max_steps=42)
+    assert schedule.micro_batches_per_rank == 125
+    assert schedule.steps_per_epoch == 42
+    assert schedule.total_steps == 42
+    assert schedule.effective_global_batch == 24
+    assert schedule.dropped_rows_per_epoch == 3
 
 
-def test_step_budget_keeps_explicit_max_steps() -> None:
+@pytest.mark.parametrize(
+    ("rows", "batch_size", "world_size", "accumulation", "max_steps"),
+    [
+        (96, 4, 1, 1, None),
+        (99, 4, 1, 3, None),
+        (96, 4, 2, 3, None),
+        (101, 4, 2, 3, 5),
+    ],
+)
+def test_schedule_matches_accelerate_and_trainer_lengths(
+    tmp_path, rows, batch_size, world_size, accumulation, max_steps
+) -> None:
+    """Compare our arithmetic to the installed Accelerate and Trainer implementations."""
+    cfg = TrainerConfig(
+        batch_size=batch_size,
+        gradient_accumulation_steps=accumulation,
+        max_epochs=2,
+        max_steps=max_steps,
+        mixed_precision="no",
+    )
+    schedule = _schedule(cfg, rows=rows, world_size=world_size)
+    sampler = SequentialSampler(range(rows))
+    batch_sampler = BatchSampler(sampler, batch_size=batch_size, drop_last=True)
+    if world_size > 1:
+        batch_sampler = BatchSamplerShard(
+            batch_sampler,
+            num_processes=world_size,
+            process_index=0,
+            split_batches=False,
+            even_batches=True,
+        )
+    dataloader = DataLoader(range(rows), batch_sampler=batch_sampler)
+    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True)
+    trainer = Trainer(model=torch.nn.Linear(1, 1), args=args, eval_dataset=range(rows))
+    values = trainer.set_initial_training_values(args, dataloader)
+
+    assert len(dataloader) == schedule.micro_batches_per_rank
+    assert values[1] == schedule.steps_per_epoch
+    assert values[-1] == schedule.total_steps
+
+
+def test_schedule_keeps_explicit_max_steps() -> None:
     cfg = TrainerConfig(batch_size=12, max_steps=500)
 
-    assert _resolve_step_budget(cfg, train_rows=41_699, world_size=1) == StepBudget(3_474, 500)
+    schedule = _schedule(cfg)
+
+    assert schedule.steps_per_epoch == 3_474
+    assert schedule.total_steps == 500
+    assert schedule.explicit_max_steps == 500
 
 
-def test_step_budget_rejects_split_smaller_than_global_batch() -> None:
+def test_schedule_rejects_split_smaller_than_global_batch() -> None:
     with pytest.raises(ValueError, match="global batch"):
-        _resolve_step_budget(TrainerConfig(batch_size=12), train_rows=11, world_size=1)
+        _schedule(TrainerConfig(batch_size=12), rows=11)
 
 
 def test_epoch_driven_training_evaluates_once_per_epoch(tmp_path) -> None:
-    cfg = TrainerConfig(mixed_precision="no", checkpoint_every_n_steps=None)
+    cfg = TrainerConfig(batch_size=12, mixed_precision="no", checkpoint_every_n_steps=None)
+    schedule = _schedule(cfg)
 
-    args = _build_training_arguments(
-        tmp_path, cfg, StepBudget(steps_per_epoch=3_474, max_steps=6_948), has_eval=True
-    )
+    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True)
 
-    assert args.max_steps == 6_948
+    assert args.max_steps == -1
+    assert args.num_train_epochs == 1
     assert args.eval_steps == 3_474
 
 
 def test_evals_per_epoch_evaluates_and_checkpoints_each_quarter_epoch(tmp_path) -> None:
-    cfg = TrainerConfig(mixed_precision="no", evals_per_epoch=4, max_epochs=2)
+    cfg = TrainerConfig(batch_size=12, mixed_precision="no", evals_per_epoch=4, max_epochs=2)
+    schedule = _schedule(cfg)
 
-    args = _build_training_arguments(
-        tmp_path, cfg, StepBudget(steps_per_epoch=3_474, max_steps=6_948), has_eval=True
-    )
+    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True)
 
     assert args.eval_steps == 868
     assert args.save_strategy == "steps"
     assert args.save_steps == 868
     assert args.load_best_model_at_end
+    assert schedule.evaluation_events == (
+        0,
+        868,
+        1_736,
+        2_604,
+        3_472,
+        4_340,
+        5_208,
+        6_076,
+        6_944,
+    )
+    assert schedule.checkpoint_events == schedule.evaluation_events[1:]
+
+
+def test_evaluation_keeps_the_final_partial_batch(tmp_path) -> None:
+    cfg = TrainerConfig(batch_size=4, eval_batch_size=4, mixed_precision="no")
+    schedule = _schedule(cfg, rows=10)
+    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True)
+    rows = [{"input_ids": torch.tensor([float(index)])} for index in range(10)]
+    trainer = RegulonadoTrainer(
+        model=torch.nn.Linear(1, 1),
+        args=args,
+        train_dataset=rows,
+        eval_dataset=rows,
+    )
+
+    assert len(trainer.get_train_dataloader()) == 2
+    assert len(trainer.get_eval_dataloader()) == 3
+
+
+def test_two_epoch_trainer_run_matches_schedule_and_scheduler(tmp_path) -> None:
+    class ToyModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.projection = torch.nn.Linear(1, 1)
+
+        def forward(self, input_ids, labels=None, **_):
+            logits = self.projection(input_ids)
+            loss = torch.nn.functional.mse_loss(logits, labels)
+            return {"loss": loss, "logits": logits}
+
+    cfg = TrainerConfig(
+        batch_size=4,
+        num_workers=0,
+        max_epochs=2,
+        mixed_precision="no",
+        log_every_n_steps=1,
+    )
+    schedule = _resolve_training_schedule(cfg, train_rows=10, world_size=1, has_eval=False)
+    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=False)
+    model = ToyModel()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate)
+    scheduler = _build_scheduler_for_trainer(optimizer, cfg, schedule)
+    dataset = [
+        {"input_ids": torch.tensor([float(index)]), "labels": torch.tensor([0.0])}
+        for index in range(10)
+    ]
+    trainer = Trainer(
+        model=model,
+        args=args,
+        train_dataset=dataset,
+        optimizers=(optimizer, scheduler),
+    )
+
+    trainer.train()
+
+    assert schedule.steps_per_epoch == 2
+    assert schedule.total_steps == 4
+    assert trainer.state.global_step == schedule.total_steps
+    assert trainer.state.max_steps == schedule.total_steps
+    assert scheduler.last_epoch == schedule.total_steps
 
 
 def test_explicit_eval_interval_overrides_evals_per_epoch(tmp_path) -> None:
     cfg = TrainerConfig(
         mixed_precision="no", evals_per_epoch=4, eval_every_n_steps=250, max_steps=500
     )
+    schedule = _schedule(cfg)
 
-    args = _build_training_arguments(
-        tmp_path, cfg, StepBudget(steps_per_epoch=3_474, max_steps=500), has_eval=True
-    )
+    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True)
 
     assert args.eval_steps == 250
     assert args.save_steps == 250
+    assert args.max_steps == 500
 
 
-def test_evals_per_epoch_requires_known_epoch_size(tmp_path) -> None:
-    cfg = TrainerConfig(mixed_precision="no", evals_per_epoch=4, max_steps=500)
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("batch_size", 0), ("gradient_accumulation_steps", 0), ("max_epochs", 0)],
+)
+def test_schedule_rejects_non_positive_settings(field: str, value: int) -> None:
+    cfg = TrainerConfig(**{field: value})
 
-    with pytest.raises(ValueError, match="evals_per_epoch"):
-        _build_training_arguments(
-            tmp_path, cfg, StepBudget(steps_per_epoch=None, max_steps=500), has_eval=True
-        )
+    with pytest.raises(ValueError, match=field):
+        _schedule(cfg)
+
+
+def test_schedule_rejects_warmup_longer_than_run() -> None:
+    cfg = TrainerConfig(max_steps=5, warmup_steps=6)
+
+    with pytest.raises(ValueError, match="warmup_steps"):
+        _schedule(cfg)
 
 
 def test_seeded_eval_cap_selects_a_fixed_subset(tmp_path) -> None:

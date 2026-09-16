@@ -2,7 +2,7 @@
 
 ## Set up the repository
 
-ReguloNado supports Python 3.12 and 3.13 and requires Rust 1.85 or newer when
+ReguloNado supports Python 3.12 and requires Rust 1.85 or newer when
 building the extension from source.
 
 ```bash

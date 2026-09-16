@@ -142,7 +142,9 @@ def poisson_multinomial_binwise_loss(
     return combined_loss.mean()
 
 
-def kendall_track_weighted_loss(per_track_loss: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
+def kendall_track_weighted_loss(
+    per_track_loss: torch.Tensor, log_var: torch.Tensor
+) -> torch.Tensor:
     """Combine a per-track loss vector into a scalar with learnable per-track uncertainty.
 
     Homoscedastic uncertainty weighting (Kendall et al., 2018): each track's loss is
@@ -178,7 +180,9 @@ def transfer_calibration_loss(
     p_pred = y_pred / s_pred.clamp(min=epsilon)
 
     multinomial_term = -(y_true * torch.log(p_pred.clamp(min=epsilon))).sum(dim=-1).mean() / seq_len
-    total_term = F.mse_loss(torch.log1p(s_pred), torch.log1p(y_true.sum(dim=-1, keepdim=True)), reduction="mean")
+    total_term = F.mse_loss(
+        torch.log1p(s_pred), torch.log1p(y_true.sum(dim=-1, keepdim=True)), reduction="mean"
+    )
     log_pred = torch.log1p(y_pred)
     log_true = torch.log1p(y_true)
     bin_error = (log_pred - log_true).square()
@@ -243,8 +247,8 @@ def topk_additive_loss(
         pred, target, poisson_weight=poisson_weight, epsilon=epsilon
     )
 
-    topk_idx = target.topk(k, dim=-1).indices          # [B, T, k]
-    pred_k   = pred.gather(-1, topk_idx)
+    topk_idx = target.topk(k, dim=-1).indices  # [B, T, k]
+    pred_k = pred.gather(-1, topk_idx)
     target_k = target.gather(-1, topk_idx)
     peak_loss = poisson_multinomial_loss(
         pred_k, target_k, poisson_weight=poisson_weight, epsilon=epsilon
@@ -287,20 +291,20 @@ def topk_reweight_loss(
     s_true = y_true.sum(dim=-1, keepdim=True)
 
     # Per-bin multinomial cross-entropy: -y_true * log(p_pred) / L
-    per_bin_ce = -(y_true * torch.log(p_pred.clamp(min=epsilon)))   # [B, T, L]
+    per_bin_ce = -(y_true * torch.log(p_pred.clamp(min=epsilon)))  # [B, T, L]
 
     # Build a weight mask: topk_weight for peak bins, 1.0 elsewhere.
-    topk_idx = y_true.topk(k, dim=-1).indices                       # [B, T, k]
+    topk_idx = y_true.topk(k, dim=-1).indices  # [B, T, k]
     bin_weights = torch.ones_like(per_bin_ce)
     bin_weights.scatter_(-1, topk_idx, topk_weight)
 
-    multinomial_term = (bin_weights * per_bin_ce).sum(dim=-1) / L   # [B, T]
+    multinomial_term = (bin_weights * per_bin_ce).sum(dim=-1) / L  # [B, T]
 
     poisson_term = (
         F.poisson_nll_loss(s_pred, s_true, log_input=False, eps=0.0, reduction="mean") / L
     )
 
-    return (multinomial_term.mean() + poisson_weight * poisson_term)
+    return multinomial_term.mean() + poisson_weight * poisson_term
 
 
 def log1p_huber_loss(
@@ -387,8 +391,7 @@ def contrast_family_weights(
     """
     if len(families) != len(groups):
         raise ValueError(
-            "families and groups need one label per track, "
-            f"got {len(families)} and {len(groups)}"
+            f"families and groups need one label per track, got {len(families)} and {len(groups)}"
         )
     n_tracks = len(families)
     members_by_family: dict[str, list[tuple[int, str]]] = {}

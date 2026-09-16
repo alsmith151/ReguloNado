@@ -58,8 +58,7 @@ def _resolve_track_indices(config: "AttributionConfig", ensemble: "FoldEnsemble"
 
         indices = resolve_tracks([target.track], ensemble.track_names)
         logger.info(
-            f"Attributing against track {ensemble.track_names[indices[0]]!r} (index "
-            f"{indices[0]})"
+            f"Attributing against track {ensemble.track_names[indices[0]]!r} (index {indices[0]})"
         )
         return indices
 
@@ -141,7 +140,9 @@ def _build_run_info(
     config: "AttributionConfig", ensemble, track_indices: list[int], n_candidates: int
 ) -> dict:
     target = config.targets[0]
-    selector = target.track if target.track is not None else f"group:{target.group_by}={target.target}"
+    selector = (
+        target.track if target.track is not None else f"group:{target.group_by}={target.target}"
+    )
     return {
         "status": "in_progress",
         "candidates": config.candidates,
@@ -289,14 +290,26 @@ def _process_candidates(
     for candidate_index, seed in enumerate(seeds, start=1):
         records.append(
             _score_one_candidate(
-                config, candidate_index, len(seeds), seed, ensemble, track_indices, fasta,
-                chrom_sizes, scan_positions,
+                config,
+                candidate_index,
+                len(seeds),
+                seed,
+                ensemble,
+                track_indices,
+                fasta,
+                chrom_sizes,
+                scan_positions,
             )
         )
         # Checkpoint after every candidate so a long run stays inspectable and resumable.
         write_attributions(
-            out_dir, records, run_info=run_info, chrom_sizes=chrom_sizes, bigwig=config.bigwig,
-            rtol=config.rtol, call_cores=call_cores,
+            out_dir,
+            records,
+            run_info=run_info,
+            chrom_sizes=chrom_sizes,
+            bigwig=config.bigwig,
+            rtol=config.rtol,
+            call_cores=call_cores,
         )
     return records
 
@@ -347,8 +360,16 @@ def run_attribution(config: "AttributionConfig", *, call_cores: bool = True) -> 
 
     run_info = _build_run_info(config, ensemble, track_indices, len(seeds))
     records = _process_candidates(
-        config, seeds, ensemble, track_indices, fasta, chrom_sizes, scan_positions, run_info,
-        out_dir, call_cores=call_cores,
+        config,
+        seeds,
+        ensemble,
+        track_indices,
+        fasta,
+        chrom_sizes,
+        scan_positions,
+        run_info,
+        out_dir,
+        call_cores=call_cores,
     )
 
     n_called = sum(1 for record in records if record.cores)
@@ -357,8 +378,13 @@ def run_attribution(config: "AttributionConfig", *, call_cores: bool = True) -> 
     run_info["n_cores_called"] = n_called
     run_info["n_cores_total"] = n_cores_total
     write_attributions(
-        out_dir, records, run_info=run_info, chrom_sizes=chrom_sizes, bigwig=config.bigwig,
-        rtol=config.rtol, call_cores=call_cores,
+        out_dir,
+        records,
+        run_info=run_info,
+        chrom_sizes=chrom_sizes,
+        bigwig=config.bigwig,
+        rtol=config.rtol,
+        call_cores=call_cores,
     )
 
     return AttributionResult(

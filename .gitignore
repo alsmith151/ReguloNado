@@ -38,3 +38,6 @@ sps*
 
 # Notebooks for now
 notebooks/
+
+# Machine- and cluster-specific configs belong here, never in published examples.
+/local/

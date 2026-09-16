@@ -31,21 +31,25 @@ def test_sweep_train_maps_wandb_json_to_training_settings(tmp_path, monkeypatch)
             }
         )
     )
-    captured = {}
-    monkeypatch.setattr(train_module, "train", lambda **kwargs: captured.update(kwargs))
+    captured = []
+    monkeypatch.setattr(train_module, "train", lambda **kwargs: captured.append(kwargs))
     monkeypatch.setenv("WANDB_RUN_ID", "abc123")
     monkeypatch.setenv("SLURM_CPUS_PER_TASK", "2")
 
     train_module.sweep_train(config_file)
 
-    assert captured["dataset"] == Path("/data/dataset")
-    assert captured["output_dir"] == Path("/data/parameter-sweep/runs/abc123")
-    assert captured["preset"] == "unfreeze_output"
-    assert 'loss="poisson_nll"' in captured["settings"]
-    assert "++loss.poisson_weight=0.2" in captured["settings"]
-    assert '++head.output_init="empirical_mean_constant"' in captured["settings"]
-    assert "++trainer.num_workers=2" in captured["settings"]
-    assert "++trainer.prefetch_factor=1" in captured["settings"]
+    assert len(captured) == 2
+    preflight, training = captured
+    assert preflight["schedule_only"] is True
+    assert training.get("schedule_only") is None
+    assert training["dataset"] == Path("/data/dataset")
+    assert training["output_dir"] == Path("/data/parameter-sweep/runs/abc123")
+    assert training["preset"] == "unfreeze_output"
+    assert 'loss="poisson_nll"' in training["settings"]
+    assert "++loss.poisson_weight=0.2" in training["settings"]
+    assert '++head.output_init="empirical_mean_constant"' in training["settings"]
+    assert "++trainer.num_workers=2" in training["settings"]
+    assert "++trainer.prefetch_factor=1" in training["settings"]
 
 
 def test_train_builds_a_readable_preset_command(tmp_path):

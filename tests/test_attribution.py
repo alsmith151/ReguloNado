@@ -295,7 +295,9 @@ def test_grad_scan_restricted_to_explicit_positions_stays_inside_editable():
 def test_grad_scan_without_scannable_positions_raises():
     seed, context = _seed(), _motif_context()
     with pytest.raises(ValueError, match="No positions to scan"):
-        grad_scan(_GradMotifEnsemble(), seed, context, track_indices=[1], bins=seed.bins, positions=[])
+        grad_scan(
+            _GradMotifEnsemble(), seed, context, track_indices=[1], bins=seed.bins, positions=[]
+        )
 
 
 def test_grad_scan_does_not_mutate_the_caller_context():
@@ -356,9 +358,7 @@ def test_call_cores_rejects_a_constant_profile_via_zscore():
 @pytest.mark.parametrize("start,expected", [(0, 1000), (220, 1300)])
 def test_call_cores_keeps_segments_touching_the_candidate_edge(start, expected):
     """scipy's default border_value=0 erodes edge-touching runs; this guards that fix."""
-    cores, _ = call_cores(
-        _profile(start, 80), editable=EDITABLE, bounds=BOUNDS, min_zscore=1.0
-    )
+    cores, _ = call_cores(_profile(start, 80), editable=EDITABLE, bounds=BOUNDS, min_zscore=1.0)
     assert cores, "an edge-touching core must survive binary_closing"
     edge = cores[0].start if start == 0 else cores[0].end
     assert edge == expected
@@ -368,15 +368,29 @@ def test_call_cores_bridges_a_small_dip_but_not_a_large_one():
     profile = _bump(150, 45)
     profile[147:153] = 0.0  # a 6 bp notch, narrower than merge_gap_bp
     merged, _ = call_cores(
-        profile, editable=EDITABLE, bounds=BOUNDS, min_zscore=0.5, quantile=0.7,
-        smooth_bp=5, merge_gap_bp=20, min_width_bp=20, max_cores=5
+        profile,
+        editable=EDITABLE,
+        bounds=BOUNDS,
+        min_zscore=0.5,
+        quantile=0.7,
+        smooth_bp=5,
+        merge_gap_bp=20,
+        min_width_bp=20,
+        max_cores=5,
     )
     assert len(merged) == 1
 
     profile = _bump(90, 25) + _bump(210, 25)  # two bumps 120 bp apart
     split, _ = call_cores(
-        profile, editable=EDITABLE, bounds=BOUNDS, min_zscore=0.5, quantile=0.7,
-        smooth_bp=5, merge_gap_bp=20, min_width_bp=20, max_cores=5
+        profile,
+        editable=EDITABLE,
+        bounds=BOUNDS,
+        min_zscore=0.5,
+        quantile=0.7,
+        smooth_bp=5,
+        merge_gap_bp=20,
+        min_width_bp=20,
+        max_cores=5,
     )
     assert len(split) == 2
 
@@ -406,8 +420,14 @@ def test_a_spike_narrower_than_the_smoothing_window_is_reported_at_smoothing_wid
 def test_call_cores_ranks_multiple_segments_by_score():
     profile = _bump(80, 25, height=1.0) + _bump(220, 25, height=0.5)
     cores, _ = call_cores(
-        profile, editable=EDITABLE, bounds=BOUNDS, min_zscore=0.5, quantile=0.7,
-        smooth_bp=5, min_width_bp=20, max_cores=2
+        profile,
+        editable=EDITABLE,
+        bounds=BOUNDS,
+        min_zscore=0.5,
+        quantile=0.7,
+        smooth_bp=5,
+        min_width_bp=20,
+        max_cores=2,
     )
     assert [core.rank for core in cores] == [0, 1]
     assert cores[0].score > cores[1].score
@@ -417,8 +437,14 @@ def test_call_cores_ranks_multiple_segments_by_score():
 def test_call_cores_honours_max_cores_per_candidate():
     profile = _bump(80, 25) + _bump(220, 25)
     cores, _ = call_cores(
-        profile, editable=EDITABLE, bounds=BOUNDS, min_zscore=0.5, quantile=0.7,
-        smooth_bp=5, min_width_bp=20, max_cores=1
+        profile,
+        editable=EDITABLE,
+        bounds=BOUNDS,
+        min_zscore=0.5,
+        quantile=0.7,
+        smooth_bp=5,
+        min_width_bp=20,
+        max_cores=1,
     )
     assert len(cores) == 1
 
@@ -491,8 +517,14 @@ def test_peak_anchor_finds_the_true_maximum_on_a_merged_asymmetric_pair_of_bumps
     true_peak_position = 120
     profile = _bump(true_peak_position, sigma=8, height=1.0) + _bump(180, sigma=40, height=0.6)
     kwargs = dict(
-        editable=EDITABLE, bounds=BOUNDS, min_zscore=0.5, quantile=0.6, smooth_bp=5,
-        merge_gap_bp=20, min_width_bp=20, max_cores=5,
+        editable=EDITABLE,
+        bounds=BOUNDS,
+        min_zscore=0.5,
+        quantile=0.6,
+        smooth_bp=5,
+        merge_gap_bp=20,
+        min_width_bp=20,
+        max_cores=5,
     )
     peak_cores, _ = call_cores(profile, anchor="peak", **kwargs)
     centroid_cores, _ = call_cores(profile, anchor="centroid", **kwargs)
@@ -500,7 +532,10 @@ def test_peak_anchor_finds_the_true_maximum_on_a_merged_asymmetric_pair_of_bumps
     # Segmentation is anchor-independent: one merged segment, identical span either way.
     assert len(peak_cores) == 1
     assert len(centroid_cores) == 1
-    assert (peak_cores[0].start, peak_cores[0].end) == (centroid_cores[0].start, centroid_cores[0].end)
+    assert (peak_cores[0].start, peak_cores[0].end) == (
+        centroid_cores[0].start,
+        centroid_cores[0].end,
+    )
 
     true_peak_genomic = EDITABLE.start + true_peak_position
     peak_anchor = peak_cores[0].anchor
@@ -563,7 +598,10 @@ def test_attributions_tsv_carries_the_full_effect_matrix(tmp_path):
     import pandas as pd
 
     write_attributions(
-        tmp_path, [_record("c0", 180, 280)], run_info={}, chrom_sizes={"chr1": CONTEXT},
+        tmp_path,
+        [_record("c0", 180, 280)],
+        run_info={},
+        chrom_sizes={"chr1": CONTEXT},
         bigwig=False,
     )
     frame = pd.read_csv(tmp_path / "attributions.tsv", sep="\t")
@@ -593,9 +631,7 @@ def test_bigwig_survives_overlapping_candidates(tmp_path):
     import pybigtools
 
     records = [_record("c0", 180, 280), _record("c1", 185, 285)]
-    write_attributions(
-        tmp_path, records, run_info={}, chrom_sizes={"chr1": CONTEXT}, bigwig=True
-    )
+    write_attributions(tmp_path, records, run_info={}, chrom_sizes={"chr1": CONTEXT}, bigwig=True)
     handle = pybigtools.open(str(tmp_path / "attributions.bw"))
     assert handle.chroms() == {"chr1": CONTEXT}
     assert len(list(handle.records("chr1"))) > 0
@@ -608,7 +644,10 @@ def test_called_cores_resolve_back_into_design(tmp_path):
         intervals, context_length=CONTEXT, n_pred_bins=N_PRED_BINS, bin_size=BIN_SIZE
     )
     write_attributions(
-        tmp_path, [_record("c0", 180, 280)], run_info={}, chrom_sizes={"chr1": CONTEXT},
+        tmp_path,
+        [_record("c0", 180, 280)],
+        run_info={},
+        chrom_sizes={"chr1": CONTEXT},
         bigwig=False,
     )
     # on_missing="error" makes this assert itself: an unresolvable core raises.
@@ -651,7 +690,11 @@ def test_called_cores_with_multiple_cores_resolve_back_into_design(tmp_path):
         intervals, context_length=CONTEXT, n_pred_bins=N_PRED_BINS, bin_size=BIN_SIZE
     )
     write_attributions(
-        tmp_path, [record], run_info={}, chrom_sizes={"chr1": CONTEXT}, bigwig=False,
+        tmp_path,
+        [record],
+        run_info={},
+        chrom_sizes={"chr1": CONTEXT},
+        bigwig=False,
         call_cores=True,
     )
 
@@ -696,9 +739,7 @@ def test_attribution_config_parses_and_defaults():
 
 
 def test_attribution_target_group_readout_defaults_group_by_to_source():
-    config = AttributionConfig(
-        candidates="c.bed", targets=[{"name": "hl60", "target": "K562"}]
-    )
+    config = AttributionConfig(candidates="c.bed", targets=[{"name": "hl60", "target": "K562"}])
     assert config.targets[0].track is None
     assert config.targets[0].group_by == "source"
 
@@ -734,18 +775,14 @@ def test_attribution_config_rejects_duplicate_target_names():
 
 def test_attribution_config_forbids_unknown_keys():
     with pytest.raises(ValueError):
-        AttributionConfig(
-            candidates="c.bed", made_up=1, targets=[{"name": "a", "track": "t"}]
-        )
+        AttributionConfig(candidates="c.bed", made_up=1, targets=[{"name": "a", "track": "t"}])
 
 
 def test_attribution_config_rejects_topk_bins_without_topk_reduction():
     """topk_bins is silently ignored by TrackReadout unless reduction='topk' (F03/S5): setting
     it alongside another reduction is almost certainly a mistake, so the config rejects it."""
     with pytest.raises(ValueError, match="topk_bins only applies"):
-        AttributionConfig(
-            candidates="c.bed", topk_bins=5, targets=[{"name": "a", "track": "t"}]
-        )
+        AttributionConfig(candidates="c.bed", topk_bins=5, targets=[{"name": "a", "track": "t"}])
 
 
 def test_attribution_config_allows_default_topk_bins_with_other_reductions():

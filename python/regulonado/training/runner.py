@@ -319,8 +319,7 @@ def resolved_condition_ids(
         return _track_array(records, "condition_id", dtype=np.int64, fill_value=-1).tolist()
     if condition_source != "group":
         raise ValueError(
-            "model.condition_source must be 'condition_id' or 'group', "
-            f"got {condition_source!r}"
+            f"model.condition_source must be 'condition_id' or 'group', got {condition_source!r}"
         )
 
     labels = [_usable_group_label(record.get("group")) for record in records]
@@ -477,8 +476,8 @@ def _build_loss_fn(
             "loss.contrast_weight requires tracks labelled with assay_class and group, "
             "with at least two groups sharing one assay_class"
         )
-    return (
-        lambda pred, target: base_loss(pred, target)
+    return lambda pred, target: (
+        base_loss(pred, target)
         + contrast_weight
         * track_contrast_correlation_loss(
             pred,
@@ -503,7 +502,10 @@ def _build_base_loss_fn(
     poisson_weight = float(loss_cfg.get("poisson_weight", 0.2))
     huber_delta = float(loss_cfg.get("delta", 1.0))
     learn_track_weights = bool(loss_cfg.get("learn_track_weights", False))
-    if learn_track_weights and loss_name not in {"poisson_multinomial", "poisson_multinomial_binwise"}:
+    if learn_track_weights and loss_name not in {
+        "poisson_multinomial",
+        "poisson_multinomial_binwise",
+    }:
         raise ValueError(
             f"loss.learn_track_weights is only supported for poisson_multinomial and "
             f"poisson_multinomial_binwise, got loss.name={loss_name!r}"
@@ -700,12 +702,9 @@ def _build_regulonado_config(
     condition_source = str(model_cfg.get("condition_source", "condition_id"))
     if condition_source not in {"condition_id", "group"}:
         raise ValueError(
-            "model.condition_source must be 'condition_id' or 'group', "
-            f"got {condition_source!r}"
+            f"model.condition_source must be 'condition_id' or 'group', got {condition_source!r}"
         )
-    condition_ids = (
-        resolved_condition_ids(records, condition_source) if use_track_metadata else []
-    )
+    condition_ids = resolved_condition_ids(records, condition_source) if use_track_metadata else []
     target_length = int(metadata.get("n_pred_bins", 0)) or None
 
     shared_track_index: list[int] = []
@@ -767,11 +766,7 @@ def _build_regulonado_config(
         use_track_metadata=use_track_metadata,
         condition_source=condition_source,
         activation_type=str(model_cfg.get("activation_type", "softplus")),
-        num_conditions=(
-            max(condition_ids, default=-1) + 1
-            if use_track_metadata
-            else 0
-        ),
+        num_conditions=(max(condition_ids, default=-1) + 1 if use_track_metadata else 0),
         num_cell_lines=(
             infer_cardinality_any(records, "source_id", "cell_line_id") if use_track_metadata else 0
         ),
@@ -979,47 +974,153 @@ def _build_optimizer(model: RegulonadoModel, trainer_cfg: TrainerConfig) -> torc
 
 
 @dataclasses.dataclass(frozen=True)
-class StepBudget:
-    """Optimizer-update counts shared by the scheduler, TrainingArguments, and logging."""
+class TrainingSchedule:
+    """Authoritative dataloader, optimizer, evaluation, and checkpoint schedule."""
 
     steps_per_epoch: int
-    max_steps: int
+    total_steps: int
+    explicit_max_steps: int | None
+    micro_batches_per_rank: int
+    effective_global_batch: int
+    dropped_rows_per_epoch: int
+    warmup_steps: int
+    warmup_fraction: float
+    log_steps: int
+    eval_steps: int | None
+    checkpoint_steps: int | None
+    logging_events: tuple[int, ...]
+    evaluation_events: tuple[int, ...]
+    checkpoint_events: tuple[int, ...]
 
 
-def _resolve_step_budget(
+def _resolve_training_schedule(
     trainer_cfg: TrainerConfig,
     *,
     train_rows: int,
     world_size: int,
-) -> StepBudget:
-    """Size an epoch in optimizer updates, matching HF Trainer's own accounting.
+    has_eval: bool,
+) -> TrainingSchedule:
+    """Resolve the exact schedule used by Trainer and Accelerate.
 
-    Batches are dropped when incomplete (``dataloader_drop_last=True``) and each
-    epoch's trailing partial accumulation still counts as one update. An explicit
-    ``max_steps`` wins; otherwise the budget is ``max_epochs`` whole epochs.
+    Training uses ``dataloader_drop_last=True``. Accelerate shards the resulting
+    full batches evenly across ranks, so each rank sees
+    ``train_rows // (batch_size * world_size)`` micro-batches. Trainer performs
+    one final optimizer update for a partial gradient-accumulation group.
 
     Raises
     ------
     ValueError
         If the split is smaller than one global batch.
     """
-    global_batch = max(trainer_cfg.batch_size, 1) * max(world_size, 1)
-    batches_per_epoch = train_rows // global_batch
-    if batches_per_epoch == 0:
+    positive = {
+        "trainer.batch_size": trainer_cfg.batch_size,
+        "trainer.eval_batch_size": trainer_cfg.resolved_eval_batch_size(),
+        "trainer.gradient_accumulation_steps": trainer_cfg.gradient_accumulation_steps,
+        "trainer.max_epochs": trainer_cfg.max_epochs,
+        "trainer.log_every_n_steps": trainer_cfg.log_every_n_steps,
+        "world_size": world_size,
+    }
+    for name, value in positive.items():
+        if value <= 0:
+            raise ValueError(f"{name} must be positive, got {value}")
+    for name, value in (
+        ("trainer.max_steps", trainer_cfg.max_steps),
+        ("trainer.eval_every_n_steps", trainer_cfg.eval_every_n_steps),
+        ("trainer.evals_per_epoch", trainer_cfg.evals_per_epoch),
+        ("trainer.checkpoint_every_n_steps", trainer_cfg.checkpoint_every_n_steps),
+    ):
+        if value is not None and value <= 0:
+            raise ValueError(f"{name} must be positive when set, got {value}")
+    if train_rows <= 0:
+        raise ValueError(f"Training split must contain rows, got {train_rows}")
+
+    global_micro_batch = trainer_cfg.batch_size * world_size
+    micro_batches_per_rank = train_rows // global_micro_batch
+    if micro_batches_per_rank == 0:
         raise ValueError(
             f"Training split has {train_rows} rows, fewer than one global batch "
-            f"({global_batch} = batch_size x world_size)"
+            f"({global_micro_batch} = batch_size x world_size)"
         )
-    accumulation = max(trainer_cfg.gradient_accumulation_steps, 1)
-    steps_per_epoch = math.ceil(batches_per_epoch / accumulation)
-    max_steps = trainer_cfg.max_steps or math.ceil(trainer_cfg.max_epochs * steps_per_epoch)
-    return StepBudget(steps_per_epoch=steps_per_epoch, max_steps=max_steps)
+    accumulation = trainer_cfg.gradient_accumulation_steps
+    steps_per_epoch = math.ceil(micro_batches_per_rank / accumulation)
+    total_steps = (
+        trainer_cfg.max_steps
+        if trainer_cfg.max_steps is not None
+        else math.ceil(trainer_cfg.max_epochs * steps_per_epoch)
+    )
+    if trainer_cfg.warmup_steps < 0:
+        raise ValueError(
+            f"trainer.warmup_steps must be non-negative, got {trainer_cfg.warmup_steps}"
+        )
+    if trainer_cfg.warmup_steps > total_steps:
+        raise ValueError(
+            f"trainer.warmup_steps ({trainer_cfg.warmup_steps}) exceeds the "
+            f"training budget ({total_steps} optimizer steps)"
+        )
+
+    eval_steps: int | None = None
+    if has_eval:
+        if trainer_cfg.eval_every_n_steps is not None:
+            eval_steps = trainer_cfg.eval_every_n_steps
+        elif trainer_cfg.evals_per_epoch is not None:
+            eval_steps = max(round(steps_per_epoch / trainer_cfg.evals_per_epoch), 1)
+        elif trainer_cfg.max_steps is None:
+            eval_steps = steps_per_epoch
+        else:
+            eval_steps = trainer_cfg.checkpoint_every_n_steps or trainer_cfg.log_every_n_steps
+
+    checkpoint_steps = trainer_cfg.checkpoint_every_n_steps
+    if has_eval and checkpoint_steps is None and trainer_cfg.evals_per_epoch is not None:
+        checkpoint_steps = eval_steps
+    if has_eval and checkpoint_steps is not None and eval_steps is not None:
+        if checkpoint_steps % eval_steps:
+            raise ValueError(
+                f"trainer.checkpoint_every_n_steps ({checkpoint_steps}) must be a multiple of "
+                f"the resolved evaluation interval ({eval_steps})"
+            )
+        if checkpoint_steps > total_steps:
+            raise ValueError(
+                f"Checkpoint interval {checkpoint_steps} exceeds the training budget "
+                f"of {total_steps} optimizer steps; no best-model checkpoint would exist"
+            )
+    if trainer_cfg.early_stopping_patience is not None and not has_eval:
+        raise ValueError("trainer.early_stopping_patience requires a validation split")
+
+    evaluation_events = (
+        tuple(range(eval_steps, total_steps + 1, eval_steps)) if eval_steps is not None else ()
+    )
+    if has_eval and trainer_cfg.eval_on_start:
+        evaluation_events = (0, *evaluation_events)
+    checkpoint_events = (
+        tuple(range(checkpoint_steps, total_steps + 1, checkpoint_steps))
+        if checkpoint_steps is not None
+        else ()
+    )
+    logging_events = tuple(
+        range(trainer_cfg.log_every_n_steps, total_steps + 1, trainer_cfg.log_every_n_steps)
+    )
+    return TrainingSchedule(
+        steps_per_epoch=steps_per_epoch,
+        total_steps=total_steps,
+        explicit_max_steps=trainer_cfg.max_steps,
+        micro_batches_per_rank=micro_batches_per_rank,
+        effective_global_batch=global_micro_batch * accumulation,
+        dropped_rows_per_epoch=train_rows - micro_batches_per_rank * global_micro_batch,
+        warmup_steps=trainer_cfg.warmup_steps,
+        warmup_fraction=trainer_cfg.warmup_steps / total_steps,
+        log_steps=trainer_cfg.log_every_n_steps,
+        eval_steps=eval_steps,
+        checkpoint_steps=checkpoint_steps,
+        logging_events=logging_events,
+        evaluation_events=evaluation_events,
+        checkpoint_events=checkpoint_events,
+    )
 
 
 def _build_training_arguments(
     output_dir: Path,
     trainer_cfg: TrainerConfig,
-    budget: StepBudget,
+    schedule: TrainingSchedule,
     *,
     has_eval: bool,
 ) -> TrainingArguments:
@@ -1030,31 +1131,9 @@ def _build_training_arguments(
             environ["WANDB_RUN_GROUP"] = trainer_cfg.wandb_group
         if trainer_cfg.wandb_tags:
             environ["WANDB_TAGS"] = ",".join(trainer_cfg.wandb_tags)
-    eval_strategy = "steps" if has_eval else "no"
-    if not has_eval:
-        eval_steps = None
-    elif trainer_cfg.eval_every_n_steps:
-        eval_steps = trainer_cfg.eval_every_n_steps
-    elif trainer_cfg.evals_per_epoch:
-        if budget.steps_per_epoch is None:
-            raise ValueError(
-                "trainer.evals_per_epoch needs a countable training split; "
-                "set trainer.eval_every_n_steps instead"
-            )
-        eval_steps = max(budget.steps_per_epoch // trainer_cfg.evals_per_epoch, 1)
-    elif trainer_cfg.max_steps is None:
-        # Epoch-driven run: evaluate once per epoch, counted in steps.
-        eval_steps = budget.steps_per_epoch
-    else:
-        eval_steps = trainer_cfg.checkpoint_every_n_steps or trainer_cfg.log_every_n_steps
-
-    # Under evals_per_epoch, checkpoint at every evaluation so early stopping and
-    # load_best_model_at_end always have the best checkpoint on disk.
-    checkpoint_steps = trainer_cfg.checkpoint_every_n_steps or (
-        eval_steps if trainer_cfg.evals_per_epoch else None
-    )
-    save_steps = checkpoint_steps or trainer_cfg.log_every_n_steps
-    save_strategy = "steps" if checkpoint_steps else "no"
+    eval_strategy = "steps" if schedule.eval_steps is not None else "no"
+    save_steps = schedule.checkpoint_steps or trainer_cfg.log_every_n_steps
+    save_strategy = "steps" if schedule.checkpoint_steps is not None else "no"
     logging_strategy = "steps"
     metric_for_best_model = trainer_cfg.metric_for_best_model if has_eval else None
     load_best_model_at_end = has_eval and save_strategy != "no"
@@ -1077,15 +1156,15 @@ def _build_training_arguments(
         learning_rate=trainer_cfg.learning_rate,
         weight_decay=trainer_cfg.weight_decay,
         num_train_epochs=float(trainer_cfg.max_epochs),
-        max_steps=budget.max_steps,
+        max_steps=schedule.explicit_max_steps if schedule.explicit_max_steps is not None else -1,
         warmup_steps=trainer_cfg.warmup_steps,
         gradient_accumulation_steps=trainer_cfg.gradient_accumulation_steps,
         bf16=trainer_cfg.mixed_precision == "bf16",
         fp16=trainer_cfg.mixed_precision == "fp16",
         logging_strategy=logging_strategy,
-        logging_steps=trainer_cfg.log_every_n_steps,
+        logging_steps=schedule.log_steps,
         eval_strategy=eval_strategy,
-        eval_steps=eval_steps,
+        eval_steps=schedule.eval_steps,
         save_strategy=save_strategy,
         save_steps=save_steps if save_strategy == "steps" else None,
         save_total_limit=2 if save_strategy == "steps" else None,
@@ -1108,13 +1187,13 @@ def _build_training_arguments(
 def _build_scheduler_for_trainer(
     optimizer: torch.optim.Optimizer,
     trainer_cfg: TrainerConfig,
-    budget: StepBudget,
+    schedule: TrainingSchedule,
 ) -> torch.optim.lr_scheduler.LRScheduler:
     return get_scheduler(
         trainer_cfg.scheduler,
         optimizer=optimizer,
         num_warmup_steps=trainer_cfg.warmup_steps,
-        num_training_steps=budget.max_steps,
+        num_training_steps=schedule.total_steps,
     )
 
 
@@ -1135,6 +1214,31 @@ class RegulonadoTrainer(Trainer):
             "preprocess_logits_for_metrics", None
         )
         super().__init__(*args, **kwargs)
+
+    def _get_dataloader(
+        self,
+        dataset: Any,
+        description: str,
+        batch_size: int,
+        sampler_fn: Callable | None = None,
+        is_training: bool = False,
+        dataloader_key: str | None = None,
+    ) -> Any:
+        """Drop incomplete training batches, but evaluate every validation row."""
+        original = self.args.dataloader_drop_last
+        if not is_training:
+            self.args.dataloader_drop_last = False
+        try:
+            return super()._get_dataloader(
+                dataset,
+                description,
+                batch_size,
+                sampler_fn=sampler_fn,
+                is_training=is_training,
+                dataloader_key=dataloader_key,
+            )
+        finally:
+            self.args.dataloader_drop_last = original
 
     def compute_loss(
         self,
@@ -1313,6 +1417,22 @@ def _load_training_dataset(data_path: Path, *, rank: int) -> dict[str, WindowPar
     return dataset_dict
 
 
+def preflight_training_schedule(cfg: Mapping[str, Any], *, world_size: int = 1) -> TrainingSchedule:
+    """Resolve a dataset-backed schedule without constructing or downloading a model."""
+    trainer_cfg = _resolve_trainer_config(cfg)
+    data_path = Path(str(cfg["data"]["path"]))
+    dataset_dict = _load_training_dataset(data_path, rank=0)
+    _validate_dataset_schema(dataset_dict)
+    schedule = _resolve_training_schedule(
+        trainer_cfg,
+        train_rows=len(dataset_dict["train"]),
+        world_size=world_size,
+        has_eval="validation" in dataset_dict,
+    )
+    _log_training_schedule(schedule, trainer_cfg, rank=0)
+    return schedule
+
+
 def _validate_dataset_schema(dataset_dict: Mapping[str, Any]) -> None:
     """Fail before worker startup when a dataset's stored columns lack model inputs."""
     required = {"sequence_tokens", "signal"}
@@ -1483,21 +1603,57 @@ def _prepare_model_for_training(
 def _setup_optimization(
     model: RegulonadoModel,
     trainer_cfg: TrainerConfig,
-    budget: StepBudget,
+    schedule: TrainingSchedule,
     *,
     has_eval: bool,
     output_dir: Path,
 ) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler, TrainingArguments]:
     """Build the optimizer, LR scheduler, and HF ``TrainingArguments`` together."""
     optimizer = _build_optimizer(model, trainer_cfg)
-    scheduler = _build_scheduler_for_trainer(optimizer, trainer_cfg, budget)
+    scheduler = _build_scheduler_for_trainer(optimizer, trainer_cfg, schedule)
     training_args = _build_training_arguments(
         output_dir,
         trainer_cfg,
-        budget,
+        schedule,
         has_eval=has_eval,
     )
     return optimizer, scheduler, training_args
+
+
+def _log_training_schedule(
+    schedule: TrainingSchedule,
+    trainer_cfg: TrainerConfig,
+    *,
+    rank: int,
+) -> None:
+    """Log the resolved units and event cadence before expensive model construction."""
+    mode = (
+        f"max_steps={schedule.explicit_max_steps}"
+        if schedule.explicit_max_steps is not None
+        else f"max_epochs={trainer_cfg.max_epochs}"
+    )
+    logger.info(
+        "[rank %d] training schedule | %s | effective_global_batch=%d | "
+        "micro_batches/rank/epoch=%d | optimizer_steps/epoch=%d | total_steps=%d | "
+        "dropped_rows/epoch=%d | warmup=%d (%.1f%%) | log_interval=%d events=%s | "
+        "eval_interval=%s events=%s | "
+        "checkpoint_interval=%s events=%s",
+        rank,
+        mode,
+        schedule.effective_global_batch,
+        schedule.micro_batches_per_rank,
+        schedule.steps_per_epoch,
+        schedule.total_steps,
+        schedule.dropped_rows_per_epoch,
+        schedule.warmup_steps,
+        100.0 * schedule.warmup_fraction,
+        schedule.log_steps,
+        schedule.logging_events,
+        schedule.eval_steps,
+        schedule.evaluation_events,
+        schedule.checkpoint_steps,
+        schedule.checkpoint_events,
+    )
 
 
 def _build_training_callbacks(
@@ -1540,18 +1696,16 @@ def _build_training_callbacks(
 def _run_training_loop(
     trainer: "RegulonadoTrainer",
     trainer_cfg: TrainerConfig,
-    budget: StepBudget,
+    schedule: TrainingSchedule,
     *,
     rank: int,
 ) -> None:
     """Log start-of-training context and run ``trainer.train()``."""
-    epochs = (
-        f"{budget.max_steps / budget.steps_per_epoch:.3f}" if budget.steps_per_epoch else "unknown"
-    )
+    epochs = schedule.total_steps / schedule.steps_per_epoch
     logger.info(
         f"[rank {rank}] starting trainer.train() | "
-        f"max_steps={budget.max_steps} steps_per_epoch={budget.steps_per_epoch} "
-        f"epochs={epochs} "
+        f"total_steps={schedule.total_steps} steps_per_epoch={schedule.steps_per_epoch} "
+        f"epochs={epochs:.3f} "
         f"batch_size={trainer_cfg.batch_size} grad_accum={trainer_cfg.gradient_accumulation_steps} "
         f"resume={trainer_cfg.resume_from_checkpoint} eval_on_start={trainer_cfg.eval_on_start}"
     )
@@ -1666,6 +1820,14 @@ def run_training(
     dataset_dict = _load_training_dataset(data_path, rank=rank)
     _validate_dataset_schema(dataset_dict)
 
+    schedule = _resolve_training_schedule(
+        trainer_cfg,
+        train_rows=len(dataset_dict["train"]),
+        world_size=_world_size(),
+        has_eval="validation" in dataset_dict,
+    )
+    _log_training_schedule(schedule, trainer_cfg, rank=rank)
+
     metadata_path_value = cfg["data"].get("metadata_path")
     metadata_path = Path(str(metadata_path_value)) if metadata_path_value else None
     metadata, records = _load_metadata_and_records(
@@ -1704,16 +1866,10 @@ def run_training(
         trainer_cfg=trainer_cfg,
     )
 
-    train_rows = len(dataset_dict["train"])
-    budget = _resolve_step_budget(trainer_cfg, train_rows=train_rows, world_size=_world_size())
-    logger.info(
-        f"[rank {rank}] step budget | train_rows={train_rows} world_size={_world_size()} "
-        f"steps_per_epoch={budget.steps_per_epoch} max_steps={budget.max_steps}"
-    )
     optimizer, scheduler, training_args = _setup_optimization(
         model,
         trainer_cfg,
-        budget,
+        schedule,
         has_eval="validation" in dataset_dict,
         output_dir=output_dir,
     )
@@ -1743,7 +1899,7 @@ def run_training(
         ),
     )
 
-    _run_training_loop(trainer, trainer_cfg, budget, rank=rank)
+    _run_training_loop(trainer, trainer_cfg, schedule, rank=rank)
     history = _finalize_trainer_outputs(trainer, output_dir)
 
     return _build_training_summary(

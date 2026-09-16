@@ -1,3 +1,9 @@
+# HL-60 / AML-BM atlas production training pipeline.
+#
+# Builds the anchor-normalised dataset and trains the strongest single configuration
+# supported by internal experiments, using conservative choices where direct sweep
+# evidence is unavailable. Sweeping, attribution and design are intentionally absent.
+
 results_dir: /path/to/regulonado-results
 
 inputs:
@@ -16,6 +22,7 @@ scaling:
   anchor_regions: /path/to/common_essential_windows.bed
   background_regions: /path/to/null_windows.parquet
   heldout_regions: /path/to/common_essential_windows_heldout.bed
+  window_stat_bp: 1000
   background_sample: 5000
 
 dataset:
@@ -35,64 +42,79 @@ train:
   nproc_per_node: 1
   common:
     data:
+      # Anchor-normalised targets remain on their count-like scale for the
+      # Poisson-multinomial objective.
       apply_squash: false
-      # Cheap regulariser now that the backbone trains deeper; every track is unstranded
-      # (ATAC / ChIP), so reverse-complementing sequence and flipping targets is valid.
+      # All included ATAC/ChIP tracks are unstranded, making reverse-complement
+      # augmentation a valid low-cost regulariser for deeper fine-tuning.
       enable_rc_aug: true
+
     model:
-      # FiLM conditioned on group (cell type), fixed from sweep refvd3ye.
+      # FiLM explicitly conditions shared sequence features on cell type.
       use_track_metadata: true
       condition_source: group
       share_condition_base_channels: false
-      # softplus_beta2 beat exp and plain softplus under contrast_pearson_median in 8wb1xsph.
       activation_type: softplus_beta2
+
     head:
-      hidden: 3072
+      hidden: 2048
       dropout: 0.1
+      # Start every output near its empirical target mean instead of forcing the
+      # optimiser to spend early updates correcting arbitrary initial depth.
       output_init: empirical_mean_constant
       output_init_samples: 512
+
     loss:
+      # Per-bin Poisson penalises misplaced peaks; multinomial preserves profile
+      # shape; the contrast term learns cell-type specificity across ATAC/ChIP.
       poisson_weight: 0.122
-      # Best guess, not evidence: the correlation loss has never run on this atlas. Watch
-      # contrast_pearson_median rise and pearson_bin_median (profile shape) for regression.
       contrast_weight: 0.5
-      # Off: Kendall weighting settles at weight ~ 1/per-track loss, and the multinomial
-      # term scales with signal level, so it tracks depth rather than noise and would
-      # likely upweight low-signal ChIP tracks. It also rescales the base loss against
-      # contrast_weight, confounding this run.
+      # Avoid allowing depth-dependent loss magnitude to become an implicit and
+      # potentially counterproductive per-track weighting scheme.
       learn_track_weights: false
+
     trainer:
       batch_size: 12
       eval_batch_size: 12
       num_workers: 8
+      persistent_workers: true
+      prefetch_factor: 2
       learning_rate: 1.38e-3
-      backbone_learning_rate: 1.0e-4   # overridden per run below
+      # Conservative adaptation of the pretrained sequence representation. The
+      # old 9.9e-4 result was obtained before fp32 master-weight handling was fixed.
+      backbone_learning_rate: 1.0e-4
       weight_decay: 4.3e-5
       scheduler: linear
       warmup_steps: 300
-      # Epoch-driven: row counts come from the Parquet footers and the scheduler,
-      # evaluation and checkpoints are all sized from the resulting optimizer steps.
       max_epochs: 2
       max_steps: null
+      gradient_accumulation_steps: 1
+      mixed_precision: bf16
+      gradient_clip_norm: 1.0
+      log_every_n_steps: 10
       evals_per_epoch: 4
       eval_every_n_steps: null
       checkpoint_every_n_steps: null
+      eval_on_start: true
       max_eval_samples: 1500
       metric_for_best_model: contrast_pearson_median
       greater_is_better: true
       early_stopping_patience: null
-      # transformer.4-7 + unet1 + unet0 + final_joined_convs. The first four transformer
-      # blocks and conv tower stay frozen: general sequence grammar, and the atlas spans
-      # ~30 studies' batch artefacts for deeper layers to overfit.
+      # Adapt the output-proximal transformer/decoder stages while retaining the
+      # most general early sequence representation.
+      freeze_backbone: true
       unfreeze_backbone_stages_from_output_end: 7
-      # Region geometry shared by the contrast_* metrics and the loss term
-      # (docs/training.md#cross-track-contrast).
       contrast_region_bins: 16
       contrast_pseudocount: 0.1
       contrast_active_fraction: 0.1
       report_to: [wandb]
       wandb_project: regulonado-contrast-correlation
-      wandb_tags: [anchor-scaled, cell-type-contrast, contrast-correlation-loss, fp32-master-weights, unfreeze-7]
+      wandb_tags:
+        - anchor-scaled
+        - cell-type-contrast
+        - contrast-correlation-loss
+        - fp32-master-weights
+        - unfreeze-7
 
   phases:
     - name: contrast_correlation
@@ -101,18 +123,7 @@ train:
         head: film
         loss: poisson_multinomial_binwise
 
-  # refvd3ye's backbone_learning_rate (9.9e-4) was tuned while bf16 weights rounded small
-  # updates away, so it does not transfer to fp32 master weights. Ladder from scratch.
   runs:
-    - name: contrast_u7_blr3e-5
-      seed: 0
-      pretrained_model: johahi/flashzoi-replicate-1
-      settings: {trainer: {backbone_learning_rate: 3.0e-5}}
     - name: contrast_u7_blr1e-4
       seed: 0
       pretrained_model: johahi/flashzoi-replicate-1
-      settings: {trainer: {backbone_learning_rate: 1.0e-4}}
-    - name: contrast_u7_blr3e-4
-      seed: 0
-      pretrained_model: johahi/flashzoi-replicate-1
-      settings: {trainer: {backbone_learning_rate: 3.0e-4}}

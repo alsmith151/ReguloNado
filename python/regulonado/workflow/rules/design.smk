@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from pathlib import Path
 
+from regulonado.training.overrides import flatten_settings
+
 DESIGN = config.get("design")
 DESIGN_WANDB_RUN_ID = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
 DESIGN_DIR = RESULTS / "design"
@@ -148,7 +150,7 @@ if DESIGN:
         irrelevant = _DESIGN_ADALEAD_ONLY_KEYS if method == "ism" else _DESIGN_ISM_ONLY_KEYS
         shared_keys = _DESIGN_SETTINGS_KEYS - irrelevant
         merged = {k: v for k, v in DESIGN.items() if k in shared_keys}
-        merged.update(_flatten_settings(target.get("settings", {})))
+        merged.update(flatten_settings(target.get("settings", {})))
         # Keep each configured design target in its own W&B project/group by default. An
         # explicit wandb_project/wandb_group above or in the target's own settings wins.
         merged.setdefault("wandb_project", "regulonado-design")

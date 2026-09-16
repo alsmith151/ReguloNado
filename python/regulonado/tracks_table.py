@@ -58,7 +58,7 @@ class TrackTableSchema(pa.DataFrameModel):
         included = df["status"] == "included"
         idx = df["track_index"]
         ok = pd.Series(True, index=df.index)
-        ok[~included] = idx[~included].isna()
+        ok.loc[~included] = idx[~included].isna().to_numpy(dtype=bool)
         included_idx = idx[included]
         if included_idx.isna().any():
             ok[included & idx.isna()] = False

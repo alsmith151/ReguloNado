@@ -26,7 +26,12 @@ from regulonado.model import (
 from regulonado.tracks_table import write_track_table
 from regulonado.training.config import TrainerConfig
 from regulonado.training.data import stack_batch_tensors
-from regulonado.training.losses import scaled_poisson_multinomial_loss
+from regulonado.training.losses import (
+    contrast_family_weights,
+    poisson_multinomial_binwise_loss,
+    scaled_poisson_multinomial_loss,
+    track_contrast_correlation_loss,
+)
 from regulonado.training.runner import (
     _build_optimizer,
     _normalise_checkpoint_mode,
@@ -143,7 +148,7 @@ def test_shared_channel_identity_ignores_per_track_technical_fields():
             "group": "NK_cell",
             "assay_class": "ATAC",
             "path": "/data/a.bigWig",
-            "resolved_path": "/ceph/data/a.bigWig",
+            "resolved_path": "/data/a.bigWig",
             "background": 0.165,
         },
         {
@@ -151,7 +156,7 @@ def test_shared_channel_identity_ignores_per_track_technical_fields():
             "group": "B_cell",
             "assay_class": "ATAC",
             "path": "/data/b.bigWig",
-            "resolved_path": "/ceph/data/b.bigWig",
+            "resolved_path": "/data/b.bigWig",
             "background": 0.412,
         },
         {
@@ -159,7 +164,7 @@ def test_shared_channel_identity_ignores_per_track_technical_fields():
             "group": "K-562",
             "assay_class": "ChIP",
             "path": "/data/c.bigWig",
-            "resolved_path": "/ceph/data/c.bigWig",
+            "resolved_path": "/data/c.bigWig",
             "background": 0.775,
         },
     ]
@@ -178,6 +183,44 @@ def test_film_head_accepts_optional_metadata():
     outputs = head(inputs, track_condition_ids=torch.tensor([0, 1, 2]))
     assert outputs.shape == (2, 3, 16)
     assert torch.all(outputs >= 0)
+
+
+def test_cpu_film_binwise_contrast_forward_backward_is_finite():
+    """Smoke-test the production head/loss path, excluding a lone CUT&RUN track."""
+    head = FiLMHead(
+        in_ch=8,
+        hidden=4,
+        n_tracks=4,
+        use_track_metadata=True,
+        num_conditions=4,
+    )
+    predictions = head(
+        torch.randn(6, 8, 16),
+        track_condition_ids=torch.tensor([0, 1, 2, 3]),
+    )
+    targets = torch.rand_like(predictions) * 5
+    weights = contrast_family_weights(
+        ["ATAC", "ATAC", "ATAC", "CUT&RUN"],
+        ["cell-a", "cell-b", "cell-c", "cell-a"],
+    )
+    assert weights.shape == (1, 4)
+    assert weights[:, 3].eq(0).all()
+    loss = poisson_multinomial_binwise_loss(predictions, targets, poisson_weight=0.122)
+    loss = loss + 0.5 * track_contrast_correlation_loss(
+        predictions,
+        targets,
+        weights,
+        region_bins=8,
+        active_fraction=1.0,
+    )
+
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    gradients = [parameter.grad for parameter in head.parameters() if parameter.grad is not None]
+    assert gradients
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
+    assert any(gradient.ne(0).any() for gradient in gradients)
 
 
 def test_residual_and_transfer_heads_produce_expected_shapes():
@@ -216,9 +259,7 @@ def test_transfer_head_can_start_as_empirical_mean_constant():
 
 def test_freeze_policy_unfreezes_last_block_only():
     backbone = DummyBackbone()
-    model = RegulonadoModel(
-        backbone=backbone, head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2)
-    )
+    model = RegulonadoModel(backbone=backbone, head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2))
     model.apply_freeze_policy(
         FreezePolicy(freeze_backbone=True, unfreeze_backbone_stages_from_output_end=1)
     )
@@ -610,7 +651,11 @@ def test_shared_base_channels_average_member_track_output_bias() -> None:
 
 def test_model_construction_keeps_film_modulation_identity_at_init() -> None:
     config = RegulonadoConfig(
-        feature_dim=8, n_tracks=2, head_type="film", head_hidden=4, use_track_metadata=True,
+        feature_dim=8,
+        n_tracks=2,
+        head_type="film",
+        head_hidden=4,
+        use_track_metadata=True,
         num_conditions=2,
     )
     model = RegulonadoModel(config, backbone=DummyAdapter())

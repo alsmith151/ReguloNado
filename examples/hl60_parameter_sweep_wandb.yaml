@@ -2,7 +2,7 @@ program: regulonado
 method: grid
 metric:
   # Distance from calibrated total ratio (1.0) in log space; zero is optimal.
-  name: eval_abs_log_ratio_total_median
+  name: eval/abs_log_ratio_total_median
   goal: minimize
 parameters:
   preset:

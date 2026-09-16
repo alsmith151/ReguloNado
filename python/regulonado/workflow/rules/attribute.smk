@@ -13,6 +13,8 @@ import re
 import shlex
 from pathlib import Path
 
+from regulonado.training.overrides import flatten_settings
+
 ATTRIBUTION = config.get("attribution")
 ATTRIBUTION_DIR = RESULTS / "attribution"
 
@@ -100,7 +102,7 @@ if ATTRIBUTION:
 
         target = ATTRIBUTION_TARGET_BY_NAME[wildcards.target]
         merged = {k: v for k, v in ATTRIBUTION.items() if k in _ATTR_SETTINGS_KEYS}
-        merged.update(_flatten_settings(target.get("settings", {})))
+        merged.update(flatten_settings(target.get("settings", {})))
         # snakemake's schema validate() fills unset fields with their schema default, so
         # topk_bins=10 ends up explicitly present here even when nobody asked for top-k
         # reduction; AttributionConfig rejects topk_bins being set unless bin_reduction='topk',

@@ -246,12 +246,15 @@ train:
     )
 
     assert result.returncode == 0, result.stderr
+    assert re.search(r"train_schedule_preflight\s+4", result.stdout)
     assert re.search(r"train_phase\s+4", result.stdout)
     assert "results/train/run_a/first/trainer_state.json" in result.stdout
     assert "results/train/run_a/second/trainer_state.json" in result.stdout
     assert "results/train/run_b/first/trainer_state.json" in result.stdout
     assert "results/train/run_b/second/trainer_state.json" in result.stdout
     assert "--metadata" in result.stdout
+    assert "--schedule-only" in result.stdout
+    assert "results/train/run_a/first/schedule.json" in result.stdout
     assert "--set seed=10" in result.stdout
     assert "--set seed=20" in result.stdout
     assert "normalization original" in result.stdout
@@ -268,6 +271,7 @@ train:
         env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
     )
     assert cli_result.returncode == 0, cli_result.stdout + cli_result.stderr
+    assert re.search(r"train_schedule_preflight\s+4", cli_result.stdout + cli_result.stderr)
     assert re.search(r"train_phase\s+4", cli_result.stdout + cli_result.stderr)
 
     bad_config = tmp_path / "bad-config.yaml"

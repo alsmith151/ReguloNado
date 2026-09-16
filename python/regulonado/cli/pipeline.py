@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -124,22 +123,19 @@ def _key_value_config(values: list[str]) -> dict[str, str]:
     return config
 
 
-def _flatten_settings(settings: dict, prefix: str = "") -> dict[str, object]:
-    flattened: dict[str, object] = {}
-    for key, value in settings.items():
-        name = f"{prefix}.{key}" if prefix else key
-        if isinstance(value, dict):
-            flattened.update(_flatten_settings(value, name))
-        else:
-            flattened[name] = value
-    return flattened
-
-
 def _validate_training_matrix(configfile: Path) -> None:
     """Compose every configured job so bad settings fail before scheduling."""
     import yaml
+    from regulonado.config.models import RegulonadoConfig
+    from regulonado.training.overrides import hydra_override_items, merge_training_settings
 
     raw = yaml.safe_load(configfile.read_text()) or {}
+    try:
+        RegulonadoConfig.model_validate(raw)
+    except Exception as exc:
+        raise typer.BadParameter(
+            f"Invalid workflow configuration: {exc}", param_hint="CONFIGFILE"
+        ) from exc
     train = raw.get("train")
     if not isinstance(train, dict):
         return  # The workflow's JSON Schema reports structural errors.
@@ -161,26 +157,20 @@ def _validate_training_matrix(configfile: Path) -> None:
         for run in runs:
             if not isinstance(run, dict):
                 continue
-            settings: dict[str, object] = {}
             layers = (
                 train.get("common", {}),
                 phase.get("settings", {}),
                 run.get("settings", {}),
             )
-            for layer in layers:
-                if isinstance(layer, dict):
-                    settings.update(_flatten_settings(layer))
-            if "seed" in run:
-                settings["seed"] = run["seed"]
-            if "pretrained_model" in run:
-                settings["backbone.pretrained_name"] = run["pretrained_model"]
+            settings = merge_training_settings(
+                [layer for layer in layers if isinstance(layer, dict)],
+                seed=run.get("seed"),
+                pretrained_model=run.get("pretrained_model"),
+            )
             overrides = [
                 "data.path=/config-validation",
                 "output_dir=/config-validation",
-                *(
-                    f"{key}={json.dumps(value, separators=(',', ':'))}"
-                    for key, value in settings.items()
-                ),
+                *hydra_override_items(settings),
             ]
             try:
                 resolved_training_config(str(phase["preset"]), overrides)

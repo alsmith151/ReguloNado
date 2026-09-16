@@ -190,7 +190,7 @@ mod tests {
         // Centered window wider than the contig: context extends past both ends.
         let tokens = read_sequence_tokens(&fasta, &fai, "chr1", 0, 4, 10).unwrap();
         assert_eq!(tokens.len(), 10);
-        assert_eq!(tokens.iter().filter(|&&t| t == 4).count() >= 6, true);
+        assert!(tokens.iter().filter(|&&t| t == 4).count() >= 6);
         // The in-bounds bases still decode correctly wherever they land.
         assert!(tokens.contains(&0));
         assert!(tokens.contains(&1));

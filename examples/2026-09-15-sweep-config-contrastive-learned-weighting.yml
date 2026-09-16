@@ -1,0 +1,136 @@
+program: regulonado
+name: contrastive-learned-weighting
+method: bayes
+
+metric:
+  # contrast_pearson_median now scores the SAME quantity loss.contrast_weight optimises
+  # (regulonado/training/losses.py::track_contrast_correlation_loss, shared with the
+  # metric via specificity_stats) -- previously it was a KL over allocation proportions,
+  # which sweep refvd3ye found correlating -0.35 with this metric and driving
+  # contrast_weight -> ~0.03. That evidence does not transfer to the fixed loss; this
+  # sweep exists to find out from scratch whether contrast_weight now helps at all.
+  name: eval/contrast_pearson_median
+  goal: maximize
+
+# Evals land every 150 steps to 3500; min_iter 4 gives the first cut at step 600.
+# Cell-type differences are expected to emerge after the shared profile, so don't prune
+# earlier than that.
+early_terminate:
+  type: hyperband
+  min_iter: 4
+  eta: 2
+
+parameters:
+  preset:
+    value: head_only
+  data.path:
+    value: /path/to/regulonado/dataset
+  data.metadata_path:
+    value: /path/to/regulonado/dataset/tracks.parquet
+  data.apply_squash:
+    value: false
+  data.enable_rc_aug:
+    value: false
+
+  backbone.pretrained_name:
+    value: johahi/flashzoi-replicate-1
+
+  # Fixed at sweep refvd3ye's optimum (45 runs, hyperparameters exhausted there): FiLM
+  # conditioned on group (cell type), sharing collapsed to one base channel per
+  # assay_class so FiLM differentiates cell types from a shared feature basis.
+  model.use_track_metadata:
+    value: true
+  model.condition_source:
+    value: group
+  model.share_condition_base_channels:
+    value: false
+  # softplus_beta2 beat exp and plain softplus under contrast_pearson_median in 8wb1xsph.
+  model.activation_type:
+    value: softplus_beta2
+
+  loss:
+    value: poisson_multinomial_binwise
+  loss.poisson_weight:
+    value: 0.122
+  # The only genuinely unexplored knob: this term now optimises the metric's own
+  # correlation, not a divergent KL. 0.02-2.0 brackets the old KL-era sweep range
+  # (0.02-1.5) with headroom above, since that range's shape was fit to the wrong
+  # function and carries no prior for where this one turns over.
+  loss.contrast_weight:
+    distribution: log_uniform_values
+    min: 0.02
+    max: 2.0
+  # Kendall et al. per-track uncertainty weighting. Targets tracks with poor
+  # scale_heldout_recovery by letting the model auto-downweight them instead of a
+  # hand-picked exclusion threshold -- untested in combination with the fixed
+  # contrast loss, so left as a free axis rather than assumed beneficial.
+  loss.learn_track_weights:
+    values: [false, true]
+
+  head:
+    value: film
+  head.hidden:
+    value: 3072
+  head.dropout:
+    value: 0.1
+  head.output_init:
+    value: empirical_mean_constant
+  head.output_init_samples:
+    value: 512
+
+  trainer.learning_rate:
+    value: 1.38e-3
+  trainer.backbone_learning_rate:
+    value: 9.9e-4
+  trainer.weight_decay:
+    value: 4.3e-5
+  trainer.scheduler:
+    value: linear
+  trainer.warmup_steps:
+    value: 200
+  # The other open question from the contrast-correlation plan: four capacity
+  # manipulations (head width, film vs transfer_mlp, share_condition_base_channels) were
+  # null in refvd3ye, but backbone_learning_rate and unfreeze-3-over-2 both moved the
+  # objective -- depth, not width. 5 tests whether that trend continues; 3 keeps the
+  # attribution to the loss change clean if it doesn't.
+  trainer.unfreeze_backbone_stages_from_output_end:
+    values: [3, 5]
+
+  trainer.max_steps:
+    value: 3500
+  trainer.eval_every_n_steps:
+    value: 150
+  trainer.checkpoint_every_n_steps:
+    # Checkpoint every evaluation so best-model restoration is always possible.
+    value: 150
+  trainer.max_eval_samples:
+    value: 1500
+  trainer.metric_for_best_model:
+    value: contrast_pearson_median
+  trainer.greater_is_better:
+    value: true
+  trainer.early_stopping_patience:
+    value: null
+  # Region geometry shared by the contrast_* metrics and the loss term -- single source
+  # of truth (docs/training.md#cross-track-contrast). These are the TrainerConfig
+  # defaults, set explicitly so the sweep is self-documenting.
+  trainer.contrast_region_bins:
+    value: 16
+  trainer.contrast_pseudocount:
+    value: 0.1
+  trainer.contrast_active_fraction:
+    value: 0.1
+  trainer.report_to:
+    value: [wandb]
+  trainer.wandb_project:
+    value: regulonado-parameter-sweep-contrastive-v2
+  trainer.wandb_job_type:
+    value: parameter-sweep
+  trainer.wandb_tags:
+    value: [anchor-scaled, cell-type-contrast, contrast-correlation-loss, learned-weighting]
+
+command:
+  - ${env}
+  - ${program}
+  - sweep-train
+  - ${args_json_file}
