@@ -45,9 +45,12 @@ def make_preprocess_logits_for_metrics(
     def preprocess(logits: torch.Tensor | tuple, labels: torch.Tensor) -> torch.Tensor:
         if isinstance(logits, tuple):
             logits = logits[0]
-        p = logits
+        # float32 regardless of the model output dtype: every column below is a sum feeding
+        # an n*Σx² - (Σx)² style difference, which bf16's ~0.8% resolution would swamp.
+        p = logits.float()
         # Labels may be loaded as [B, L, T] by the HF datasets library; align to [B, T, L].
         t = labels if labels.shape[-2:] == p.shape[-2:] else labels.transpose(-2, -1)
+        t = t.float()
         B, T, L = p.shape
         k = min(topk_bins, L)
 

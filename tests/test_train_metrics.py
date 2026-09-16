@@ -409,3 +409,12 @@ class TestRegulonadoTrainerPredictionStep:
             )
 
         assert out_labels.shape == (B, T), out_labels.shape
+
+
+def test_preprocess_logits_accumulates_in_float32_for_half_precision_outputs() -> None:
+    preprocess = make_preprocess_logits_for_metrics(topk_bins=4)
+    logits = (torch.rand(2, 3, 16) * 50).to(torch.bfloat16)
+
+    stats = preprocess(logits, torch.rand(2, 3, 16))
+
+    assert stats.dtype == torch.float32
