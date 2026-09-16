@@ -241,7 +241,7 @@ def test_schedule_matches_accelerate_and_trainer_lengths(
             even_batches=True,
         )
     dataloader = DataLoader(range(rows), batch_sampler=batch_sampler)
-    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True)
+    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True, seed=0)
     trainer = Trainer(model=torch.nn.Linear(1, 1), args=args, eval_dataset=range(rows))
     values = trainer.set_initial_training_values(args, dataloader)
 
@@ -269,7 +269,7 @@ def test_epoch_driven_training_evaluates_once_per_epoch(tmp_path) -> None:
     cfg = TrainerConfig(batch_size=12, mixed_precision="no", checkpoint_every_n_steps=None)
     schedule = _schedule(cfg)
 
-    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True)
+    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True, seed=0)
 
     assert args.max_steps == -1
     assert args.num_train_epochs == 1
@@ -280,7 +280,7 @@ def test_evals_per_epoch_evaluates_and_checkpoints_each_quarter_epoch(tmp_path) 
     cfg = TrainerConfig(batch_size=12, mixed_precision="no", evals_per_epoch=4, max_epochs=2)
     schedule = _schedule(cfg)
 
-    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True)
+    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True, seed=0)
 
     assert args.eval_steps == 868
     assert args.save_strategy == "steps"
@@ -303,7 +303,7 @@ def test_evals_per_epoch_evaluates_and_checkpoints_each_quarter_epoch(tmp_path) 
 def test_evaluation_keeps_the_final_partial_batch(tmp_path) -> None:
     cfg = TrainerConfig(batch_size=4, eval_batch_size=4, mixed_precision="no")
     schedule = _schedule(cfg, rows=10)
-    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True)
+    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True, seed=0)
     rows = [{"input_ids": torch.tensor([float(index)])} for index in range(10)]
     trainer = RegulonadoTrainer(
         model=torch.nn.Linear(1, 1),
@@ -335,7 +335,7 @@ def test_two_epoch_trainer_run_matches_schedule_and_scheduler(tmp_path) -> None:
         log_every_n_steps=1,
     )
     schedule = _resolve_training_schedule(cfg, train_rows=10, world_size=1, has_eval=False)
-    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=False)
+    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=False, seed=0)
     model = ToyModel()
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate)
     scheduler = _build_scheduler_for_trainer(optimizer, cfg, schedule)
@@ -365,7 +365,7 @@ def test_explicit_eval_interval_overrides_evals_per_epoch(tmp_path) -> None:
     )
     schedule = _schedule(cfg)
 
-    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True)
+    args = _build_training_arguments(tmp_path, cfg, schedule, has_eval=True, seed=0)
 
     assert args.eval_steps == 250
     assert args.save_steps == 250
@@ -684,3 +684,24 @@ def test_warm_start_tolerates_learned_track_weight_mismatch(
     torch.testing.assert_close(target.weight, source.weight)
     if target_log_var:
         torch.testing.assert_close(target.track_loss_log_var, torch.zeros(2))
+
+
+def _first_epoch_order(tmp_path: Path, seed: int) -> list[int]:
+    cfg = TrainerConfig(batch_size=1, num_workers=0, max_epochs=1, mixed_precision="no")
+    schedule = _resolve_training_schedule(cfg, train_rows=32, world_size=1, has_eval=False)
+    args = _build_training_arguments(tmp_path / str(seed), cfg, schedule, has_eval=False, seed=seed)
+    trainer = Trainer(
+        model=torch.nn.Linear(1, 1),
+        args=args,
+        train_dataset=list(range(32)),
+        data_collator=lambda batch: batch,
+    )
+    torch.manual_seed(args.seed)  # train() re-seeds from args.seed before iterating
+    return [int(batch[0]) for batch in trainer.get_train_dataloader()]
+
+
+def test_training_arguments_carry_run_seed_so_folds_shuffle_differently(tmp_path):
+    # Trainer re-seeds from TrainingArguments.seed; defaulting it to 42 gave every fold
+    # the same shuffle order, dropout masks, and augmentation draws.
+    assert _first_epoch_order(tmp_path, 1) == _first_epoch_order(tmp_path, 1)
+    assert _first_epoch_order(tmp_path, 1) != _first_epoch_order(tmp_path, 2)

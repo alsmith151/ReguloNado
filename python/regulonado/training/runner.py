@@ -1123,6 +1123,7 @@ def _build_training_arguments(
     schedule: TrainingSchedule,
     *,
     has_eval: bool,
+    seed: int,
 ) -> TrainingArguments:
     if "wandb" in trainer_cfg.report_to:
         environ["WANDB_PROJECT"] = trainer_cfg.wandb_project
@@ -1168,6 +1169,9 @@ def _build_training_arguments(
         save_strategy=save_strategy,
         save_steps=save_steps if save_strategy == "steps" else None,
         save_total_limit=2 if save_strategy == "steps" else None,
+        # Trainer re-seeds from this at train() start (shuffle order, dropout, worker
+        # augmentation); left at its default every run would share seed 42.
+        seed=seed,
         gradient_checkpointing=False,
         # Metadata heads build submodules (timepoint MLP, per-field embeddings) that only
         # run when the dataset carries that field, so some trainable parameters get no
@@ -1610,6 +1614,7 @@ def _setup_optimization(
     *,
     has_eval: bool,
     output_dir: Path,
+    seed: int,
 ) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler, TrainingArguments]:
     """Build the optimizer, LR scheduler, and HF ``TrainingArguments`` together."""
     optimizer = _build_optimizer(model, trainer_cfg)
@@ -1619,6 +1624,7 @@ def _setup_optimization(
         trainer_cfg,
         schedule,
         has_eval=has_eval,
+        seed=seed,
     )
     return optimizer, scheduler, training_args
 
@@ -1875,6 +1881,7 @@ def run_training(
         schedule,
         has_eval="validation" in dataset_dict,
         output_dir=output_dir,
+        seed=seed,
     )
     val_dataset = dataset_dict.get("validation")
     callbacks = _build_training_callbacks(
