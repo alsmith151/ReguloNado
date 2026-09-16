@@ -618,3 +618,29 @@ def test_model_construction_keeps_film_modulation_identity_at_init() -> None:
 
     assert not model.head.metadata_to_scale.weight.any()
     assert not model.head.metadata_to_shift.weight.any()
+
+
+def test_lr_log_labels_groups_by_parameter_family_not_position():
+    from regulonado.training.callbacks import LRLogCallback
+    from transformers import TrainerControl, TrainerState, TrainingArguments
+
+    model = RegulonadoModel(
+        backbone=DummyBackbone(),
+        head=TransferMLPPerturbHead(in_ch=8, hidden=4, n_tracks=2),
+    )
+    # Frozen backbone: only head groups exist, which positional labels called "backbone".
+    for parameter in model.backbone.parameters():
+        parameter.requires_grad = False
+    cfg = TrainerConfig(learning_rate=1e-3, backbone_learning_rate=1e-4, weight_decay=0.1)
+    optimizer = _build_optimizer(model, cfg)
+    state = TrainerState()
+    state.log_history = [{}]
+
+    LRLogCallback().on_log(
+        TrainingArguments(output_dir="unused", report_to=[]),
+        state,
+        TrainerControl(),
+        optimizer=optimizer,
+    )
+
+    assert state.log_history[-1] == {"learning_rate/head": 1e-3}

@@ -167,11 +167,12 @@ class LRLogCallback(TrainerCallback):
         optimizer = kwargs.get("optimizer")
         if optimizer is None or not state.is_world_process_zero:
             return
+        # Groups are named by parameter family in _build_optimizer; decay and no-decay
+        # groups of one family share a learning rate, and empty families are omitted, so
+        # position says nothing about which family a group belongs to.
         logs: dict[str, float] = {}
-        names = ["backbone", "head"]
         for i, group in enumerate(optimizer.param_groups):
-            label = names[i] if i < len(names) else f"group{i}"
-            logs[f"learning_rate/{label}"] = group["lr"]
+            logs[f"learning_rate/{group.get('name', f'group{i}')}"] = group["lr"]
         if state.log_history:
             state.log_history[-1].update(logs)
 

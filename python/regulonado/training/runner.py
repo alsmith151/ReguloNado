@@ -953,10 +953,17 @@ def _build_optimizer(model: RegulonadoModel, trainer_cfg: TrainerConfig) -> torc
         no_decay_params = grouped[(family, False)]
         if decay_params:
             param_groups.append(
-                {"params": decay_params, "lr": group_lr, "weight_decay": trainer_cfg.weight_decay}
+                {
+                    "params": decay_params,
+                    "lr": group_lr,
+                    "weight_decay": trainer_cfg.weight_decay,
+                    "name": family,
+                }
             )
         if no_decay_params:
-            param_groups.append({"params": no_decay_params, "lr": group_lr, "weight_decay": 0.0})
+            param_groups.append(
+                {"params": no_decay_params, "lr": group_lr, "weight_decay": 0.0, "name": family}
+            )
     if not param_groups:
         param_groups.append(
             {
@@ -965,6 +972,7 @@ def _build_optimizer(model: RegulonadoModel, trainer_cfg: TrainerConfig) -> torc
                 ],
                 "lr": lr,
                 "weight_decay": trainer_cfg.weight_decay,
+                "name": "head",
             }
         )
     return AdamW(param_groups)
