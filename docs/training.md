@@ -139,6 +139,20 @@ longer-lived agents so later suggestions can incorporate earlier results; for a
 One-by-one jobs remain preferable when queue policy, wall-time prediction, or
 preemption isolation matters more than Bayesian adaptivity.
 
+## Cross-track contrast
+
+`loss.contrast_weight` and `trainer.contrast_*` (`contrast_region_bins`,
+`contrast_pseudocount`, `contrast_active_fraction`) are one coupled knob set, not
+two independent ones. The `trainer.contrast_*` values define the region geometry
+for cross-track specificity — group-balanced log deviations over the most active
+fraction of regions per example — and that same definition is used both by the
+`contrast_*` eval metrics (`contrast_pearson_median`, `contrast_slope_median`,
+`contrast_sd_ratio_median`) and, when `loss.contrast_weight > 0`, by the training
+loss term. The loss term optimises `1 - mean(r)` of exactly the quantity
+`contrast_pearson_median` reports (the loss reduces per-track r with `mean`, the
+metric with `median`), so raising `loss.contrast_weight` should move
+`contrast_pearson_median` directly rather than a proxy for it.
+
 ## Read the output
 
 A completed run directory contains the resolved training configuration and

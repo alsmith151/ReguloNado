@@ -52,7 +52,7 @@ from regulonado.training.losses import (
     scaled_poisson_multinomial_loss,
     topk_additive_loss,
     topk_reweight_loss,
-    track_contrast_loss,
+    track_contrast_correlation_loss,
     transfer_calibration_loss,
 )
 from regulonado.training.metrics import (
@@ -452,6 +452,9 @@ def _build_loss_fn(
     labels_already_scaled: bool,
     contrast_weights: torch.Tensor | None = None,
     track_log_var: torch.nn.Parameter | None = None,
+    contrast_region_bins: int = 16,
+    contrast_pseudocount: float = 0.1,
+    contrast_active_fraction: float = 0.1,
 ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
     """Build the configured base loss, plus the cross-track contrast term when weighted."""
     base_loss = _build_base_loss_fn(
@@ -469,9 +472,17 @@ def _build_loss_fn(
             "loss.contrast_weight requires tracks labelled with assay_class and group, "
             "with at least two groups sharing one assay_class"
         )
-    region_bins = int(loss_cfg.get("contrast_region_bins") or 16)
-    return lambda pred, target: base_loss(pred, target) + contrast_weight * track_contrast_loss(
-        pred, target, contrast_weights, region_bins=region_bins
+    return (
+        lambda pred, target: base_loss(pred, target)
+        + contrast_weight
+        * track_contrast_correlation_loss(
+            pred,
+            target,
+            contrast_weights,
+            region_bins=contrast_region_bins,
+            pseudocount=contrast_pseudocount,
+            active_fraction=contrast_active_fraction,
+        )
     )
 
 
@@ -1416,6 +1427,7 @@ def _build_collate_and_loss(
             raise ValueError("loss.learn_track_weights requires a model to attach the parameter to")
         track_log_var = torch.nn.Parameter(torch.zeros(len(records)))
         model.track_loss_log_var = track_log_var
+    trainer_cfg_for_loss = cfg.get("trainer", {})
     loss_fn = _build_loss_fn(
         cfg["loss"],
         scale_factors=scale_factors,
@@ -1423,6 +1435,9 @@ def _build_collate_and_loss(
         labels_already_scaled=labels_already_scaled,
         contrast_weights=_contrast_weights_from_records(records),
         track_log_var=track_log_var,
+        contrast_region_bins=int(trainer_cfg_for_loss.get("contrast_region_bins", 16)),
+        contrast_pseudocount=float(trainer_cfg_for_loss.get("contrast_pseudocount", 0.1)),
+        contrast_active_fraction=float(trainer_cfg_for_loss.get("contrast_active_fraction", 0.1)),
     )
     return collate_fn, loss_fn, scale_factors, background
 

@@ -413,42 +413,107 @@ def contrast_family_weights(
     return torch.stack(rows)
 
 
-def track_contrast_loss(
+def specificity_stats(
+    p: torch.Tensor,
+    t: torch.Tensor,
+    family_weights: torch.Tensor | None,
+    *,
+    region_bins: int,
+    pseudocount: float,
+    active_fraction: float,
+) -> torch.Tensor:
+    """Per-track sufficient stats ``[B, T, 6]`` for cross-track specificity.
+
+    Specificity is a track's log region signal minus the group-balanced family mean,
+    ``c_t = log(y_t + ps) - Σ_s w_s log(y_s + ps)``. Stats cover the most active
+    ``active_fraction`` of regions per example (by observed family mean signal) and stay
+    zero for tracks outside every contrast family. Differentiable w.r.t. ``p``.
+    """
+    batch, n_tracks, length = p.shape
+    stats = torch.zeros((batch, n_tracks, 6), dtype=torch.float32, device=p.device)
+    n_regions = length // region_bins
+    if family_weights is None or family_weights.shape[0] == 0 or n_regions == 0:
+        return stats
+    usable = n_regions * region_bins
+    region_p = p.float()[..., :usable].reshape(batch, n_tracks, n_regions, region_bins).sum(-1)
+    region_t = t.float()[..., :usable].reshape(batch, n_tracks, n_regions, region_bins).sum(-1)
+    offset = pseudocount * region_bins
+    log_p = torch.log(region_p.clamp_min(0.0) + offset)
+    log_t = torch.log(region_t.clamp_min(0.0) + offset)
+    n_active = max(1, int(round(active_fraction * n_regions)))
+    for row in family_weights.to(device=p.device, dtype=torch.float32):
+        members = row > 0
+        member_weights = row[members]
+        member_log_p = log_p[:, members]
+        member_log_t = log_t[:, members]
+        centred_p = member_log_p - torch.einsum("t,btr->br", member_weights, member_log_p)[:, None]
+        centred_t = member_log_t - torch.einsum("t,btr->br", member_weights, member_log_t)[:, None]
+        family_signal = torch.einsum(
+            "t,btr->br", member_weights, region_t[:, members].clamp_min(0.0)
+        )
+        threshold = family_signal.topk(n_active, dim=-1).values[:, -1:]
+        active = ((family_signal >= threshold) & (family_signal > 0)).to(torch.float32)[:, None]
+        stats[:, members] = torch.stack(
+            [
+                (centred_p * active).sum(-1),
+                (centred_t * active).sum(-1),
+                (centred_p * centred_t * active).sum(-1),
+                (centred_p * centred_p * active).sum(-1),
+                (centred_t * centred_t * active).sum(-1),
+                active.sum(-1).expand(-1, member_weights.numel()),
+            ],
+            dim=-1,
+        )
+    return stats
+
+
+def _pearson_from_stats_torch(stats: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Torch mirror of the metric's ``_pearson_from_stats``, returning ``(r, valid)``.
+
+    ``stats`` is ``[T, 6]`` = ``(sum_p, sum_t, sum_pt, sum_p2, sum_t2, n)``. ``denom`` is
+    clamped only to keep the backward pass finite; the unclamped product decides ``valid``,
+    so the clamp never masks a genuinely-zero-variance track as valid.
+    """
+    sum_p, sum_t, sum_pt, sum_p2, sum_t2, n = stats.unbind(dim=-1)
+    num = n * sum_pt - sum_p * sum_t
+    var_p = (n * sum_p2 - sum_p**2).clamp_min(0.0)
+    var_t = (n * sum_t2 - sum_t**2).clamp_min(0.0)
+    denom_raw = var_p * var_t
+    denom = denom_raw.clamp_min(1e-12).sqrt()
+    r = num / denom
+    valid = denom_raw > 0
+    return r, valid
+
+
+def track_contrast_correlation_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
     family_weights: torch.Tensor,
     *,
     region_bins: int = 16,
-    epsilon: float = 1e-6,
+    pseudocount: float = 0.1,
+    active_fraction: float = 0.1,
 ) -> torch.Tensor:
-    """Count-weighted KL between observed and predicted signal allocation across tracks.
+    """``1 - mean(r)`` of per-track cross-track specificity correlation.
 
-    Bins are summed into ``region_bins``-wide regions. Within each region and contrast
-    family (rows of ``family_weights``, see :func:`contrast_family_weights`), the observed
-    allocation ``p_t ∝ w_t · y_t`` over member tracks is compared with the predicted
-    allocation ``q_t ∝ w_t · ŷ_t``. The loss is zero whenever predictions are proportional
-    to targets within a family, so it constrains cell-type differences and leaves the
-    shared magnitude to the base loss. Regions are weighted by observed family signal, as
-    in the multinomial profile term.
+    Computes the same group-balanced log-deviation quantity as ``contrast_pearson_median``
+    (see :func:`specificity_stats`), pooled over the batch before computing r — pooling and
+    averaging don't commute for Pearson, and pooling is what the metric does. The loss
+    reduces per-track r with ``mean`` (a useful gradient to every track each step); the
+    metric reports ``median``.
     """
-    batch, n_tracks, length = pred.shape
-    n_regions = length // region_bins
+    n_regions = target.shape[-1] // region_bins
     if family_weights.shape[0] == 0 or n_regions == 0:
         return pred.sum() * 0.0
-    usable = n_regions * region_bins
-    region_pred = (
-        pred.float()[..., :usable].reshape(batch, n_tracks, n_regions, region_bins).sum(-1)
-    )
-    region_true = (
-        target.float()[..., :usable].reshape(batch, n_tracks, n_regions, region_bins).sum(-1)
-    )
-    weights = family_weights.to(device=pred.device, dtype=region_pred.dtype)[None, :, :, None]
-    weighted_true = weights * region_true.clamp_min(0.0)[:, None]
-    weighted_pred = weights * region_pred.clamp_min(0.0)[:, None] + epsilon * (weights > 0)
-    family_mass = weighted_true.sum(dim=2)  # [B, F, R]
-    p_true = weighted_true / family_mass.unsqueeze(2).clamp_min(epsilon)
-    log_q = torch.log(weighted_pred.clamp_min(epsilon * epsilon)) - torch.log(
-        weighted_pred.sum(dim=2, keepdim=True)
-    )
-    kl = (torch.xlogy(p_true, p_true) - p_true * log_q).sum(dim=2)
-    return (family_mass * kl).sum() / family_mass.sum().clamp_min(epsilon)
+    stats = specificity_stats(
+        pred,
+        target,
+        family_weights,
+        region_bins=region_bins,
+        pseudocount=pseudocount,
+        active_fraction=active_fraction,
+    ).sum(dim=0)  # [T, 6]
+    r, valid = _pearson_from_stats_torch(stats)
+    if not bool(valid.any()):
+        return pred.sum() * 0.0
+    return 1.0 - r[valid].mean()

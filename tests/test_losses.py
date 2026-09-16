@@ -12,9 +12,10 @@ from regulonado.training.losses import (
     poisson_multinomial_loss,
     poisson_nll_loss,
     scaled_poisson_multinomial_loss,
+    specificity_stats,
     topk_additive_loss,
     topk_reweight_loss,
-    track_contrast_loss,
+    track_contrast_correlation_loss,
     transfer_calibration_loss,
 )
 
@@ -336,7 +337,7 @@ def test_paired_log2fc_perfect_pred_near_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
-# contrast_family_weights / track_contrast_loss
+# contrast_family_weights / track_contrast_correlation_loss
 # ---------------------------------------------------------------------------
 
 
@@ -354,38 +355,122 @@ def _contrast_weights() -> torch.Tensor:
     return contrast_family_weights(["A", "A", "A", "A"], ["g1", "g2", "g3", "g3"])
 
 
-def test_track_contrast_perfect_pred_near_zero() -> None:
+def _region_expand(region_values: torch.Tensor, region_bins: int) -> torch.Tensor:
+    """Expand per-(batch, track) region totals into [B, T, region_bins] with a uniform
+    distribution across bins, so summing bins recovers ``region_values`` exactly."""
+    expanded = region_values / region_bins
+    return expanded[..., None].expand(*region_values.shape, region_bins).contiguous()
+
+
+def _log_linear_batch(
+    k: float, *, n_batches: int = 6, region_bins: int = 8, pseudocount: float = 0.1, seed: int = 0
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build (pred, target) with predicted specificity an exact ``k``-scaling of observed
+    specificity, using region_bins == length so each example is a single active region.
+    The offset is negligible at this magnitude, so the log-linear relationship built here
+    survives the implementation's own log/exp round trip almost exactly."""
+    torch.manual_seed(seed)
+    weights = _contrast_weights()[0]
+    offset = pseudocount * region_bins
+    t_values = torch.rand(n_batches, T) * 50 + 50
+    log_t = torch.log(t_values + offset)
+    mean_log_t = (weights * log_t).sum(dim=-1, keepdim=True)
+    c_t = log_t - mean_log_t
+    log_p = k * c_t + mean_log_t
+    p_values = torch.exp(log_p) - offset
+    target = _region_expand(t_values, region_bins)
+    pred = _region_expand(p_values, region_bins).requires_grad_(True)
+    return pred, target
+
+
+def test_track_contrast_correlation_perfect_pred_near_zero() -> None:
     tgt = _rand_pos(B, T, L)
-    loss = track_contrast_loss(tgt.detach().clone(), tgt, _contrast_weights(), region_bins=8)
+    loss = track_contrast_correlation_loss(
+        tgt.detach().clone(), tgt, _contrast_weights(), region_bins=8, active_fraction=1.0
+    )
     assert loss.shape == ()
-    assert loss.item() < 1e-5
+    assert loss.item() < 1e-4
 
 
-def test_track_contrast_ignores_shared_scale() -> None:
-    tgt = _rand_pos(B, T, L)
-    loss = track_contrast_loss(3.0 * tgt.detach(), tgt, _contrast_weights(), region_bins=8)
-    assert loss.item() < 1e-5
+def test_track_contrast_correlation_ignores_shared_scale() -> None:
+    tgt = torch.rand(B, T, L) * 50 + 50
+    loss = track_contrast_correlation_loss(
+        3.0 * tgt.detach(), tgt, _contrast_weights(), region_bins=8, active_fraction=1.0
+    )
+    assert loss.item() < 1e-3
 
 
-def test_track_contrast_penalises_identical_tracks() -> None:
-    tgt = torch.rand(B, T, L) + 0.1
-    tgt[:, 0] *= 5.0
-    shared = tgt.mean(dim=1, keepdim=True).expand_as(tgt)
-    assert track_contrast_loss(shared, tgt, _contrast_weights(), region_bins=8).item() > 0.01
+def test_track_contrast_correlation_amplitude_compressed_by_half_still_near_zero() -> None:
+    """A correlation objective doesn't constrain amplitude: halving the predicted
+    specificity spread relative to the observed one still gives a near-perfect loss."""
+    pred, target = _log_linear_batch(k=0.5, region_bins=8)
+    loss = track_contrast_correlation_loss(pred, target, _contrast_weights(), region_bins=8)
+    assert loss.item() < 1e-3
 
 
-def test_track_contrast_gradient() -> None:
+def test_track_contrast_correlation_negated_deviations_gives_loss_two() -> None:
+    pred, target = _log_linear_batch(k=-1.0, region_bins=8)
+    loss = track_contrast_correlation_loss(pred, target, _contrast_weights(), region_bins=8)
+    assert loss.item() == pytest.approx(2.0, abs=1e-2)
+
+
+def test_track_contrast_correlation_single_example_masked_finite_zero() -> None:
+    # With one example and one region, every track's per-track sample count is 1, so
+    # variance (and the correlation denominator) is identically zero for every track.
+    pred = _rand_pos(1, T, L)
+    tgt = _rand_pos(1, T, L)
+    loss = track_contrast_correlation_loss(pred, tgt, _contrast_weights(), region_bins=L)
+    assert torch.isfinite(loss)
+    assert loss.item() == pytest.approx(0.0)
+
+
+def test_track_contrast_correlation_gradient_finite_and_nonzero() -> None:
     pred = _rand_pos(B, T, L)
     tgt = _rand_pos(B, T, L)
-    track_contrast_loss(pred, tgt, _contrast_weights(), region_bins=8).backward()
+    loss = track_contrast_correlation_loss(pred, tgt, _contrast_weights(), region_bins=8)
+    loss.backward()
     assert pred.grad is not None
     assert torch.isfinite(pred.grad).all()
+    assert (pred.grad != 0).any()
 
 
-def test_track_contrast_without_families_is_zero_with_gradient() -> None:
+def test_track_contrast_correlation_without_families_is_zero_with_gradient() -> None:
     pred = _rand_pos(B, T, L)
     tgt = _rand_pos(B, T, L)
-    loss = track_contrast_loss(pred, tgt, torch.zeros(0, T), region_bins=8)
+    loss = track_contrast_correlation_loss(pred, tgt, torch.zeros(0, T), region_bins=8)
     loss.backward()
     assert loss.item() == pytest.approx(0.0)
     assert pred.grad is not None
+
+
+def test_specificity_stats_active_selection_uses_observed_signal_only() -> None:
+    """Scrambling predictions outside the observed-active region set must not change the
+    stats: active-region selection is driven by target signal, not predictions."""
+    torch.manual_seed(3)
+    weights = _contrast_weights()
+    region_bins = 8
+    pred = _rand_pos(B, T, region_bins * 4)
+    tgt = _rand_pos(B, T, region_bins * 4)
+    kwargs = dict(region_bins=region_bins, pseudocount=0.1, active_fraction=0.25)
+    baseline = specificity_stats(pred, tgt, weights, **kwargs)
+
+    # Identify inactive regions per (batch, family) the same way the implementation does,
+    # then scramble pred there and confirm the stats are unchanged.
+    with torch.no_grad():
+        scrambled = pred.detach().clone()
+        n_regions = scrambled.shape[-1] // region_bins
+        usable_t = tgt.detach()[..., : n_regions * region_bins]
+        region_t = usable_t.reshape(B, T, n_regions, region_bins).sum(-1)
+        row = weights[0]
+        members = row > 0
+        family_signal = torch.einsum("t,btr->br", row[members], region_t[:, members].clamp_min(0.0))
+        n_active = max(1, round(0.25 * n_regions))
+        threshold = family_signal.topk(n_active, dim=-1).values[:, -1:]
+        active = (family_signal >= threshold) & (family_signal > 0)
+        inactive_regions = (~active).nonzero(as_tuple=False)  # [(b, r), ...]
+        for b, r in inactive_regions.tolist():
+            start = r * region_bins
+            scrambled[b, :, start : start + region_bins] = torch.rand(T, region_bins) + 10.0
+
+    scrambled_stats = specificity_stats(scrambled, tgt, weights, **kwargs)
+    torch.testing.assert_close(baseline, scrambled_stats)

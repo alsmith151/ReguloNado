@@ -6,6 +6,8 @@ import numpy as np
 import torch
 from transformers import EvalPrediction
 
+from regulonado.training.losses import specificity_stats
+
 
 def _safe_corr(x: np.ndarray, y: np.ndarray) -> float:
     finite = np.isfinite(x) & np.isfinite(y)
@@ -16,60 +18,6 @@ def _safe_corr(x: np.ndarray, y: np.ndarray) -> float:
     with np.errstate(invalid="ignore"):
         r = float(np.corrcoef(x, y)[0, 1])
     return float("nan") if not np.isfinite(r) else r
-
-
-def _specificity_stats(
-    p: torch.Tensor,
-    t: torch.Tensor,
-    family_weights: torch.Tensor | None,
-    *,
-    region_bins: int,
-    pseudocount: float,
-    active_fraction: float,
-) -> torch.Tensor:
-    """Per-track sufficient stats ``[B, T, 6]`` for cross-track specificity.
-
-    Specificity is a track's log region signal minus the group-balanced family mean,
-    ``c_t = log(y_t + ps) - Σ_s w_s log(y_s + ps)``. Stats cover the most active
-    ``active_fraction`` of regions per example (by observed family mean signal) and stay
-    zero for tracks outside every contrast family.
-    """
-    batch, n_tracks, length = p.shape
-    stats = torch.zeros((batch, n_tracks, 6), dtype=torch.float32, device=p.device)
-    n_regions = length // region_bins
-    if family_weights is None or family_weights.shape[0] == 0 or n_regions == 0:
-        return stats
-    usable = n_regions * region_bins
-    region_p = p.float()[..., :usable].reshape(batch, n_tracks, n_regions, region_bins).sum(-1)
-    region_t = t.float()[..., :usable].reshape(batch, n_tracks, n_regions, region_bins).sum(-1)
-    offset = pseudocount * region_bins
-    log_p = torch.log(region_p.clamp_min(0.0) + offset)
-    log_t = torch.log(region_t.clamp_min(0.0) + offset)
-    n_active = max(1, int(round(active_fraction * n_regions)))
-    for row in family_weights.to(device=p.device, dtype=torch.float32):
-        members = row > 0
-        member_weights = row[members]
-        member_log_p = log_p[:, members]
-        member_log_t = log_t[:, members]
-        centred_p = member_log_p - torch.einsum("t,btr->br", member_weights, member_log_p)[:, None]
-        centred_t = member_log_t - torch.einsum("t,btr->br", member_weights, member_log_t)[:, None]
-        family_signal = torch.einsum(
-            "t,btr->br", member_weights, region_t[:, members].clamp_min(0.0)
-        )
-        threshold = family_signal.topk(n_active, dim=-1).values[:, -1:]
-        active = ((family_signal >= threshold) & (family_signal > 0)).to(torch.float32)[:, None]
-        stats[:, members] = torch.stack(
-            [
-                (centred_p * active).sum(-1),
-                (centred_t * active).sum(-1),
-                (centred_p * centred_t * active).sum(-1),
-                (centred_p * centred_p * active).sum(-1),
-                (centred_t * centred_t * active).sum(-1),
-                active.sum(-1).expand(-1, member_weights.numel()),
-            ],
-            dim=-1,
-        )
-    return stats
 
 
 def make_preprocess_logits_for_metrics(
@@ -91,7 +39,7 @@ def make_preprocess_logits_for_metrics(
       cols 20-24: (sum_log_p, sum_log_t, sum_log_p*log_t, sum_log_p², n)
                    over bins — sufficient stats for dispersion_slope
       cols 25-30: (sum_c_p, sum_c_t, sum_c_p*c_t, sum_c_p², sum_c_t², n) over active
-                   regions — cross-track specificity stats (see _specificity_stats)
+                   regions — cross-track specificity stats (see specificity_stats)
     """
 
     def preprocess(logits: torch.Tensor | tuple, labels: torch.Tensor) -> torch.Tensor:
@@ -131,7 +79,7 @@ def make_preprocess_logits_for_metrics(
         log_t_sum = log_t.sum(-1).to(dtype=p.dtype)
         log_pt_sum = (log_p * log_t).sum(-1).to(dtype=p.dtype)
         log_p2_sum = (log_p * log_p).sum(-1).to(dtype=p.dtype)
-        specificity = _specificity_stats(
+        specificity = specificity_stats(
             p,
             t,
             contrast_family_weights,

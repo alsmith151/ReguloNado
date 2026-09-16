@@ -1,0 +1,182 @@
+program: regulonado
+name: anchor-cell-type-contrast-v2
+method: bayes
+
+metric:
+  # contrast_pearson_median scores each track's specificity (log 512 bp signal minus the
+  # group-balanced mean of its assay_class) against truth over the top 10% active regions.
+  # On a held-out shard, a prediction with no cell-type differences still reaches
+  # pearson_bin 0.60 but contrast 0.00; replicate means reach contrast 0.94.
+  # Sweep 8wb1xsph used contrast_objective, whose |log total ratio| term varied 2.4x more
+  # across runs than contrast at step 300 and swung with training step for every run, so
+  # hyperband ranked on calibration noise. Global scale is fixable post hoc; select on
+  # cell-type differences directly.
+  name: eval/contrast_pearson_median
+  goal: maximize
+
+# Evals land at steps 0, 100, ..., 1000; W&B counts each eval as one iteration, so
+# min_iter 4 gives the first cut at step 300 and the second at step 700. Cell-type
+# differences are expected to emerge after the shared profile, hence the longer budget.
+early_terminate:
+  type: hyperband
+  min_iter: 4
+  eta: 2
+
+parameters:
+  preset:
+    value: head_only
+  data.path:
+    value: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/data/interim/regulonado/dataset
+  data.metadata_path:
+    value: /ceph/project/milne_group/asmith/Projects/2026-09-10-enhancer-candidates-and-optimization/data/interim/regulonado/dataset/tracks.parquet
+  data.apply_squash:
+    value: false
+  data.enable_rc_aug:
+    value: false
+
+  backbone.pretrained_name:
+    value: johahi/flashzoi-replicate-1
+
+  # FiLM heads condition on group (cell type); they are back in play because the
+  # objective now rewards cell-type differences, which per-track Pearson did not.
+  model.use_track_metadata:
+    value: true
+  model.condition_source:
+    value: group
+  # Was always false in 8wb1xsph, and a bug in build_condition_shared_track_index made
+  # it a no-op anyway (path/resolved_path/background leaked into the fallback grouping
+  # fields, so n_base_tracks == n_tracks -- zero sharing). Fixed; now true actually
+  # collapses to one base channel per assay_class, with FiLM differentiating cell types
+  # from a shared feature basis instead of redundantly re-deriving per-track output
+  # weights (pitfall: film without this was indistinguishable from its own output layer).
+  model.share_condition_base_channels:
+    values: [false, true]
+
+  loss:
+    values: [poisson_multinomial, poisson_multinomial_binwise]
+  # Widened both ends: 8wb1xsph found a weak negative correlation with contrast_pearson
+  # (spearman -0.14 to -0.33 depending on n), never conclusively bottoming out. Bayes
+  # can afford to explore past the old edges rather than clip a real slope.
+  loss.poisson_weight:
+    distribution: log_uniform_values
+    min: 0.05
+    max: 8.0
+  # Cross-track allocation KL added to the base loss. On the shard, removing all
+  # cell-type differences raises this term by 0.82 but poisson_multinomial by only 0.05.
+  # 8wb1xsph found no correlation with contrast_pearson anywhere in 0.05-0.83 (checked
+  # directly, not just rank corr -- high and low values both landed top and bottom
+  # scores). Widening is a completeness margin, not an evidence-based push.
+  loss.contrast_weight:
+    distribution: log_uniform_values
+    min: 0.02
+    max: 1.5
+  # New: Kendall et al. per-track uncertainty weighting (loss*exp(-log_var) + log_var,
+  # log_var learned per track). Only wired for poisson_multinomial /
+  # poisson_multinomial_binwise, which is the entire loss space above, so every
+  # combination is valid. Targets the 5 ChIP tracks with scale_heldout_recovery
+  # 0.41-0.70 (vs ~0.91 for the rest) -- lets the model auto-downweight noisy tracks
+  # instead of a hand-picked exclusion threshold.
+  loss.learn_track_weights:
+    values: [false, true]
+
+  head:
+    # residual_film dropped: exceeds GPU memory.
+    values: [transfer_mlp, film]
+  # Last sweep: median objective 256 > 512 > 1024 (worst to best); 8wb1xsph then found
+  # 2048 > 1024 with no sign of saturating. Heads are kernel-1 convs over backbone
+  # features, so width only adds feature-recombination capacity, not new sequence
+  # detectors -- cheap to test further, adding 3072 as a generous upper option.
+  head.hidden:
+    values: [1024, 2048, 3072]
+  head.dropout:
+    values: [0.0, 0.1]
+  head.output_init:
+    value: empirical_mean_constant
+  head.output_init_samples:
+    value: 512
+  # softplus_beta2 beat exp in sweep 8wb1xsph (median contrast_pearson 0.405 vs 0.395 at
+  # matched step 300, 0.421 vs 0.405 at post-truncation best; consistent both ways).
+  # Plain softplus (beta=1) was never tried in 8wb1xsph and was only ruled out in the
+  # earlier calibration-objective sweep 82xwl8qa, which couldn't see cell-type
+  # differences -- worth a fresh look under contrast_pearson_median.
+  model.activation_type:
+    values: [softplus_beta2, exp, softplus]
+
+  # Previous sweep: best head LRs 2e-4 to 1e-3 (median 4.3e-4); 8wb1xsph top runs spanned
+  # 2.3e-4-1.4e-3 with a positive but noisier correlation than backbone_lr (+0.45-0.47).
+  # Widened both edges -- generous is cheap under bayes since it concentrates sampling
+  # once it sees where the response actually lies.
+  trainer.learning_rate:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.002
+  # 8wb1xsph correlation with contrast_pearson weakened as n grew (-0.48 at n=29, -0.30
+  # at n=40) -- treat as noisy, not a strong directional signal; widened symmetrically.
+  trainer.weight_decay:
+    distribution: log_uniform_values
+    min: 0.00003
+    max: 0.03
+  trainer.scheduler:
+    values: [cosine, linear]
+  trainer.warmup_steps:
+    value: 100
+  # 2 was best last sweep. Deeper unfreezing lets the backbone refit to ~30 studies'
+  # artefacts, so cap at 3 while the goal is transferable regulatory grammar.
+  trainer.unfreeze_backbone_stages_from_output_end:
+    values: [2, 3]
+  # Sweep 8wb1xsph: strongest signal found, spearman +0.74 vs contrast_pearson at
+  # matched step 300 (n=40), holding steady from n=29. No confound with steps survived
+  # (spearman -0.06) or with unfreeze depth (similar range in both groups) -- a real
+  # hyperparameter effect, not a training-budget artefact. Top runs clustered at the old
+  # ceiling (up to 9.4e-5 of 1e-4 max) with no sign of turning over. Bayes will
+  # concentrate sampling near the true optimum once it has evidence, so pushing the
+  # ceiling generously (10x the original ceiling) costs little and derisks stopping
+  # short of where this parameter actually turns over.
+  trainer.backbone_learning_rate:
+    distribution: log_uniform_values
+    min: 0.000003
+    max: 0.001
+
+  # Sweep 8wb1xsph: with patience null, every run reaching >=700 steps was still rising
+  # 0.003-0.015 contrast_pearson per 100 steps at its last two evals (19 of 20 long
+  # runs); only the single run that reached 1000 flattened (+0.0001 from 900->1000).
+  # Most runs never saw a ceiling. Extending budget to give it room to show one.
+  trainer.max_steps:
+    value: 1800
+  trainer.eval_every_n_steps:
+    value: 100
+  trainer.checkpoint_every_n_steps:
+    value: 1000
+  trainer.metric_for_best_model:
+    value: contrast_pearson_median
+  trainer.greater_is_better:
+    value: true
+  # head_only sets patience 3; in sweep 8wb1xsph every finished run stopped exactly three
+  # evals after a calibration-driven best while contrast was still rising. Hyperband
+  # already prunes, so let surviving trials run the full budget.
+  trainer.early_stopping_patience:
+    value: null
+  # Only affects the logged contrast_objective / calibration_shape_objective now.
+  trainer.calibration_shape_pearson_weight:
+    value: 0.5
+  # Replicate specificity ceiling on the shard: 0.75 (ATAC) / 0.80 (H3K27ac) at 16 bins.
+  trainer.contrast_region_bins:
+    value: 16
+  trainer.contrast_pseudocount:
+    value: 0.1
+  trainer.contrast_active_fraction:
+    value: 0.1
+  trainer.report_to:
+    value: [wandb]
+  trainer.wandb_project:
+    value: regulonado-parameter-sweep-contrastive-v2
+  trainer.wandb_job_type:
+    value: parameter-sweep
+  trainer.wandb_tags:
+    value: [anchor-scaled, cell-type-contrast]
+
+command:
+  - ${env}
+  - ${program}
+  - sweep-train
+  - ${args_json_file}

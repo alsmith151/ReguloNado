@@ -406,18 +406,53 @@ class TestBuildCollateAndLoss:
         assert loss.item() == pytest.approx(1.0)
 
     def test_contrast_weight_adds_cross_track_term(self) -> None:
+        # 3 groups, not 2: with exactly 2 members the centred deviations are always
+        # exactly +/- symmetric, so r is always exactly -1 regardless of what the loss
+        # actually computes -- a test that would pass for the wrong reason.
         records = [
             {"assay_class": "ATAC", "group": "a"},
             {"assay_class": "ATAC", "group": "b"},
+            {"assay_class": "ATAC", "group": "c"},
         ]
-        loss_cfg = {"name": "mse", "contrast_weight": 1.0, "contrast_region_bins": 2}
-        cfg = {"model": {"use_track_metadata": False}, "data": {}, "loss": loss_cfg}
+        loss_cfg = {"name": "mse", "contrast_weight": 1.0}
+        cfg = {
+            "model": {"use_track_metadata": False},
+            "data": {},
+            "loss": loss_cfg,
+            "trainer": {"contrast_region_bins": 2, "contrast_active_fraction": 1.0},
+        }
         _, loss_fn, _, _ = _build_collate_and_loss(cfg, records)
-        target = torch.tensor([[[4.0, 4.0, 4.0, 4.0], [1.0, 1.0, 1.0, 1.0]]])
-        shared = torch.full_like(target, 2.5)
-        mse = torch.nn.functional.mse_loss(shared, target).item()
-        assert loss_fn(shared, target).item() > mse + 0.01
-        assert loss_fn(target, target).item() == pytest.approx(0.0, abs=1e-5)
+        torch.manual_seed(0)
+        target = torch.rand(4, 3, 8) + 0.5
+        uncorrelated_pred = torch.rand(4, 3, 8) + 0.5
+        assert loss_fn(uncorrelated_pred, target).item() > loss_fn(target, target).item() + 0.1
+        assert loss_fn(target, target).item() == pytest.approx(0.0, abs=1e-4)
+
+    def test_contrast_shape_params_come_from_trainer_config(self) -> None:
+        records = [
+            {"assay_class": "ATAC", "group": "a"},
+            {"assay_class": "ATAC", "group": "b"},
+            {"assay_class": "ATAC", "group": "c"},
+        ]
+        loss_cfg = {"name": "mse", "contrast_weight": 1.0}
+        torch.manual_seed(1)
+        pred = torch.rand(4, 3, 8) + 0.5
+        target = torch.rand(4, 3, 8) + 0.5
+        cfg_a = {
+            "model": {"use_track_metadata": False},
+            "data": {},
+            "loss": loss_cfg,
+            "trainer": {"contrast_region_bins": 2},
+        }
+        cfg_b = {
+            "model": {"use_track_metadata": False},
+            "data": {},
+            "loss": loss_cfg,
+            "trainer": {"contrast_region_bins": 4},
+        }
+        _, loss_fn_a, _, _ = _build_collate_and_loss(cfg_a, records)
+        _, loss_fn_b, _, _ = _build_collate_and_loss(cfg_b, records)
+        assert loss_fn_a(pred, target).item() != pytest.approx(loss_fn_b(pred, target).item())
 
     def test_contrast_weight_without_track_labels_raises(self) -> None:
         loss_cfg = {"name": "mse", "contrast_weight": 1.0}

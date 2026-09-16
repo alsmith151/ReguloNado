@@ -266,6 +266,75 @@ class TestComputeMetrics:
 
 
 # ---------------------------------------------------------------------------
+# loss / metric agreement — both consume regulonado.training.losses.specificity_stats
+# ---------------------------------------------------------------------------
+
+
+class TestContrastLossMetricAgreement:
+    @staticmethod
+    def _generate(compression: float, region_bins: int, seed: int = 7):
+        from regulonado.training.losses import contrast_family_weights
+
+        B, T, R = 6, 4, 16
+        weights = contrast_family_weights(["A", "A", "A", "B"], ["g1", "g2", "g3", "g4"])
+        rng = torch.Generator()
+        rng.manual_seed(seed)
+        log_t = torch.randn(B, T, R, generator=rng) + 6.0
+        log_p = log_t.clone()
+        family_mean = log_t[:, :3].mean(dim=1, keepdim=True)
+        log_p[:, :3] = family_mean + compression * (log_t[:, :3] - family_mean)
+        target = log_t.exp().repeat_interleave(region_bins, dim=-1)
+        pred = log_p.exp().repeat_interleave(region_bins, dim=-1)
+        return pred, target, weights
+
+    @pytest.mark.parametrize("compression", [1.0, 0.5, 0.0])
+    @pytest.mark.parametrize("region_bins", [4, 8])
+    @pytest.mark.parametrize("active_fraction", [1.0, 0.1])
+    def test_loss_and_metric_agree_on_the_same_batch(
+        self, compression: float, region_bins: int, active_fraction: float
+    ) -> None:
+        from regulonado.training.losses import (
+            _pearson_from_stats_torch,
+            specificity_stats,
+            track_contrast_correlation_loss,
+        )
+        from transformers import EvalPrediction
+
+        pred, target, weights = self._generate(compression, region_bins)
+        kwargs = dict(region_bins=region_bins, pseudocount=0.1, active_fraction=active_fraction)
+
+        stats = specificity_stats(pred, target, weights, **kwargs).sum(dim=0)  # [T, 6]
+        r, valid = _pearson_from_stats_torch(stats)
+        loss = track_contrast_correlation_loss(pred, target, weights, **kwargs)
+
+        preprocess = make_preprocess_logits_for_metrics(
+            topk_bins=8,
+            contrast_family_weights=weights,
+            contrast_region_bins=region_bins,
+            contrast_pseudocount=0.1,
+            contrast_active_fraction=active_fraction,
+        )
+        compute_metrics = make_compute_metrics(n_tracks=pred.shape[1])
+        eval_stats = preprocess(pred, target).numpy()
+        m = compute_metrics(EvalPrediction(predictions=eval_stats, label_ids=None))
+
+        if not bool(valid.any()):
+            # compression=0.0 collapses every family member's prediction to the family
+            # mean, so predicted specificity has zero variance everywhere: both the loss
+            # and the metric must agree there is no information to correlate.
+            assert loss.item() == pytest.approx(0.0)
+            assert np.isnan(m["contrast_pearson_median"])
+            return
+
+        expected_loss = 1.0 - r[valid].mean()
+        assert loss.item() == pytest.approx(expected_loss.item(), abs=1e-5)
+
+        r_valid = r[valid].detach().numpy()
+        expected_median = float(np.median(r_valid))
+        assert m["contrast_pearson_median"] == pytest.approx(expected_median, abs=1e-5)
+
+
+# ---------------------------------------------------------------------------
 # RegulonadoTrainer.prediction_step integration
 # ---------------------------------------------------------------------------
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -31,8 +31,10 @@ class ModelConfig:
 
     use_track_metadata: bool = False
     # Metadata field used as the categorical condition identity for FiLM heads.
-    # ``group`` is an opaque freeform tracks.parquet label encoded at training time.
-    condition_source: Literal["condition_id", "group"] = "condition_id"
+    # Accepted values: "condition_id", "group" (an opaque freeform tracks.parquet label
+    # encoded at training time). Validated at runtime, not by this annotation — omegaconf
+    # 2.3.0 cannot structure typing.Literal.
+    condition_source: str = "condition_id"
     share_condition_base_channels: bool = False
     metadata_hidden: int = 32
     activation_type: str = "softplus"
@@ -82,10 +84,12 @@ class LossConfig:
     topk_bin_weight: float | None = None
     topk_bin_count: int | None = None
     topk_huber_delta: float | None = None
-    # Weight of the cross-track allocation KL added to any base loss; unset/0 disables it.
+    # Weight of the cross-track specificity correlation term added to any base loss;
+    # unset/0 disables it. Region geometry (bins, pseudocount, active fraction) comes from
+    # ``trainer.contrast_*`` — shared with the metric that defines the same quantity.
     contrast_weight: float | None = None
-    # Bins summed into one region before comparing allocation across tracks.
-    contrast_region_bins: int | None = None
+    # Kendall et al. homoscedastic uncertainty weighting across tracks for the base loss.
+    learn_track_weights: bool | None = None
 
 
 @dataclass(slots=True)
@@ -163,8 +167,10 @@ class TrainerConfig:
     calibration_shape_pearson_weight: float = 0.1
     # Number of strongest target bins used by the top-k Pearson metric.
     topk_bins: int = 256
-    # Cross-track specificity metrics: bins per region, per-bin log pseudocount, and the
-    # most active fraction of regions (by observed family mean signal) that are scored.
+    # Cross-track specificity region geometry: bins per region, per-bin log pseudocount, and
+    # the most active fraction of regions (by observed family mean signal) that are scored.
+    # Drives both the contrast_* metrics and, when loss.contrast_weight > 0, the loss term —
+    # single source of truth so the two compute the same function.
     contrast_region_bins: int = 16
     contrast_pseudocount: float = 0.1
     contrast_active_fraction: float = 0.1

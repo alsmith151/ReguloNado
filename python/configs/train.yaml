@@ -28,6 +28,14 @@ model:
   metadata_hidden: 32
   activation_type: softplus
 
+# Loss-family-independent knobs. Declared here (not per loss/*.yaml) so a bare
+# `loss.contrast_weight=...` override composes against any `loss=<option>` — _self_
+# merges last in defaults, over the selected loss group, without replacing its
+# name/poisson_weight.
+loss:
+  contrast_weight: 0.0
+  learn_track_weights: false
+
 trainer:
   # Data loading
   batch_size: 1
