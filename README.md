@@ -144,8 +144,8 @@ tracks at assembly rather than training on them. Each `train_phase` runs one tra
 are sequential within a run (later phases warm-start from the previous checkpoint), while separate
 runs can execute concurrently.
 
-The pipeline does not run prediction, create BigWigs, align reads, or call peaks.
-Those are separate commands or upstream SeqNado work. It also
+The pipeline does not align reads or call peaks; those are upstream SeqNado work. Prediction
+BigWigs are optional via `prediction:`. It also
 does not replace the standalone commands: use `regulonado dataset`,
 `regulonado normalization ...`, or `regulonado train` when you need to run one
 stage manually. Snakemake records outputs under `results_dir` and skips stages
@@ -183,12 +183,22 @@ every run, or a run entry to change one replicate. See
 
 ## Use the output
 
-Prediction is a separate, explicit command. It is not run automatically after
-training:
+Prediction can be an explicit standalone command:
 
 ```bash
 regulonado predict results/train/flashzoi_0/peak_finetune/checkpoint-N \
   genome.fa predictions/ --bed regions.bed
+```
+
+Or make it the final pipeline stage. Omit `tracks` to write every dataset track;
+set it to the named tracks you want:
+
+```yaml
+prediction:
+  run: flashzoi_0
+  tracks: [H3K27ac, CTCF]  # omit for all tracks
+  whole_genome: true
+  chromsizes: hg38.chrom.sizes
 ```
 
 ## Guides

@@ -1,7 +1,19 @@
 # Generate predictions
 
-Prediction is deliberately separate from the training pipeline. Choose a
-checkpoint after reviewing training results, then run `regulonado predict`.
+Prediction can be run standalone after reviewing a checkpoint, or configured as
+an optional final `prediction:` pipeline stage. The pipeline resolves the final
+checkpoint for `prediction.run`; omit `prediction.tracks` to write every dataset
+track, or set it to a list of track names (or zero-based indices).
+
+```yaml
+prediction:
+  run: flashzoi_0
+  tracks: [H3K27ac, CTCF]  # omit for all tracks
+  whole_genome: true
+  chromsizes: hg38.chrom.sizes
+```
+
+Set `bed: regions.bed` and `whole_genome: false` for targeted output.
 
 ## Inputs and outputs
 

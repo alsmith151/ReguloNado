@@ -127,3 +127,15 @@ train:
     - name: contrast_u7_blr1e-4
       seed: 0
       pretrained_model: johahi/flashzoi-replicate-1
+
+# Write genome-wide prediction BigWigs from the final contrast-correlation checkpoint.
+# `tracks` accepts selected dataset track names. Replace these with the tracks you want;
+# omit it to write every included dataset track.
+prediction:
+  run: contrast_u7_blr1e-4
+  tracks:
+    - 9_HL-60_ENCFF351PRI
+    - 9_HL-60_ENCFF367ZQC
+    - 9_HL-60_ENCFF458UYN
+  whole_genome: true
+  batch_size: 4

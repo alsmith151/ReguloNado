@@ -748,6 +748,71 @@ $defs:
     - sweep_config
     title: ParameterSweepConfig
     type: object
+  PredictionConfig:
+    additionalProperties: false
+    description: 'Optional BigWig-prediction stage for one completed training run.
+
+
+      Omitting ``tracks`` writes predictions for every track in the trained
+
+      dataset. Set it to a non-empty list of track names (or zero-based output
+
+      indices) to select outputs. Prediction is whole-genome by default; ``bed``
+
+      switches it to supplied non-overlapping target regions.'
+    properties:
+      run:
+        title: Run
+        type: string
+      tracks:
+        anyOf:
+        - items:
+            type: string
+          minItems: 1
+          type: array
+        - type: 'null'
+        default: null
+        title: Tracks
+      bed:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Bed
+      whole_genome:
+        default: true
+        title: Whole Genome
+        type: boolean
+      chromsizes:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Chromsizes
+      rtol:
+        default: 0.01
+        minimum: 0.0
+        title: Rtol
+        type: number
+      batch_size:
+        default: 4
+        minimum: 1
+        title: Batch Size
+        type: integer
+      device:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Device
+      inverse_squash:
+        default: false
+        title: Inverse Squash
+        type: boolean
+    required:
+    - run
+    title: PredictionConfig
+    type: object
   QCConfig:
     additionalProperties: false
     description: Opt-in track QC, run before the Arrow build. Empty/absent ``checks``
@@ -1006,6 +1071,10 @@ properties:
   parameter_sweep:
     anyOf:
     - $ref: '#/$defs/ParameterSweepConfig'
+    - type: 'null'
+  prediction:
+    anyOf:
+    - $ref: '#/$defs/PredictionConfig'
     - type: 'null'
   design:
     anyOf:

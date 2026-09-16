@@ -231,6 +231,36 @@ class ParameterSweepConfig(BaseModel):
     wandb_project: str = Field(default="regulonado-parameter-sweep", min_length=1)
 
 
+class PredictionConfig(BaseModel):
+    """Optional BigWig-prediction stage for one completed training run.
+
+    Omitting ``tracks`` writes predictions for every track in the trained
+    dataset. Set it to a non-empty list of track names (or zero-based output
+    indices) to select outputs. Prediction is whole-genome by default; ``bed``
+    switches it to supplied non-overlapping target regions.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    run: str
+    tracks: list[str] | None = Field(default=None, min_length=1)
+    bed: str | None = None
+    whole_genome: bool = True
+    chromsizes: str | None = None
+    rtol: float = Field(default=0.01, ge=0.0)
+    batch_size: int = Field(default=4, ge=1)
+    device: str | None = None
+    inverse_squash: bool = False
+
+    @model_validator(mode="after")
+    def _prediction_extent_is_unambiguous(self) -> "PredictionConfig":
+        if self.bed is not None and self.whole_genome:
+            raise ValueError("prediction.bed and prediction.whole_genome cannot both be set")
+        if self.bed is None and not self.whole_genome:
+            raise ValueError("prediction needs either prediction.bed or whole_genome: true")
+        return self
+
+
 class DesignTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -536,6 +566,7 @@ class RegulonadoConfig(BaseModel):
     qc: QCConfig = Field(default_factory=QCConfig)
     train: TrainConfig | None = None
     parameter_sweep: ParameterSweepConfig | None = None
+    prediction: PredictionConfig | None = None
     design: DesignConfig | None = None
     attribution: AttributionConfig | None = None
 
@@ -554,6 +585,20 @@ class RegulonadoConfig(BaseModel):
                     f"design.{label} names train.runs entries that don't exist: "
                     f"{', '.join(unknown)}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _prediction_run_is_known(self) -> "RegulonadoConfig":
+        if self.prediction is None:
+            return self
+        if self.train is None:
+            raise ValueError("prediction requires train so prediction.run can resolve a checkpoint")
+        run_names = {run.name for run in self.train.runs}
+        if self.prediction.run not in run_names:
+            raise ValueError(
+                "prediction.run names a train.runs entry that doesn't exist: "
+                f"{self.prediction.run}"
+            )
         return self
 
     @model_validator(mode="after")

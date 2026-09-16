@@ -101,6 +101,7 @@ def training_dataset_dir():
 DESIGN = config.get("design")
 ATTRIBUTION = config.get("attribution")
 PARAMETER_SWEEP = config.get("parameter_sweep")
+PREDICTION = config.get("prediction")
 _QC_ENABLED = bool((config.get("qc") or {}).get("checks"))
 
 
@@ -129,6 +130,11 @@ rule all:
             else []
         ),
         *(
+            [str(RESULTS / "predictions" / PREDICTION["run"] / ".complete")]
+            if PREDICTION
+            else []
+        ),
+        *(
             expand(
                 str(RESULTS / "attribution" / "{target}" / "core_regions.bed"),
                 target=[target["name"] for target in ATTRIBUTION["targets"]],
@@ -143,6 +149,7 @@ include: "rules/dataset.smk"
 include: "rules/scaling.smk"
 if TRAIN:
     include: "rules/train.smk"
+include: "rules/predict.smk"
 include: "rules/parameter_sweep.smk"
 include: "rules/attribute.smk"
 include: "rules/design.smk"

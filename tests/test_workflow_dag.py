@@ -187,6 +187,82 @@ parameter_sweep:
     assert "Empty file path encountered" not in all_output
 
 
+@pytest.mark.parametrize(
+    ("track_config", "expected_flag"),
+    [
+        ("", ""),
+        ("  tracks: [H3K27ac, CTCF]\n", "--tracks H3K27ac,CTCF"),
+    ],
+)
+def test_prediction_stage_writes_all_tracks_or_one_selected_track(tmp_path, track_config, expected_flag):
+    """The optional prediction stage resolves the final run checkpoint once."""
+    snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
+    if snakemake is None:
+        pytest.skip("Snakemake is an optional workflow dependency")
+
+    intervals = tmp_path / "intervals.bed"
+    fasta = tmp_path / "genome.fa"
+    intervals.touch()
+    fasta.touch()
+    results = tmp_path / "results"
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"""
+results_dir: {results}
+inputs:
+  intervals: {intervals}
+  fasta: {fasta}
+  bigwig_dir: {tmp_path / "bigwigs"}
+dataset:
+  context_length: 100
+  bin_size: 10
+  n_pred_bins: 4
+  shift_max_bp: 0
+scaling:
+  method: tmm
+train:
+  nproc_per_node: 1
+  phases:
+    - {{name: finetune, preset: head_only}}
+  runs:
+    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
+prediction:
+  run: fold_0
+{track_config}  whole_genome: true
+  chromsizes: {tmp_path / "genome.sizes"}
+"""
+    )
+
+    result = subprocess.run(
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            "--dry-run",
+            "--printshellcmds",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "predict_bigwigs" in output
+    assert "regulonado predict" in output
+    assert str(results / "predictions" / "fold_0" / ".complete") in output
+    assert "--whole-genome" in output
+    assert f"--chromsizes {tmp_path / 'genome.sizes'}" in output
+    if expected_flag:
+        assert expected_flag in output
+    else:
+        assert "--tracks" not in output
+
+
 def test_two_runs_form_independent_phase_chains(tmp_path):
     snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
     if snakemake is None:
