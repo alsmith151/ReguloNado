@@ -30,7 +30,7 @@ use rayon::prelude::*;
 
 use crate::arrow_schema::{sequence_tokens_array, signal_array, window_arrow_schema};
 use crate::bigwig_io::{open_bigwig_handles, BwHandle};
-use crate::binning::{bin_region_into, BinningScratch, BinningUsage};
+use crate::binning::{bin_region_into, BinningOptions, BinningScratch, BinningUsage};
 use crate::fasta::{load_fasta_index, read_sequence_tokens};
 use crate::io_utils::{maybe_log_progress, parquet_writer_properties};
 
@@ -98,6 +98,7 @@ struct WriteShardCtx<'a> {
     bed_rows: &'a [(String, u32, u32, String)],
     fasta_path: &'a str,
     fai: &'a HashMap<String, crate::fasta::FastaIndexRecord>,
+    missing_value: f32,
 }
 
 /// Write a single Parquet shard file for one chromosome.
@@ -141,7 +142,8 @@ fn write_chrom_shard(
         .copied()
     {
         let t_slice = Instant::now();
-        let mut label = vec![0.0f32; ctx.n_tracks * ctx.n_bins];
+        // Bins past the chromosome's last whole bin are padding: missing, not zero signal.
+        let mut label = vec![ctx.missing_value; ctx.n_tracks * ctx.n_bins];
         let (_chrom, sig_start, sig_end) = &ctx.signal_intervals[global_idx];
         let bin_start = (*sig_start / ctx.bin_size) as usize;
         let bin_end_raw = (*sig_end / ctx.bin_size) as usize;
@@ -347,6 +349,10 @@ fn build_split_chrom_samples(
 /// - `write_threads`: thread pool size for parallel shard writes (default 8 or
 ///   n_threads, whichever is smaller).
 /// - `profile`: if true, collect and log timing breakdowns per stage.
+/// - `mean_over_covered_bases`: divide each bin by its recorded bases rather than its
+///   in-contig width (default false; see `BinningOptions`).
+/// - `missing_as_nan`: write NaN for bins past the contig end or wholly NaN-valued
+///   (default true); 0.0 otherwise.
 ///
 /// # Returns
 ///
@@ -377,7 +383,9 @@ fn build_split_chrom_samples(
     zstd_level=3,
     n_threads=None,
     write_threads=None,
-    profile=false
+    profile=false,
+    mean_over_covered_bases=false,
+    missing_as_nan=true
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_parquet_splits_chrom_pass(
@@ -400,7 +408,13 @@ pub(crate) fn write_parquet_splits_chrom_pass(
     n_threads: Option<usize>,
     write_threads: Option<usize>,
     profile: bool,
+    mean_over_covered_bases: bool,
+    missing_as_nan: bool,
 ) -> PyResult<HashMap<String, usize>> {
+    let binning_options = BinningOptions {
+        mean_over_covered_bases,
+        missing_as_nan,
+    };
     crate::io_utils::configure_global_rayon(n_threads);
 
     let n_tracks = bw_paths.len();
@@ -512,14 +526,22 @@ pub(crate) fn write_parquet_splits_chrom_pass(
                     BinningScratch::default,
                     |scratch, (track_idx, (out_row, reader))| {
                         let usage =
-                            bin_region_into(reader, chrom_str, 0, region_end, out_row, scratch);
+                            bin_region_into(
+                                reader,
+                                chrom_str,
+                                0,
+                                region_end,
+                                out_row,
+                                scratch,
+                                binning_options,
+                            );
 
                         let is_minus = minus_flags.get(track_idx).copied().unwrap_or(false);
                         if is_minus {
                             let mut nz = 0usize;
                             let mut neg = 0usize;
                             for &v in out_row.iter() {
-                                if v != 0.0 {
+                                if v != 0.0 && !v.is_nan() {
                                     nz += 1;
                                     if v < 0.0 {
                                         neg += 1;
@@ -579,6 +601,7 @@ pub(crate) fn write_parquet_splits_chrom_pass(
             bed_rows: &bed_rows,
             fasta_path: &fasta_path,
             fai: &fai,
+            missing_value: binning_options.missing_value(),
         };
         let shard_profiles: Vec<WriteShardProfile> = py
             .allow_threads(|| {

@@ -1,5 +1,6 @@
 use crate::arrow_schema::{sequence_tokens_array, signal_array, window_arrow_schema};
 use crate::bigwig_io::{extract_bigwig_labels_batch, open_bigwig_handles};
+use crate::binning::BinningOptions;
 use crate::fasta::{load_fasta_index, read_sequence_tokens};
 use crate::io_utils::{maybe_log_progress, parquet_writer_properties};
 use arrow_array::{
@@ -34,7 +35,9 @@ use std::time::Instant;
     hf_features_json,
     rows_per_row_group=1,
     zstd_level=3,
-    n_threads=None
+    n_threads=None,
+    mean_over_covered_bases=false,
+    missing_as_nan=true
 ))]
 // Arity is dictated by the Python-facing signature above, so grouping the
 // parameters into a struct would only move the problem to the call site.
@@ -54,7 +57,13 @@ pub(crate) fn write_parquet_split_from_bigwigs(
     rows_per_row_group: usize,
     zstd_level: i32,
     n_threads: Option<usize>,
+    mean_over_covered_bases: bool,
+    missing_as_nan: bool,
 ) -> PyResult<usize> {
+    let binning_options = BinningOptions {
+        mean_over_covered_bases,
+        missing_as_nan,
+    };
     if let Some(n_threads) = n_threads {
         rayon::ThreadPoolBuilder::new()
             .num_threads(n_threads)
@@ -103,6 +112,7 @@ pub(crate) fn write_parquet_split_from_bigwigs(
                     &minus_flags,
                     std::slice::from_ref(interval),
                     n_bins,
+                    binning_options,
                 )
             })
             .map_err(PyRuntimeError::new_err)?;

@@ -17,6 +17,17 @@ class DataConfig:
 
     path: str = ""
     metadata_path: str | None = None
+    # "transformed": labels pass through apply_scale / apply_clip / apply_squash below.
+    # "counts": labels are raw counts in `count_unit`; the model predicts rates in units
+    # of `exposure` and the likelihood sees rate * exposure (apply_* are ignored). Values
+    # are validated at runtime (see regulonado.training.label_space) — omegaconf 2.3.0
+    # cannot structure typing.Literal.
+    label_space: str = "transformed"
+    count_unit: str = "fragments"
+    exposure: str = "anchor"
+    # Keep missing bins (NaN in datasets built with --missing-bins nan) out of losses and
+    # metrics; false trains them as zero signal.
+    mask_missing: bool = True
     apply_scale: bool = True
     apply_squash: bool = True
     apply_clip: bool = True

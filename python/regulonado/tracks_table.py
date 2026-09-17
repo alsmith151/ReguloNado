@@ -223,11 +223,15 @@ def to_track_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     """
     included = df[df["status"] == "included"].sort_values("track_index")
 
-    scale_rename = {
+    numeric_rename = {
         "scale_factor": "scale_factor",
         "scale_background": "background",
         "scale_clip_soft": "clip_soft",
         "scale_clip_hard": "clip_hard",
+        "scale_anchor_reference": "anchor_reference",
+        "scale_library_size": "library_size",
+        "fp_genome_sum": "genome_sum",
+        "fragment_length": "fragment_length",
     }
     records: list[dict[str, Any]] = []
     for _, row in included.iterrows():
@@ -238,7 +242,7 @@ def to_track_records(df: pd.DataFrame) -> list[dict[str, Any]]:
         for column in ("sample_id", "path", "resolved_path"):
             if column in row and pd.notna(row[column]):
                 record[column] = row[column]
-        for src, dst in scale_rename.items():
+        for src, dst in numeric_rename.items():
             if src in row and pd.notna(row[src]):
                 record[dst] = float(row[src])
         for column in (

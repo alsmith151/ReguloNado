@@ -156,6 +156,50 @@ longer-lived agents so later suggestions can incorporate earlier results; for a
 One-by-one jobs remain preferable when queue policy, wall-time prediction, or
 preemption isolation matters more than Bayesian adaptivity.
 
+## Label space
+
+`data.label_space` picks what the loss is fitted against. Each option below is a single
+config value, so moving between them needs no other change.
+
+- `transformed` (default): stored signal goes through `apply_scale` (× `scale_factor`
+  after subtracting `background`), `apply_clip` and `apply_squash`, and the model predicts
+  in that transformed space.
+- `counts`: labels stay raw. They are converted to `data.count_unit` and never
+  background-subtracted, clipped or squashed (the `apply_*` flags are ignored). The model
+  predicts a rate `r` in `data.exposure` units, and the likelihood (the base loss) sees
+  `r × exposure` against the counts. This is a GLM offset: sequencing depth is a known
+  per-track constant rather than something the head has to learn, and deeper tracks carry
+  proportionally more weight in the likelihood. The contrast loss, eval metrics, example
+  plots, output-bias init and prediction BigWigs all work in exposure-normalised units
+  (`counts / exposure`).
+
+| `data.count_unit` | One label unit | Needs |
+|---|---|---|
+| `fragments` (default) | `mean_coverage × bin_size / fragment_length` ≈ fragments per bin | `fragment_length` per track, or `scale_library_size` + `fp_genome_sum` |
+| `coverage_sum` | summed per-base coverage in the bin (Borzoi's convention) | — |
+| `mean_coverage` | the stored value | — |
+
+| `data.exposure` | Output 1.0 means | Needs |
+|---|---|---|
+| `anchor` (default) | the track's housekeeping-promoter anchor level | `anchor` scaling |
+| `anchor_minus_background` | the anchor level above background | `anchor` scaling |
+| `library_size` | one unit per million mapped reads | `scale_library_size` |
+| `none` | one count unit (the model predicts counts) | — |
+
+Poisson variance matches fragment counts, not coverage. Summed coverage counts each
+fragment once for every base it covers, which overstates the information in each bin by
+roughly the fragment length. When deriving fragment length from
+`fp_genome_sum / scale_library_size`, check what `library_size` counts: paired-end *reads*
+give half the fragment length. Supplying `fragment_length` directly (for example through
+`inputs.track_annotations`) avoids the ambiguity.
+
+Loss weights tuned under `transformed` labels do not carry over. The Poisson and
+multinomial terms grow with the count scale, while the contrast terms do not.
+
+`data.mask_missing` (default `true`) removes missing bins (NaN, from datasets built with
+`--missing-bins nan`) from every loss term and metric. With `false`, they are trained as
+zero signal.
+
 ## Cross-track contrast
 
 `loss.contrast_weight`, `loss.contrast_magnitude_weight` and `trainer.contrast_*` (`contrast_region_bins`,

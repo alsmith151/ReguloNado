@@ -13,6 +13,15 @@ data:
   path: ???
   # Optional enriched metadata file. null uses metadata stored with the dataset.
   metadata_path: null
+  # transformed: labels pass through apply_scale/apply_clip/apply_squash below.
+  # counts: raw count labels (count_unit: fragments | coverage_sum | mean_coverage); the model
+  # predicts rates in exposure units (anchor | anchor_minus_background | library_size | none)
+  # and the likelihood sees rate * exposure. apply_* are ignored.
+  label_space: transformed
+  count_unit: fragments
+  exposure: anchor
+  # Drop missing (NaN) bins from losses and metrics; false trains them as zero signal.
+  mask_missing: true
   apply_scale: true
   apply_squash: true
   apply_clip: true

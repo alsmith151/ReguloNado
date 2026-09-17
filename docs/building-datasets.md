@@ -44,6 +44,20 @@ regulonado dataset intervals.bed genome.fa dataset/ \
   --stage
 ```
 
+Each bin stores the mean BigWig signal over the bin. Two options control edge cases:
+
+- `--bin-denominator bin_width` (default) divides a bin's summed signal by its in-contig
+  width, so bases with no BigWig record count as zero coverage. `covered_bases` divides
+  by recorded bases only. The two agree for BigWigs that write explicit zeros. For sparse
+  BigWigs that omit zero stretches, `covered_bases` inflates low-coverage bins (a single
+  read covering 5 of 32 bases reads as full-bin coverage).
+- `--missing-bins nan` (default) stores NaN for bins with no data: bins past the contig
+  end (window padding) and bins whose every base is NaN in the BigWig. Training masks
+  them (`data.mask_missing`). `zero` stores 0.0, which trains them as observed zero
+  signal. A base with no record is zero coverage, not missing.
+
+Both values are recorded in the output `tracks.parquet` metadata.
+
 The default `in_memory` strategy is normally the best choice. `--stage`
 copies source files to node-local scratch before reading them, which is useful
 on network storage but requires enough scratch space for the FASTA and tracks.

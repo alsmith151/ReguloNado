@@ -144,6 +144,29 @@ def dataset(
             ),
         ),
     ] = None,
+    bin_denominator: Annotated[
+        str,
+        typer.Option(
+            "--bin-denominator",
+            help=(
+                "How a bin's mean is formed: 'bin_width' (default) divides summed "
+                "signal by the bin's in-contig width, so bases without a BigWig "
+                "record count as zero; 'covered_bases' divides by recorded bases "
+                "only, which inflates sparse bins in BigWigs that omit zeros."
+            ),
+        ),
+    ] = "bin_width",
+    missing_bins: Annotated[
+        str,
+        typer.Option(
+            "--missing-bins",
+            help=(
+                "Value stored for bins with no data (past the contig end, or "
+                "wholly NaN in the BigWig): 'nan' (default, maskable in "
+                "training) or 'zero'."
+            ),
+        ),
+    ] = "nan",
 ) -> None:
     """Build an Arrow DatasetDict from BED / FASTA / a pre-assembled track table.
 
@@ -199,4 +222,6 @@ def dataset(
         profile=profile,
         strategy=strategy,
         chrom_filter=list(chrom) if chrom else None,
+        bin_denominator=bin_denominator,
+        missing_bins=missing_bins,
     )

@@ -32,6 +32,8 @@ rule build_dataset:
         write_threads=config["dataset"]["write_threads"],
         zstd_level=config["dataset"]["zstd_level"],
         rows_per_row_group=config["dataset"]["rows_per_row_group"],
+        bin_denominator=config["dataset"]["bin_denominator"],
+        missing_bins=config["dataset"]["missing_bins"],
         stage=lambda w: "--stage" if config["dataset"]["stage_to_scratch"] else "--no-stage",
     output:
         readme=str(DATASET_DIR / "README.md"),
@@ -55,6 +57,8 @@ rule build_dataset:
             --write-threads {params.write_threads} \
             --zstd-level {params.zstd_level} \
             --rows-per-row-group {params.rows_per_row_group} \
+            --bin-denominator {params.bin_denominator} \
+            --missing-bins {params.missing_bins} \
             {params.stage} \
             > {log} 2>&1
         """

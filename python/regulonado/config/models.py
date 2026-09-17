@@ -103,6 +103,10 @@ class DatasetConfig(BaseModel):
     stage_to_scratch: bool = True
     drop_missing: bool = True
     dedupe_tracks: Literal["none", "identity", "content"] = "content"
+    # See `regulonado dataset --help`: bin mean over in-contig width vs recorded bases,
+    # and the stored value for padding / all-NaN bins.
+    bin_denominator: Literal["bin_width", "covered_bases"] = "bin_width"
+    missing_bins: Literal["nan", "zero"] = "nan"
 
     @model_validator(mode="after")
     def _shift_is_whole_bins(self) -> "DatasetConfig":

@@ -198,7 +198,10 @@ class EvalExampleDiagnostics(TrainerCallback):
         background: np.ndarray | None = None,
         apply_squash: bool = True,
         apply_scale: bool = True,
+        label_divisor: np.ndarray | None = None,
     ) -> None:
+        """``label_divisor`` (count label space exposure) replaces the inverse transform:
+        predictions are already in output units and labels are divided into them."""
         self._dataset = dataset
         self._collate_fn = collate_fn
         self._num_examples = num_examples
@@ -208,6 +211,7 @@ class EvalExampleDiagnostics(TrainerCallback):
         self._background = background
         self._apply_squash = apply_squash
         self._apply_scale = apply_scale
+        self._label_divisor = label_divisor
 
     def on_evaluate(
         self,
@@ -257,14 +261,19 @@ class EvalExampleDiagnostics(TrainerCallback):
                 x, self._scale_factors, self._apply_squash, self._apply_scale, self._background
             )
 
-        preds_plot = np.stack([_inv(preds_raw[i]) for i in range(preds_raw.shape[0])])
-        labels_plot = np.stack([_inv(labels_raw[i]) for i in range(labels_raw.shape[0])])
+        if self._label_divisor is not None:
+            divisor = np.asarray(self._label_divisor, dtype=np.float32).reshape(1, -1, 1)
+            preds_plot = np.maximum(preds_raw, 0.0)
+            labels_plot = labels_raw / divisor
+        else:
+            preds_plot = np.stack([_inv(preds_raw[i]) for i in range(preds_raw.shape[0])])
+            labels_plot = np.stack([_inv(labels_raw[i]) for i in range(labels_raw.shape[0])])
 
         def _summary(values: np.ndarray) -> dict[str, list[float]]:
             return {
-                "mean": np.mean(values, axis=-1).tolist(),
-                "q99": np.quantile(values, 0.99, axis=-1).tolist(),
-                "max": np.max(values, axis=-1).tolist(),
+                "mean": np.nanmean(values, axis=-1).tolist(),
+                "q99": np.nanquantile(values, 0.99, axis=-1).tolist(),
+                "max": np.nanmax(values, axis=-1).tolist(),
             }
 
         self._output_dir.mkdir(parents=True, exist_ok=True)

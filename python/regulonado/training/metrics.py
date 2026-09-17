@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from transformers import EvalPrediction
 
-from regulonado.training.losses import specificity_stats
+from regulonado.training.losses import mask_missing_bins, specificity_stats
 
 
 def _safe_corr(x: np.ndarray, y: np.ndarray) -> float:
@@ -29,8 +29,13 @@ def make_preprocess_logits_for_metrics(
     contrast_pseudocount: float = 0.1,
     contrast_active_fraction: float = 0.1,
     log_pseudocount: float = 0.1,
+    label_divisor: torch.Tensor | None = None,
 ) -> Callable:
     """Return a preprocess_logits_for_metrics function that accumulates Pearson sufficient stats.
+
+    Metrics are computed in the model's output units: ``label_divisor`` (the count label
+    space's per-track exposure) divides labels first. Missing (NaN) label bins are
+    excluded — zeroed in prediction and target, and left out of every bin count ``n``.
 
     Returns [B, T, 31] per batch:
       cols 0-5:  (sum_p, sum_t, sum_pt, sum_p², sum_t², n)  over all bins  — per-bin Pearson
@@ -53,6 +58,10 @@ def make_preprocess_logits_for_metrics(
         # Labels may be loaded as [B, L, T] by the HF datasets library; align to [B, T, L].
         t = labels if labels.shape[-2:] == p.shape[-2:] else labels.transpose(-2, -1)
         t = t.float()
+        if label_divisor is not None:
+            t = t / label_divisor.to(device=t.device, dtype=t.dtype)[:, None]
+        valid = ~torch.isnan(t)
+        p, t = mask_missing_bins(p, t)
         B, T, L = p.shape
         k = min(topk_bins, L)
 
@@ -61,7 +70,7 @@ def make_preprocess_logits_for_metrics(
         spt = (p * t).sum(-1)
         sp2 = (p * p).sum(-1)
         st2 = (t * t).sum(-1)
-        n = torch.full((B, T), float(L), dtype=p.dtype, device=p.device)
+        n = valid.sum(-1).to(dtype=p.dtype)
 
         topk_idx = t.topk(k, dim=-1).indices  # [B, T, k]
         p_k = p.gather(-1, topk_idx)
@@ -80,8 +89,8 @@ def make_preprocess_logits_for_metrics(
         q99_t = torch.quantile(t.float(), 0.99, dim=-1).to(dtype=p.dtype)
         # A pseudocount rather than a 1e-8 floor: zero-count bins would otherwise sit at
         # log ~ -18 and dominate the regression.
-        log_p = torch.log(p.float().clamp_min(0.0) + log_pseudocount)
-        log_t = torch.log(t.float().clamp_min(0.0) + log_pseudocount)
+        log_p = torch.log(p.float().clamp_min(0.0) + log_pseudocount) * valid
+        log_t = torch.log(t.float().clamp_min(0.0) + log_pseudocount) * valid
         log_p_sum = log_p.sum(-1).to(dtype=p.dtype)
         log_t_sum = log_t.sum(-1).to(dtype=p.dtype)
         log_pt_sum = (log_p * log_t).sum(-1).to(dtype=p.dtype)

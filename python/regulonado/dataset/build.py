@@ -397,6 +397,8 @@ def _write_dataset_card(
 
 
 _STRATEGIES = frozenset({"in_memory", "streaming"})
+_BIN_DENOMINATORS = frozenset({"bin_width", "covered_bases"})
+_MISSING_BINS = frozenset({"nan", "zero"})
 
 
 # ---------------------------------------------------------------------------
@@ -452,9 +454,29 @@ class BuildPlan:
     rows_per_row_group: int
     edge_dropped_indices: tuple[int, ...]
     edge_dropped_examples: tuple[str, ...]
+    bin_denominator: str
+    missing_bins: str
+
+    @property
+    def binning_kwargs(self) -> dict[str, bool]:
+        """Keyword arguments selecting the Rust writers' bin mean and missing-bin value."""
+        return {
+            "mean_over_covered_bases": self.bin_denominator == "covered_bases",
+            "missing_as_nan": self.missing_bins == "nan",
+        }
 
 
-def _validate_build_args(*, shift_max_bp: int, bin_size: int, strategy: str) -> None:
+def _validate_build_args(
+    *, shift_max_bp: int, bin_size: int, strategy: str, bin_denominator: str, missing_bins: str
+) -> None:
+    if bin_denominator not in _BIN_DENOMINATORS:
+        raise ValueError(
+            f"bin_denominator must be one of {sorted(_BIN_DENOMINATORS)}, got {bin_denominator!r}"
+        )
+    if missing_bins not in _MISSING_BINS:
+        raise ValueError(
+            f"missing_bins must be one of {sorted(_MISSING_BINS)}, got {missing_bins!r}"
+        )
     if shift_max_bp % bin_size != 0:
         raise ValueError(
             f"shift_max_bp ({shift_max_bp}) must be a multiple of bin_size ({bin_size})"
@@ -718,6 +740,8 @@ def _plan_build(
     rows_per_row_group: int,
     write_threads: int | None,
     n_extract_threads: int,
+    bin_denominator: str,
+    missing_bins: str,
 ) -> BuildPlan:
     """Resolve every path, shape and row index the writer/publish steps need."""
     table, bw_paths = _load_verified_track_table(track_table)
@@ -793,6 +817,8 @@ def _plan_build(
         rows_per_row_group=rows_per_row_group,
         edge_dropped_indices=tuple(edge_dropped),
         edge_dropped_examples=edge_dropped_examples,
+        bin_denominator=bin_denominator,
+        missing_bins=missing_bins,
     )
 
 
@@ -851,6 +877,7 @@ def _run_in_memory_strategy(
         n_threads=n_extract_threads,
         write_threads=plan.effective_write_threads,
         profile=profile,
+        **plan.binning_kwargs,
     )
 
     for split in split_names:
@@ -902,6 +929,7 @@ def _run_streaming_strategy(
             rows_per_row_group=plan.rows_per_row_group,
             zstd_level=plan.zstd_level,
             n_threads=n_extract_threads,
+            **plan.binning_kwargs,
         )
         logger.info(
             f"Parquet shard for '{split}' written in "
@@ -1010,6 +1038,8 @@ def _write_output_track_table(
         command=" ".join(sys.argv),
         edge_dropped_rows=len(plan.edge_dropped_indices),
         edge_dropped_examples=list(plan.edge_dropped_examples),
+        bin_denominator=plan.bin_denominator,
+        missing_bins=plan.missing_bins,
     )
 
 
@@ -1035,6 +1065,8 @@ def build_dataset(
     profile: bool = False,
     strategy: str = "in_memory",
     chrom_filter: list[str] | None = None,
+    bin_denominator: str = "bin_width",
+    missing_bins: str = "nan",
 ) -> None:
     """Fast low-scratch dataset build using the Rust extension.
 
@@ -1073,6 +1105,18 @@ def build_dataset(
         ``bed_rows`` is *not* renumbered — the ``index`` column on every
         output row remains the absolute row position in the input BED
         file. Useful for smoke tests on a single chromosome.
+    bin_denominator : {"bin_width", "covered_bases"}
+        - "bin_width" (default): a bin's value is its summed signal over its
+          in-contig width, so bases with no BigWig record count as zero. Right
+          for coverage BigWigs, which often omit zero-coverage stretches.
+        - "covered_bases": divide by the bases that have a record instead
+          (pyBigWig ``stats(exact=True)`` semantics). Inflates sparse bins when
+          zero records are omitted; identical to "bin_width" when they are not.
+    missing_bins : {"nan", "zero"}
+        Value stored for bins with no data — past the contig end (window
+        padding) or wholly NaN-valued in the BigWig. "nan" (default) lets
+        training mask them (``data.mask_missing``); "zero" stores 0.0, which
+        trains them as observed zero signal.
 
     Rows whose signal window would start before contig position 0 are
     dropped from every split (see ``_edge_unsafe_row_indices``) rather than
@@ -1080,7 +1124,13 @@ def build_dataset(
     are logged as a warning and recorded in the output ``tracks.parquet`` as
     ``edge_dropped_rows`` / ``edge_dropped_examples``.
     """
-    _validate_build_args(shift_max_bp=shift_max_bp, bin_size=bin_size, strategy=strategy)
+    _validate_build_args(
+        shift_max_bp=shift_max_bp,
+        bin_size=bin_size,
+        strategy=strategy,
+        bin_denominator=bin_denominator,
+        missing_bins=missing_bins,
+    )
     _reject_bgzip_fasta(fasta_file)
 
     bed_file = Path(bed_file)
@@ -1104,6 +1154,8 @@ def build_dataset(
         rows_per_row_group=rows_per_row_group,
         write_threads=write_threads,
         n_extract_threads=n_extract_threads,
+        bin_denominator=bin_denominator,
+        missing_bins=missing_bins,
     )
 
     if plan.splits_to_build:
@@ -1185,6 +1237,7 @@ def transform_signal(
     apply_scale: bool = True,
     apply_squash: bool = True,
     apply_clip: bool = True,
+    keep_missing: bool = False,
 ) -> np.ndarray:
     """Apply scale → clip → squash to a (T, L) signal array.
 
@@ -1199,6 +1252,9 @@ def transform_signal(
        raw-count dynamic range while preserving monotonicity.  Above ``clip_soft`` a softer
        sqrt compression is applied.
 
+    Missing bins (NaN) become 0.0, or stay NaN when ``keep_missing`` so training can
+    mask them.
+
     Mirrors the per-sample signal transform inside ``make_transform``.
     Returns float32.
     """
@@ -1207,6 +1263,7 @@ def transform_signal(
     ch = np.broadcast_to(np.asarray(clip_hard, dtype=np.float32), (sf.shape[0],)).reshape(-1, 1)
 
     out = np.asarray(signal, dtype=np.float32).copy()
+    missing = np.isnan(out) if keep_missing else None
     np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
     np.maximum(out, 0.0, out=out)
     if apply_scale:
@@ -1228,6 +1285,27 @@ def transform_signal(
                     cs_sq - 1.0 + np.sqrt(np.maximum(out - cs_sq + 1.0, 0.0)),
                     out,
                 ).astype(np.float32)
+    if missing is not None and missing.any():
+        out[missing] = np.nan
+    return out
+
+
+def count_labels(
+    signal: np.ndarray, count_factors: np.ndarray, *, keep_missing: bool = True
+) -> np.ndarray:
+    """Convert stored mean-coverage signal ``(T, L)`` to count units, per track.
+
+    No background subtraction, clipping or squashing: the ``data.label_space: counts``
+    path (see ``regulonado.training.label_space``). Negative and infinite values are
+    zeroed; missing bins (NaN) stay NaN when ``keep_missing``, else become 0.0.
+    """
+    out = np.asarray(signal, dtype=np.float32).copy()
+    missing = np.isnan(out)
+    np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+    np.maximum(out, 0.0, out=out)
+    out *= np.asarray(count_factors, dtype=np.float32).reshape(-1, 1)
+    if keep_missing and missing.any():
+        out[missing] = np.nan
     return out
 
 
@@ -1291,6 +1369,9 @@ def make_transform(
     n_pred_bins: int = _DEFAULT_PRED_BINS,
     bin_size: int = _DEFAULT_BIN_SIZE,
     center_crop: bool = False,
+    label_space: str = "transformed",
+    count_factors: np.ndarray | None = None,
+    mask_missing: bool = True,
 ) -> Callable[[dict], dict]:
     """Return a per-example transform for ``WindowParquetDataset``.
 
@@ -1300,7 +1381,9 @@ def make_transform(
         1. Shift crop: random offset when center_crop=False, center offset when center_crop=True.
            Always applied when shift_max_bins > 0.
         2. RC augmentation    (if enable_rc_aug)
-        3. Signal transform   (scale → squash → clip)
+        3. Signal transform   (scale → squash → clip) for ``label_space="transformed"``;
+           conversion to count units (``count_labels``) for ``label_space="counts"``,
+           which ignores the scale/clip/squash/background arguments
 
     Writes ``input_ids`` (uint8 tokens; one-hot encoding happens on the GPU in
     ``RegulonadoModel.forward``) and ``labels`` (float32) into the example.
@@ -1316,7 +1399,14 @@ def make_transform(
         enable_rc_aug: Apply random reverse-complement augmentation.
         rc_permutation: Per-track permutation for swapping strand pairs on RC aug.
         center_crop: If True, always crop from the center (s=shift_max_bins). Use for eval/test.
+        label_space: "transformed" or "counts" (see ``regulonado.training.label_space``).
+        count_factors: Per-track mean-coverage → count-unit factors; required for "counts".
+        mask_missing: Keep missing bins as NaN for the loss to mask, instead of 0.0.
     """
+    if label_space not in {"transformed", "counts"}:
+        raise ValueError(f"label_space must be 'transformed' or 'counts', got {label_space!r}")
+    if label_space == "counts" and count_factors is None:
+        raise ValueError("label_space='counts' requires count_factors")
     sf = np.asarray(scale_factors, dtype=np.float32).reshape(-1)
     n_tracks = sf.size
     cs = np.broadcast_to(np.asarray(clip_soft, dtype=np.float32), (n_tracks,)).copy()
@@ -1326,12 +1416,13 @@ def make_transform(
         if background is None
         else np.broadcast_to(np.asarray(background, dtype=np.float32), (n_tracks,)).copy()
     )
+    cf = None if count_factors is None else np.asarray(count_factors, dtype=np.float32).reshape(-1)
 
     def transform_example(example: dict) -> dict:
         example = dict(example)
         seq = np.asarray(example.pop("sequence_tokens"), dtype=np.uint8)
         sig = np.asarray(example.pop("signal"), dtype=np.float32)
-        _sf, _cs, _ch, _bg = sf, cs, ch, bg
+        _sf, _cs, _ch, _bg, _cf = sf, cs, ch, bg, cf
 
         # --- shift crop (always applied when shift buffer was stored)
         if shift_max_bins > 0:
@@ -1349,19 +1440,24 @@ def make_transform(
                 _cs = cs[rc_permutation]
                 _ch = ch[rc_permutation]
                 _bg = None if bg is None else bg[rc_permutation]
+                _cf = None if cf is None else cf[rc_permutation]
             sig = sig.copy()
 
         example["input_ids"] = seq.astype(np.uint8, copy=False)
-        example["labels"] = transform_signal(
-            sig,
-            _sf,
-            _cs,
-            _ch,
-            background=_bg,
-            apply_scale=apply_scale,
-            apply_squash=apply_squash,
-            apply_clip=apply_clip,
-        )
+        if label_space == "counts":
+            example["labels"] = count_labels(sig, _cf, keep_missing=mask_missing)
+        else:
+            example["labels"] = transform_signal(
+                sig,
+                _sf,
+                _cs,
+                _ch,
+                background=_bg,
+                apply_scale=apply_scale,
+                apply_squash=apply_squash,
+                apply_clip=apply_clip,
+                keep_missing=mask_missing,
+            )
         return example
 
     return transform_example

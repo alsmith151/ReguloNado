@@ -319,6 +319,20 @@ $defs:
         - content
         title: Dedupe Tracks
         type: string
+      bin_denominator:
+        default: bin_width
+        enum:
+        - bin_width
+        - covered_bases
+        title: Bin Denominator
+        type: string
+      missing_bins:
+        default: nan
+        enum:
+        - nan
+        - zero
+        title: Missing Bins
+        type: string
     title: DatasetConfig
     type: object
   DesignConfig:

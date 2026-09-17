@@ -43,10 +43,16 @@ from regulonado.training.callbacks import (
 )
 from regulonado.training.config import TrainerConfig
 from regulonado.training.data import WindowParquetDataset
+from regulonado.training.label_space import (
+    CountLabelSpace,
+    resolve_count_label_space,
+    validate_label_space,
+)
 from regulonado.training.losses import (
     contrast_group_weights,
     kendall_track_weighted_loss,
     log1p_huber_loss,
+    mask_missing_bins,
     poisson_multinomial_binwise_loss,
     poisson_multinomial_loss,
     poisson_nll_loss,
@@ -461,8 +467,22 @@ def _build_loss_fn(
     contrast_region_bins: int = 16,
     contrast_pseudocount: float = 0.1,
     contrast_active_fraction: float = 0.1,
+    exposure: torch.Tensor | None = None,
 ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
-    """Build the configured base loss, plus the cross-track contrast term when weighted."""
+    """Build the configured base loss, plus the cross-track contrast term when weighted.
+
+    Missing bins (NaN targets) are removed from every term: prediction and target are
+    both zeroed there, which contributes nothing to the per-bin terms and no gradient.
+
+    With ``exposure`` (``data.label_space: counts``), targets are counts and predictions
+    are exposure-normalised rates: the base loss sees ``pred * exposure`` against the
+    counts, and the contrast terms compare ``pred`` with ``target / exposure``.
+    """
+    if exposure is not None and str(loss_cfg.get("name")) == "scaled_poisson_multinomial":
+        raise ValueError(
+            "loss.name=scaled_poisson_multinomial applies its own scaling; use "
+            "poisson_multinomial or poisson_multinomial_binwise with data.label_space=counts"
+        )
     base_loss = _build_base_loss_fn(
         loss_cfg,
         scale_factors=scale_factors,
@@ -472,9 +492,8 @@ def _build_loss_fn(
     )
     contrast_weight = float(loss_cfg.get("contrast_weight") or 0.0)
     magnitude_weight = float(loss_cfg.get("contrast_magnitude_weight") or 0.0)
-    if contrast_weight <= 0.0 and magnitude_weight <= 0.0:
-        return base_loss
-    if contrast_weights is None or contrast_weights.shape[0] == 0:
+    use_contrast = contrast_weight > 0.0 or magnitude_weight > 0.0
+    if use_contrast and (contrast_weights is None or contrast_weights.shape[0] == 0):
         raise ValueError(
             "loss.contrast_weight and loss.contrast_magnitude_weight require tracks labelled "
             "with assay_class and group, with at least two groups sharing one assay_class"
@@ -486,14 +505,20 @@ def _build_loss_fn(
     )
 
     def loss_fn(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        loss = base_loss(pred, target)
+        pred, target = mask_missing_bins(pred, target)
+        if exposure is None:
+            base_pred, normalised_target = pred, target
+        else:
+            track_exposure = exposure.to(device=pred.device, dtype=pred.dtype)[:, None]
+            base_pred, normalised_target = pred * track_exposure, target / track_exposure
+        loss = base_loss(base_pred, target)
         if contrast_weight > 0.0:
             loss = loss + contrast_weight * track_contrast_correlation_loss(
-                pred, target, contrast_weights, **geometry
+                pred, normalised_target, contrast_weights, **geometry
             )
         if magnitude_weight > 0.0:
             loss = loss + magnitude_weight * track_contrast_magnitude_loss(
-                pred, target, contrast_weights, **geometry
+                pred, normalised_target, contrast_weights, **geometry
             )
         return loss
 
@@ -629,13 +654,64 @@ def _build_base_loss_fn(
     raise ValueError(f"Unsupported loss name {loss_name!r}")
 
 
+def _resolve_count_label_space(
+    data_cfg: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    records: Sequence[Mapping[str, Any]],
+    *,
+    rank: int = 0,
+) -> CountLabelSpace | None:
+    """Per-track count factors and exposure for ``data.label_space: counts``, else None."""
+    label_space = str(data_cfg.get("label_space", "transformed"))
+    count_unit = str(data_cfg.get("count_unit", "fragments"))
+    exposure = str(data_cfg.get("exposure", "anchor"))
+    validate_label_space(label_space, count_unit, exposure)
+    if label_space != "counts":
+        return None
+    count_space = resolve_count_label_space(
+        records,
+        count_unit=count_unit,
+        exposure=exposure,
+        bin_size=int(metadata.get("bin_size", 32)),
+    )
+    if bool(data_cfg.get("enable_rc_aug", False)):
+        # RC augmentation swaps paired strand channels' labels, but each output channel
+        # keeps its own exposure, so pairs must share one for the offset to stay exact.
+        rc_perm = build_rc_permutation(list(records))
+        if rc_perm is not None:
+            ratio = count_space.exposure / count_space.exposure[rc_perm]
+            if np.any(np.abs(np.log(ratio)) > np.log(1.05)):
+                logger.warning(
+                    "RC augmentation pairs strand tracks whose exposures differ by more than "
+                    "5%%; swapped labels are fitted against the other strand's exposure"
+                )
+    logger.info(
+        "[rank %d] label_space=counts count_unit=%s exposure=%s | count factor median=%.4g, "
+        "exposure median=%.4g (range %.4g-%.4g) count units per output unit",
+        rank,
+        count_unit,
+        exposure,
+        float(np.median(count_space.count_factors)),
+        float(np.median(count_space.exposure)),
+        float(count_space.exposure.min()),
+        float(count_space.exposure.max()),
+    )
+    return count_space
+
+
 def _apply_dataset_transforms(
     dataset_dict: Mapping[str, Any],
     metadata: Mapping[str, Any],
     records: Sequence[Mapping[str, Any]],
     data_cfg: Mapping[str, Any],
+    count_space: CountLabelSpace | None = None,
 ) -> Mapping[str, Any]:
     scale_factors, clip_soft, clip_hard, background = resolve_scale_and_clip(records)
+    label_space_kwargs: dict[str, Any] = {
+        "label_space": "counts" if count_space is not None else "transformed",
+        "count_factors": None if count_space is None else count_space.count_factors,
+        "mask_missing": bool(data_cfg.get("mask_missing", True)),
+    }
     bin_size = int(metadata.get("bin_size", 32))
     shift_max_bp = int(metadata.get("shift_max_bp", 0))
     context_length = int(metadata.get("context_length", data_cfg.get("context_length", 524_288)))
@@ -659,6 +735,7 @@ def _apply_dataset_transforms(
         context_length=context_length,
         n_pred_bins=n_pred_bins,
         bin_size=bin_size,
+        **label_space_kwargs,
     )
     eval_transform = make_transform(
         scale_factors,
@@ -675,6 +752,7 @@ def _apply_dataset_transforms(
         n_pred_bins=n_pred_bins,
         bin_size=bin_size,
         center_crop=True,
+        **label_space_kwargs,
     )
     # WindowParquetDataset applies its `.transform` inside __getitem__, per example.
     dataset_dict["train"].transform = train_transform
@@ -819,8 +897,12 @@ def _empirical_track_output_bias(
     activation_type: str,
     max_samples: int,
     seed: int = 0,
+    label_divisor: np.ndarray | None = None,
 ) -> list[float]:
     """Estimate per-track transformed-label means from a seeded random sample of rows.
+
+    ``label_divisor`` (the count label space's exposure) puts count labels into the
+    model's output units first. Missing (NaN) bins are left out of the mean.
 
     Sampling by seeded random index (rather than the first ``max_samples`` rows) avoids
     a genome-order bias: chromosome-major shard order means the first rows of a fresh
@@ -836,7 +918,7 @@ def _empirical_track_output_bias(
     indices = rng.choice(n_total, size=sample_size, replace=False)
 
     totals = np.zeros(n_tracks, dtype=np.float64)
-    count = 0
+    counts = np.zeros(n_tracks, dtype=np.float64)
     for index in indices:
         labels = np.asarray(train_dataset[int(index)]["labels"], dtype=np.float64)
         if labels.ndim != 2:
@@ -847,15 +929,24 @@ def _empirical_track_output_bias(
             raise ValueError(
                 f"Training label shape {labels.shape} does not contain {n_tracks} tracks"
             )
-        totals += labels.sum(axis=1)
-        count += labels.shape[1]
-    if count == 0:
+        if label_divisor is not None:
+            labels = labels / np.asarray(label_divisor, dtype=np.float64).reshape(-1, 1)
+        totals += np.nansum(labels, axis=1)
+        counts += np.sum(~np.isnan(labels), axis=1)
+    if not np.any(counts):
         raise ValueError("Cannot initialize output bias from an empty training dataset")
-    return _inverse_output_activation_mean(totals / count, activation_type).tolist()
+    return _inverse_output_activation_mean(
+        totals / np.maximum(counts, 1.0), activation_type
+    ).tolist()
 
 
 def _resolve_empirical_output_bias(
-    cfg: Mapping[str, Any], dataset_dict: Mapping[str, Any], n_tracks: int, *, seed: int = 0
+    cfg: Mapping[str, Any],
+    dataset_dict: Mapping[str, Any],
+    n_tracks: int,
+    *,
+    seed: int = 0,
+    count_space: CountLabelSpace | None = None,
 ) -> None:
     """Replace the declarative empirical-mean mode with checkpoint-safe numeric biases."""
     head_cfg = cfg["head"]
@@ -871,6 +962,7 @@ def _resolve_empirical_output_bias(
         activation_type=str(cfg["model"].get("activation_type", "softplus")),
         max_samples=int(head_cfg.get("output_init_samples", 256)),
         seed=seed,
+        label_divisor=None if count_space is None else count_space.exposure,
     )
     head_cfg["resolved_output_bias"] = values
     head_cfg["zero_output_weights"] = mode == "empirical_mean_constant"
@@ -1538,6 +1630,7 @@ def _build_collate_and_loss(
     cfg: Mapping[str, Any],
     records: Sequence[Mapping[str, Any]],
     model: torch.nn.Module | None = None,
+    count_space: CountLabelSpace | None = None,
 ) -> tuple[
     Callable[[list[dict[str, Any]]], dict[str, torch.Tensor]],
     Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
@@ -1588,6 +1681,7 @@ def _build_collate_and_loss(
         contrast_region_bins=int(trainer_cfg_for_loss.get("contrast_region_bins", 16)),
         contrast_pseudocount=float(trainer_cfg_for_loss.get("contrast_pseudocount", 0.1)),
         contrast_active_fraction=float(trainer_cfg_for_loss.get("contrast_active_fraction", 0.1)),
+        exposure=None if count_space is None else torch.as_tensor(count_space.exposure),
     )
     return collate_fn, loss_fn, scale_factors, background
 
@@ -1684,6 +1778,7 @@ def _build_training_callbacks(
     background: np.ndarray,
     records: Sequence[Mapping[str, Any]],
     output_dir: Path,
+    count_space: CountLabelSpace | None = None,
 ) -> list[TrainerCallback]:
     """Assemble W&B, LR logging, early stopping, and diagnostic callbacks."""
     callbacks: list[TrainerCallback] = [WandbConfigCallback(cfg), LRLogCallback()]
@@ -1707,6 +1802,7 @@ def _build_training_callbacks(
                 background=background,
                 apply_squash=bool(cfg["data"].get("apply_squash", True)),
                 apply_scale=bool(cfg["data"].get("apply_scale", True)),
+                label_divisor=None if count_space is None else count_space.exposure,
             )
         )
     return callbacks
@@ -1877,15 +1973,22 @@ def run_training(
         data_path, metadata_path, dataset_dict, rank=rank
     )
 
-    dataset_dict = _apply_dataset_transforms(dataset_dict, metadata, records, cfg["data"])
+    count_space = _resolve_count_label_space(cfg["data"], metadata, records, rank=rank)
+    dataset_dict = _apply_dataset_transforms(
+        dataset_dict, metadata, records, cfg["data"], count_space
+    )
     logger.info(f"[rank {rank}] dataset transforms applied")
 
     dataset_dict = _prepare_dataset_splits(dataset_dict, trainer_cfg, seed=seed)
 
-    _resolve_empirical_output_bias(cfg, dataset_dict, len(records), seed=seed)
+    _resolve_empirical_output_bias(
+        cfg, dataset_dict, len(records), seed=seed, count_space=count_space
+    )
 
     model = _build_model_with_logging(cfg, metadata, records, adapter_builder, rank=rank)
-    collate_fn, loss_fn, scale_factors, background = _build_collate_and_loss(cfg, records, model)
+    collate_fn, loss_fn, scale_factors, background = _build_collate_and_loss(
+        cfg, records, model, count_space=count_space
+    )
 
     output_dir = Path(str(cfg.get("output_dir") or Path.cwd() / "outputs"))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1929,6 +2032,7 @@ def run_training(
             background,
             records,
             output_dir,
+            count_space,
         ),
         per_track_report,
     ]
@@ -1953,6 +2057,7 @@ def run_training(
             contrast_region_bins=trainer_cfg.contrast_region_bins,
             contrast_pseudocount=trainer_cfg.contrast_pseudocount,
             contrast_active_fraction=trainer_cfg.contrast_active_fraction,
+            label_divisor=None if count_space is None else torch.as_tensor(count_space.exposure),
         ),
     )
 

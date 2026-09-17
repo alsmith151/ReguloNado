@@ -1,4 +1,4 @@
-use crate::binning::{bin_region_into, BinningScratch};
+use crate::binning::{bin_region_into, BinningOptions, BinningScratch};
 use bigtools::{utils::file::reopen::ReopenableFile, BigWigRead};
 use rayon::prelude::*;
 
@@ -24,6 +24,7 @@ pub(crate) fn extract_bigwig_labels_batch(
     minus_flags: &[bool],
     intervals: &[(String, u32, u32)],
     n_bins: usize,
+    options: BinningOptions,
 ) -> Result<Vec<f32>, String> {
     let rows = intervals.len();
     let n_tracks = handles.len();
@@ -45,11 +46,11 @@ pub(crate) fn extract_bigwig_labels_batch(
             for (row_idx, (chrom, start, end)) in intervals.iter().enumerate() {
                 let row_start = row_idx * n_bins;
                 let row = &mut values[row_start..row_start + n_bins];
-                bin_region_into(reader, chrom, *start, *end, row, &mut scratch)?;
+                bin_region_into(reader, chrom, *start, *end, row, &mut scratch, options)?;
 
                 if is_minus {
                     for &v in row.iter() {
-                        if v != 0.0 {
+                        if v != 0.0 && !v.is_nan() {
                             nz += 1;
                             if v < 0.0 {
                                 neg += 1;

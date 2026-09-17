@@ -80,6 +80,19 @@
 │                                                       `index` column on every output row still   │
 │                                                       refers to the absolute row in the full     │
 │                                                       BED.                                       │
+│    --bin-denominator                         TEXT     How a bin's mean is formed: 'bin_width'    │
+│                                                       (default) divides summed signal by the     │
+│                                                       bin's in-contig width, so bases without a  │
+│                                                       BigWig record count as zero;               │
+│                                                       'covered_bases' divides by recorded bases  │
+│                                                       only, which inflates sparse bins in        │
+│                                                       BigWigs that omit zeros.                   │
+│                                                       [default: bin_width]                       │
+│    --missing-bins                            TEXT     Value stored for bins with no data (past   │
+│                                                       the contig end, or wholly NaN in the       │
+│                                                       BigWig): 'nan' (default, maskable in       │
+│                                                       training) or 'zero'.                       │
+│                                                       [default: nan]                             │
 │    --help                                             Show this message and exit.                │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 

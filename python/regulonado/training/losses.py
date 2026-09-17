@@ -12,6 +12,22 @@ def squash(y: torch.Tensor, eps: float = 1e-2) -> torch.Tensor:
     return torch.sign(y) * (torch.sqrt(torch.abs(y).clamp(min=0) + 1) - 1) + eps * y
 
 
+def mask_missing_bins(
+    pred: torch.Tensor, target: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Zero prediction and target wherever the target is missing (NaN).
+
+    A bin with both at zero adds nothing to Poisson, multinomial or squared-error terms
+    and passes no gradient to the prediction, so it drops out of the loss. Datasets
+    built with ``--missing-bins zero`` (or ``data.mask_missing: false``) carry no NaN,
+    and this is a no-op.
+    """
+    missing = torch.isnan(target)
+    if not bool(missing.any()):
+        return pred, target
+    return pred.masked_fill(missing, 0.0), target.masked_fill(missing, 0.0)
+
+
 def scaled_poisson_multinomial_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
