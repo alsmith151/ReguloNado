@@ -521,7 +521,9 @@ def fragment_lengths_cmd(
         int,
         typer.Option("--max-fragment-length", help="Longest fragment length considered"),
     ] = 1_000,
-    max_workers: Annotated[int, typer.Option("--workers", "-w")] = 8,
+    max_workers: Annotated[
+        int, typer.Option("--workers", "-w", help="BAMs read in parallel (one process each)")
+    ] = 8,
 ) -> None:
     """Estimate each included track's fragment length from its BAM, paired or single-end.
 
@@ -531,7 +533,8 @@ def fragment_lengths_cmd(
     ``fragment_length`` for extended fragments, close to ``read_length`` (twice it for
     paired reads) for unextended reads, which need ``--length-source read``.
     """
-    from concurrent.futures import ThreadPoolExecutor
+    import time
+    from concurrent.futures import ProcessPoolExecutor, as_completed
 
     from regulonado.normalization import bam_fragment_length
 
@@ -553,17 +556,39 @@ def fragment_lengths_cmd(
         )
         raise typer.Exit(1)
 
-    def measure(name: str) -> dict:
-        stats = bam_fragment_length(
-            bams[name],
-            length_source=length_source,
-            max_reads=max_reads,
-            max_fragment_length=max_fragment_length,
-        )
-        return {"track_name": name, **stats, "bam": str(bams[name])}
-
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        result = pd.DataFrame(list(pool.map(measure, bams)))
+    # Processes, not threads: pysam's per-read loop holds the GIL, so threads run serially.
+    typer.echo(
+        f"Measuring {len(bams)} BAM(s), {max_workers} at a time, "
+        f"up to {max_reads:,} reads each (--length-source {length_source})"
+    )
+    started = time.perf_counter()
+    rows: list[dict] = []
+    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(
+                bam_fragment_length,
+                bam,
+                length_source=length_source,
+                max_reads=max_reads,
+                max_fragment_length=max_fragment_length,
+            ): name
+            for name, bam in bams.items()
+        }
+        for done, future in enumerate(as_completed(futures), 1):
+            name = futures[future]
+            try:
+                stats = future.result()
+            except Exception as error:
+                typer.echo(f"[{done}/{len(bams)}] {name}: failed: {error}", err=True)
+                raise typer.Exit(1) from error
+            rows.append({"track_name": name, **stats, "bam": str(bams[name])})
+            typer.echo(
+                f"[{done}/{len(bams)}] {name}: {stats['fragment_length']:.1f} bp "
+                f"({stats['fragment_length_method']}, {stats['n_reads_sampled']:,} reads, "
+                f"{stats['seconds']:.1f}s) | elapsed {time.perf_counter() - started:.0f}s"
+            )
+    order = {name: index for index, name in enumerate(bams)}
+    result = pd.DataFrame(sorted(rows, key=lambda row: order[row["track_name"]]))
     if "fp_genome_sum" in included.columns:
         genome_sum = included.set_index("track_name")["fp_genome_sum"].astype(float)
         coverage = result["track_name"].map(genome_sum)

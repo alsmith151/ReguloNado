@@ -543,14 +543,18 @@ def bam_fragment_length(
     BigWig's pileup type: close to the fragment length for fragment pileups, to the
     read length (or twice it for paired reads) for read pileups.
     """
+    import time  # noqa: PLC0415
+
     import pysam  # noqa: PLC0415 - optional, only needed for BAM inspection
 
+    started = time.perf_counter()
     template_lengths: list[int] = []
     read_lengths: list[int] = []
     plus: dict[str, list[int]] = {}
     minus: dict[str, list[int]] = {}
     n_reads = n_paired = 0
-    with pysam.AlignmentFile(str(bam), "rb") as handle:
+    # Two BGZF decompression threads alongside the Python read loop.
+    with pysam.AlignmentFile(str(bam), "rb", threads=2) as handle:
         for read in handle.fetch(until_eof=True):
             if read.is_unmapped or read.is_secondary or read.is_supplementary:
                 continue
@@ -596,6 +600,7 @@ def bam_fragment_length(
         "read_length": read_length,
         "n_reads_sampled": n_reads,
         "coverage_units": mapped_reads / 2 if paired else mapped_reads,
+        "seconds": time.perf_counter() - started,
     }
 
 

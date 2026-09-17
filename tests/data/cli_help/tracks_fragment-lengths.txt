@@ -24,7 +24,7 @@
 │    --max-reads                    INTEGER  Reads sampled per BAM (read 1 only if paired)         │
 │                                            [default: 1000000]                                    │
 │    --max-fragment-length          INTEGER  Longest fragment length considered [default: 1000]    │
-│    --workers              -w      INTEGER  [default: 8]                                          │
+│    --workers              -w      INTEGER  BAMs read in parallel (one process each) [default: 8] │
 │    --help                                  Show this message and exit.                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
