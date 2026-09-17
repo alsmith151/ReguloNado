@@ -239,6 +239,10 @@ def test_anchor_scaling_checks_every_resolved_phase_and_run() -> None:
     with pytest.raises(ValueError, match="resolved true for run 'run_a', phase 'head'"):
         RegulonadoConfig.model_validate(conflicting)
 
+    counts = copy.deepcopy(base)
+    counts["train"]["common"] = {"data": {"label_space": "counts"}}
+    RegulonadoConfig.model_validate(counts)
+
 
 def test_seqnado_scaling_across_several_projects_is_rejected():
     projects = [

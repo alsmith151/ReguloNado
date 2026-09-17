@@ -613,6 +613,9 @@ class RegulonadoConfig(BaseModel):
                     settings = merge_training_settings(
                         [self.train.common, phase.settings, run.settings]
                     )
+                    # Count labels ignore apply_squash entirely.
+                    if settings.get("data.label_space") == "counts":
+                        continue
                     if settings.get("data.apply_squash", True) is not False:
                         raise ValueError(
                             "scaling.method='anchor' requires data.apply_squash=false; "
