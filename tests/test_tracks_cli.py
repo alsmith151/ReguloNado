@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 from typer.testing import CliRunner
@@ -249,3 +250,133 @@ def test_interval_means_is_shared_by_tmm_and_qc(tmp_path, bigwig_dir):
     )
     assert result.exit_code == 0, result.output
     assert "qc_nonzero_bin_fraction" in pd.read_parquet(qc_report).columns
+
+
+def _write_paired_bam(path, template_lengths, read_length=50):
+    pysam = pytest.importorskip("pysam")
+    header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": "chr1", "LN": 100_000}]}
+    reads = []
+    with pysam.AlignmentFile(str(path), "wb", header=header) as bam:
+        for index, tlen in enumerate(template_lengths):
+            start = 100 + index * 10
+            for is_read1 in (True, False):
+                read = pysam.AlignedSegment()
+                read.query_name = f"pair{index}"
+                read.query_sequence = "A" * read_length
+                read.query_qualities = pysam.qualitystring_to_array("I" * read_length)
+                read.flag = 0x1 | 0x2 | (0x40 if is_read1 else 0x80)
+                read.reference_id = 0
+                read.reference_start = start if is_read1 else start + tlen - read_length
+                read.next_reference_id = 0
+                read.next_reference_start = start + tlen - read_length if is_read1 else start
+                read.template_length = tlen if is_read1 else -tlen
+                read.cigartuples = [(0, read_length)]
+                read.mapping_quality = 60
+                reads.append(read)
+        for read in sorted(reads, key=lambda r: r.reference_start):
+            bam.write(read)
+    pysam.index(str(path))
+
+
+def test_fragment_lengths_writes_mean_template_length_per_track(tmp_path, bigwig_dir):
+    discovered = tmp_path / "discovered.parquet"
+    runner.invoke(tracks_app, ["discover", str(discovered), "--bigwig-dir", str(bigwig_dir)])
+    bam_dir = tmp_path / "bams"
+    bam_dir.mkdir()
+    _write_paired_bam(bam_dir / "a.bam", [100, 200, 300])
+    _write_paired_bam(bam_dir / "b.bam", [150, 150, 5000])  # 5000 exceeds the cap
+    _write_paired_bam(bam_dir / "flat.bam", [80])
+
+    output = tmp_path / "fragment_lengths.csv"
+    result = runner.invoke(
+        tracks_app,
+        ["fragment-lengths", str(discovered), "-o", str(output), "--bam-dir", str(bam_dir)],
+    )
+    assert result.exit_code == 0, result.output
+
+    lengths = pd.read_csv(output).set_index("track_name")
+    assert lengths.loc["a", "fragment_length"] == 200
+    assert lengths.loc["b", "fragment_length"] == 150
+    assert lengths.loc["a", "read_length"] == 50
+    assert lengths.loc["a", "coverage_units"] == 3
+    assert (lengths["fragment_length_method"] == "template_length").all()
+    assert "coverage_per_unit" in lengths.columns
+
+
+def _write_single_end_bam(path, fragment_length, *, n_fragments=4000, read_length=36):
+    pysam = pytest.importorskip("pysam")
+    rng = np.random.default_rng(0)
+    header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": "chr1", "LN": 1_000_000}]}
+    reads = []
+    for index, start in enumerate(rng.integers(0, 200_000, size=n_fragments)):
+        for is_reverse in (False, True):
+            read = pysam.AlignedSegment()
+            read.query_name = f"frag{index}_{int(is_reverse)}"
+            read.query_sequence = "A" * read_length
+            read.query_qualities = pysam.qualitystring_to_array("I" * read_length)
+            read.flag = 0x10 if is_reverse else 0
+            read.reference_id = 0
+            offset = fragment_length - read_length if is_reverse else 0
+            read.reference_start = int(start + offset)
+            read.cigartuples = [(0, read_length)]
+            read.mapping_quality = 60
+            reads.append(read)
+    with pysam.AlignmentFile(str(path), "wb", header=header) as bam:
+        for read in sorted(reads, key=lambda r: r.reference_start):
+            bam.write(read)
+    pysam.index(str(path))
+
+
+@pytest.mark.parametrize(
+    ("length_source", "expected", "method"),
+    [("auto", 180, "strand_cross_correlation"), ("read", 36, "read_length")],
+)
+def test_fragment_lengths_single_end(tmp_path, bigwig_dir, length_source, expected, method):
+    discovered = tmp_path / "discovered.parquet"
+    runner.invoke(tracks_app, ["discover", str(discovered), "--bigwig-dir", str(bigwig_dir)])
+    bam_dir = tmp_path / "bams"
+    bam_dir.mkdir()
+    for stem in ("a", "b", "flat"):
+        _write_single_end_bam(bam_dir / f"{stem}.bam", fragment_length=180)
+
+    output = tmp_path / "fragment_lengths.parquet"
+    result = runner.invoke(
+        tracks_app,
+        [
+            "fragment-lengths",
+            str(discovered),
+            "-o",
+            str(output),
+            "--bam-dir",
+            str(bam_dir),
+            "--length-source",
+            length_source,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    lengths = pd.read_parquet(output)
+    assert not lengths["paired"].any()
+    assert (lengths["fragment_length_method"] == method).all()
+    assert lengths["fragment_length"].sub(expected).abs().max() <= 2
+    assert (lengths["coverage_units"] == 8000).all()
+
+
+def test_fragment_lengths_names_tracks_without_a_bam(tmp_path, bigwig_dir):
+    discovered = tmp_path / "discovered.parquet"
+    runner.invoke(tracks_app, ["discover", str(discovered), "--bigwig-dir", str(bigwig_dir)])
+    bam_dir = tmp_path / "bams"
+    bam_dir.mkdir()
+    result = runner.invoke(
+        tracks_app,
+        [
+            "fragment-lengths",
+            str(discovered),
+            "-o",
+            str(tmp_path / "out.csv"),
+            "--bam-dir",
+            str(bam_dir),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "a, b, flat" in result.output

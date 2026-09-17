@@ -492,6 +492,103 @@ def show(track_table: Annotated[Path, typer.Argument()]) -> None:
     typer.echo(df["status"].value_counts().to_string())
 
 
+@tracks_app.command("fragment-lengths")
+def fragment_lengths_cmd(
+    track_table: Annotated[Path, typer.Argument(help="discovered.parquet or tracks.parquet")],
+    output: Annotated[
+        Path, typer.Option("-o", "--output", help="Annotations file (.parquet or .csv)")
+    ],
+    bam_dir: Annotated[
+        Path,
+        typer.Option(
+            "--bam-dir", help="Directory of BAM files named <bigwig-stem>.bam, one per track"
+        ),
+    ],
+    length_source: Annotated[
+        str,
+        typer.Option(
+            "--length-source",
+            help=(
+                "'auto': template length for paired-end BAMs, strand cross-correlation "
+                "for single-end; 'read': mean read length, for BigWigs of unextended reads"
+            ),
+        ),
+    ] = "auto",
+    max_reads: Annotated[
+        int, typer.Option("--max-reads", help="Reads sampled per BAM (read 1 only if paired)")
+    ] = 1_000_000,
+    max_fragment_length: Annotated[
+        int,
+        typer.Option("--max-fragment-length", help="Longest fragment length considered"),
+    ] = 1_000,
+    max_workers: Annotated[int, typer.Option("--workers", "-w")] = 8,
+) -> None:
+    """Estimate each included track's fragment length from its BAM, paired or single-end.
+
+    Writes ``track_name, fragment_length, ...`` for ``tracks assemble --annotations``,
+    which ``data.count_unit: fragments`` reads. ``coverage_per_unit`` (genome-wide
+    coverage sum / mapped fragments or reads) shows what the BigWig piles up: close to
+    ``fragment_length`` for extended fragments, close to ``read_length`` (twice it for
+    paired reads) for unextended reads, which need ``--length-source read``.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from regulonado.normalization import bam_fragment_length
+
+    if length_source not in {"auto", "read"}:
+        typer.echo(f"--length-source must be 'auto' or 'read', got {length_source!r}", err=True)
+        raise typer.Exit(1)
+    df = _read_table(track_table)
+    included = df[df["status"] == "included"].sort_values("track_index")
+    bams = {
+        row["track_name"]: bam_dir / f"{Path(row['resolved_path']).stem}.bam"
+        for _, row in included.iterrows()
+    }
+    missing = sorted(name for name, bam in bams.items() if not bam.exists())
+    if missing:
+        typer.echo(
+            f"No BAM in {bam_dir} for {len(missing)} track(s) (expected <bigwig-stem>.bam): "
+            + ", ".join(missing[:10]),
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    def measure(name: str) -> dict:
+        stats = bam_fragment_length(
+            bams[name],
+            length_source=length_source,
+            max_reads=max_reads,
+            max_fragment_length=max_fragment_length,
+        )
+        return {"track_name": name, **stats, "bam": str(bams[name])}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        result = pd.DataFrame(list(pool.map(measure, bams)))
+    if "fp_genome_sum" in included.columns:
+        genome_sum = included.set_index("track_name")["fp_genome_sum"].astype(float)
+        coverage = result["track_name"].map(genome_sum)
+        result["coverage_per_unit"] = coverage / result["coverage_units"]
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.suffix == ".parquet":
+        result.to_parquet(output, index=False)
+    else:
+        result.to_csv(output, index=False)
+    columns = [
+        c
+        for c in (
+            "track_name",
+            "fragment_length",
+            "fragment_length_method",
+            "read_length",
+            "coverage_per_unit",
+        )
+        if c in result.columns
+    ]
+    typer.echo(result[columns].to_string(index=False, float_format="%.1f"))
+    typer.echo(f"Wrote {len(result)} track(s) -> {output}")
+
+
 @tracks_app.command("targets")
 def targets(
     track_table: Annotated[Path, typer.Argument()],

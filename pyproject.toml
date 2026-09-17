@@ -45,6 +45,8 @@ data = [
     "bioframe",
     "datasets>=5.0.0",
     "pybigtools",
+    # BAM inspection (`regulonado tracks fragment-lengths`).
+    "pysam",
     "scipy",
 ]
 

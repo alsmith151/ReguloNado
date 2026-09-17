@@ -193,6 +193,23 @@ roughly the fragment length. When deriving fragment length from
 give half the fragment length. Supplying `fragment_length` directly (for example through
 `inputs.track_annotations`) avoids the ambiguity.
 
+`regulonado tracks fragment-lengths` measures it from the BAMs (named `<bigwig-stem>.bam`)
+and writes an annotations file for `tracks assemble --annotations`:
+
+```bash
+regulonado tracks fragment-lengths results/tracks/_stages/discovered.parquet \
+  --bam-dir path/to/bams -o results/tracks/_stages/fragment_lengths.parquet
+```
+
+Paired-end BAMs use the mean proper-pair template length. Single-end BAMs use strand
+cross-correlation: the shift at which minus-strand 5' ends best line up with plus-strand
+5' ends, excluding the peak at the read length, so fragments within 10 bp of the read
+length cannot be resolved. Check the `coverage_per_unit` column, which is the
+BigWig's genome-wide coverage divided by the mapped fragments (or reads). It sits near
+`fragment_length` when reads were extended to fragments and near `read_length` when they
+were not. Re-run with `--length-source read` in the second case, because unextended
+coverage converts to reads, not fragments.
+
 Loss weights tuned under `transformed` labels do not carry over. The Poisson and
 multinomial terms grow with the count scale, while the contrast terms do not.
 

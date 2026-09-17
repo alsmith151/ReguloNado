@@ -473,6 +473,132 @@ def compute_bamnado_norm_factors(
     return np.asarray(result["norm_factors"], dtype=np.float64)
 
 
+# Longest contiguous span, per chromosome, binned for strand cross-correlation.
+_CROSS_CORRELATION_SPAN_BP = 20_000_000
+# Half-width of the excluded read-length ("phantom") peak, and of the smoothing window.
+_PHANTOM_PEAK_HALF_WIDTH = 10
+
+
+def _strand_cross_correlation_length(
+    plus: Mapping[str, list[int]],
+    minus: Mapping[str, list[int]],
+    *,
+    read_length: float,
+    max_fragment_length: int,
+) -> float:
+    """Fragment length from single-end reads: the shift maximising strand 5'-end agreement.
+
+    A fragment [s, s + L) yields a plus-strand read starting at s and a minus-strand read
+    whose 5' end is s + L - 1, so plus/minus 5'-end counts correlate most at a shift of
+    L - 1. The read-length peak (mappability artefact) is excluded, so fragments within
+    ±10 bp of the read length cannot be resolved.
+    """
+    scores = np.zeros(max_fragment_length, dtype=np.float64)  # index = fragment length - 1
+    for chrom in plus.keys() & minus.keys():
+        plus_pos = np.asarray(plus[chrom], dtype=np.int64)
+        minus_pos = np.asarray(minus[chrom], dtype=np.int64)
+        origin = int(min(plus_pos.min(), minus_pos.min()))
+        span = min(
+            int(max(plus_pos.max(), minus_pos.max())) - origin + 1, _CROSS_CORRELATION_SPAN_BP
+        )
+        plus_pos, minus_pos = plus_pos - origin, minus_pos - origin
+        plus_counts = np.bincount(plus_pos[plus_pos < span], minlength=span).astype(np.float32)
+        minus_counts = np.zeros(span + max_fragment_length, dtype=np.float32)
+        minus_counts[:span] = np.bincount(minus_pos[minus_pos < span], minlength=span)
+        occupied = np.flatnonzero(plus_counts)
+        weights = plus_counts[occupied]
+        for shift in range(max_fragment_length):
+            scores[shift] += float(np.dot(weights, minus_counts[occupied + shift]))
+    if not scores.any():
+        raise ValueError("No plus/minus strand read pairs to cross-correlate")
+
+    window = 2 * _PHANTOM_PEAK_HALF_WIDTH + 1
+    smoothed = np.convolve(scores, np.ones(window) / window, mode="same")
+    lengths = np.arange(1, max_fragment_length + 1)
+    smoothed[np.abs(lengths - read_length) <= _PHANTOM_PEAK_HALF_WIDTH] = -np.inf
+    smoothed[lengths < read_length / 2] = -np.inf
+    return float(lengths[int(np.argmax(smoothed))])
+
+
+def bam_fragment_length(
+    bam: Path,
+    *,
+    length_source: Literal["auto", "read"] = "auto",
+    max_reads: int = 1_000_000,
+    max_fragment_length: int = 1_000,
+) -> dict[str, float | str]:
+    """Estimate the length each counted unit contributes to a BAM's coverage pileup.
+
+    Samples the first ``max_reads`` primary, mapped, non-duplicate reads (read 1 only for
+    paired data). ``length_source``:
+
+    - ``auto``: paired-end BAMs use the mean proper-pair template length up to
+      ``max_fragment_length`` (the mean, not the median, converts summed fragment
+      coverage to fragment counts); single-end BAMs use strand cross-correlation
+      (see ``_strand_cross_correlation_length``).
+    - ``read``: mean read length, for BigWigs that pile up unextended reads.
+
+    ``coverage_units`` is the index's mapped-read count (halved for paired data; NaN
+    without an index). A track's genome-wide coverage sum divided by it shows the
+    BigWig's pileup type: close to the fragment length for fragment pileups, to the
+    read length (or twice it for paired reads) for read pileups.
+    """
+    import pysam  # noqa: PLC0415 - optional, only needed for BAM inspection
+
+    template_lengths: list[int] = []
+    read_lengths: list[int] = []
+    plus: dict[str, list[int]] = {}
+    minus: dict[str, list[int]] = {}
+    n_reads = n_paired = 0
+    with pysam.AlignmentFile(str(bam), "rb") as handle:
+        for read in handle.fetch(until_eof=True):
+            if read.is_unmapped or read.is_secondary or read.is_supplementary:
+                continue
+            if read.is_duplicate or (read.is_paired and read.is_read2):
+                continue
+            n_reads += 1
+            read_lengths.append(read.query_length or read.infer_read_length() or 0)
+            if read.is_paired:
+                n_paired += 1
+                length = abs(read.template_length)
+                if read.is_proper_pair and 0 < length <= max_fragment_length:
+                    template_lengths.append(length)
+            elif read.is_reverse:
+                minus.setdefault(read.reference_name, []).append(read.reference_end - 1)
+            else:
+                plus.setdefault(read.reference_name, []).append(read.reference_start)
+            if n_reads >= max_reads:
+                break
+        try:
+            mapped_reads = float(handle.mapped)
+        except ValueError:  # no index
+            mapped_reads = float("nan")
+    if not n_reads:
+        raise ValueError(f"No primary mapped reads in {bam}")
+
+    paired = n_paired > n_reads / 2
+    read_length = float(np.mean(read_lengths))
+    if length_source == "read":
+        method, fragment_length = "read_length", read_length
+    elif paired:
+        if not template_lengths:
+            raise ValueError(f"No proper pairs within {max_fragment_length} bp in {bam}")
+        method, fragment_length = "template_length", float(np.mean(template_lengths))
+    else:
+        method = "strand_cross_correlation"
+        fragment_length = _strand_cross_correlation_length(
+            plus, minus, read_length=read_length, max_fragment_length=max_fragment_length
+        )
+    return {
+        "fragment_length": fragment_length,
+        "fragment_length_method": method,
+        "paired": paired,
+        "read_length": read_length,
+        "n_reads_sampled": n_reads,
+        "coverage_units": mapped_reads / 2 if paired else mapped_reads,
+    }
+
+
 def save_scale_factors(
     df: pd.DataFrame,
     output: Path,

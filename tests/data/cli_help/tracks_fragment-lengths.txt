@@ -1,0 +1,30 @@
+                                                                                                    
+ Usage: root tracks fragment-lengths [OPTIONS] TRACK_TABLE                                          
+                                                                                                    
+ Estimate each included track's fragment length from its BAM, paired or single-end.                 
+                                                                                                    
+ Writes ``track_name, fragment_length, ...`` for ``tracks assemble --annotations``,                 
+ which ``data.count_unit: fragments`` reads. ``coverage_per_unit`` (genome-wide                     
+ coverage sum / mapped fragments or reads) shows what the BigWig piles up: close to                 
+ ``fragment_length`` for extended fragments, close to ``read_length`` (twice it for                 
+ paired reads) for unextended reads, which need ``--length-source read``.                           
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    track_table      PATH  discovered.parquet or tracks.parquet [required]                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --output               -o      PATH     Annotations file (.parquet or .csv) [required]        │
+│ *  --bam-dir                      PATH     Directory of BAM files named <bigwig-stem>.bam, one   │
+│                                            per track                                             │
+│                                            [required]                                            │
+│    --length-source                TEXT     'auto': template length for paired-end BAMs, strand   │
+│                                            cross-correlation for single-end; 'read': mean read   │
+│                                            length, for BigWigs of unextended reads               │
+│                                            [default: auto]                                       │
+│    --max-reads                    INTEGER  Reads sampled per BAM (read 1 only if paired)         │
+│                                            [default: 1000000]                                    │
+│    --max-fragment-length          INTEGER  Longest fragment length considered [default: 1000]    │
+│    --workers              -w      INTEGER  [default: 8]                                          │
+│    --help                                  Show this message and exit.                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
