@@ -563,6 +563,7 @@ def fragment_lengths_cmd(
     )
     started = time.perf_counter()
     rows: list[dict] = []
+    failures: dict[str, str] = {}
     with ProcessPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(
@@ -578,9 +579,11 @@ def fragment_lengths_cmd(
             name = futures[future]
             try:
                 stats = future.result()
-            except Exception as error:
-                typer.echo(f"[{done}/{len(bams)}] {name}: failed: {error}", err=True)
-                raise typer.Exit(1) from error
+            except Exception as error:  # one bad BAM should not discard the others
+                failures[name] = str(error)
+                rows.append({"track_name": name, "error": str(error), "bam": str(bams[name])})
+                typer.echo(f"[{done}/{len(bams)}] {name}: FAILED: {error}", err=True)
+                continue
             rows.append({"track_name": name, **stats, "bam": str(bams[name])})
             typer.echo(
                 f"[{done}/{len(bams)}] {name}: {stats['fragment_length']:.1f} bp "
@@ -589,7 +592,7 @@ def fragment_lengths_cmd(
             )
     order = {name: index for index, name in enumerate(bams)}
     result = pd.DataFrame(sorted(rows, key=lambda row: order[row["track_name"]]))
-    if "fp_genome_sum" in included.columns:
+    if "fp_genome_sum" in included.columns and "coverage_units" in result.columns:
         genome_sum = included.set_index("track_name")["fp_genome_sum"].astype(float)
         coverage = result["track_name"].map(genome_sum)
         result["coverage_per_unit"] = coverage / result["coverage_units"]
@@ -612,6 +615,14 @@ def fragment_lengths_cmd(
     ]
     typer.echo(result[columns].to_string(index=False, float_format="%.1f"))
     typer.echo(f"Wrote {len(result)} track(s) -> {output}")
+    if failures:
+        typer.echo(
+            f"{len(failures)} track(s) have no fragment_length (see the 'error' column); "
+            "fix their BAMs or exclude them (inputs.exclude_tracks) before training with "
+            "data.count_unit: fragments:\n  " + "\n  ".join(sorted(failures)),
+            err=True,
+        )
+        raise typer.Exit(1)
 
 
 @tracks_app.command("targets")

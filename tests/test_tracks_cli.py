@@ -380,3 +380,26 @@ def test_fragment_lengths_names_tracks_without_a_bam(tmp_path, bigwig_dir):
     )
     assert result.exit_code == 1
     assert "a, b, flat" in result.output
+
+
+def test_fragment_lengths_keeps_going_past_a_bam_without_usable_reads(tmp_path, bigwig_dir):
+    discovered = tmp_path / "discovered.parquet"
+    runner.invoke(tracks_app, ["discover", str(discovered), "--bigwig-dir", str(bigwig_dir)])
+    bam_dir = tmp_path / "bams"
+    bam_dir.mkdir()
+    _write_paired_bam(bam_dir / "a.bam", [100, 200, 300])
+    _write_paired_bam(bam_dir / "b.bam", [150])
+    _write_paired_bam(bam_dir / "flat.bam", [])
+
+    output = tmp_path / "fragment_lengths.csv"
+    result = runner.invoke(
+        tracks_app,
+        ["fragment-lengths", str(discovered), "-o", str(output), "--bam-dir", str(bam_dir)],
+    )
+    assert result.exit_code == 1
+    assert "the BAM has no alignments" in result.output
+
+    lengths = pd.read_csv(output).set_index("track_name")
+    assert lengths.loc["a", "fragment_length"] == 200
+    assert pd.isna(lengths.loc["flat", "fragment_length"])
+    assert "no alignments" in lengths.loc["flat", "error"]

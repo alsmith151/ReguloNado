@@ -553,12 +553,20 @@ def bam_fragment_length(
     plus: dict[str, list[int]] = {}
     minus: dict[str, list[int]] = {}
     n_reads = n_paired = 0
+    skipped = {"unmapped": 0, "secondary/supplementary": 0, "duplicate": 0}
     # Two BGZF decompression threads alongside the Python read loop.
     with pysam.AlignmentFile(str(bam), "rb", threads=2) as handle:
         for read in handle.fetch(until_eof=True):
-            if read.is_unmapped or read.is_secondary or read.is_supplementary:
+            if read.is_unmapped:
+                skipped["unmapped"] += 1
                 continue
-            if read.is_duplicate or (read.is_paired and read.is_read2):
+            if read.is_secondary or read.is_supplementary:
+                skipped["secondary/supplementary"] += 1
+                continue
+            if read.is_duplicate:
+                skipped["duplicate"] += 1
+                continue
+            if read.is_paired and read.is_read2:
                 continue
             n_reads += 1
             read_lengths.append(read.query_length or read.infer_read_length() or 0)
@@ -578,7 +586,11 @@ def bam_fragment_length(
         except ValueError:  # no index
             mapped_reads = float("nan")
     if not n_reads:
-        raise ValueError(f"No primary mapped reads in {bam}")
+        reasons = ", ".join(f"{count:,} {why}" for why, count in skipped.items() if count)
+        raise ValueError(
+            f"No primary mapped non-duplicate reads in {bam} "
+            f"({'skipped: ' + reasons if reasons else 'the BAM has no alignments'})"
+        )
 
     paired = n_paired > n_reads / 2
     read_length = float(np.mean(read_lengths))
