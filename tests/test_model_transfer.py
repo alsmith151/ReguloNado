@@ -444,6 +444,23 @@ def test_flashed_borzoi_from_pretrained_restores_rotary_frequencies(tmp_path):
         assert torch.equal(rotary.inv_freq, rotary._compute_inv_freq(device=rotary.inv_freq.device))
 
 
+def test_borzoi_from_pretrained_restores_relative_positions(tmp_path):
+    # Non-flash Borzoi keeps its relative-position basis in a non-persistent buffer too;
+    # left uninitialised it gave garbage attention logits (NaN on MPS).
+    from borzoi_pytorch.config_borzoi import BorzoiConfig
+    from borzoi_pytorch.pytorch_borzoi_transformer import Attention, get_positional_embed
+    from regulonado.model.adapters import Borzoi
+
+    Borzoi(BorzoiConfig(depth=1, bins_to_return=1024)).save_pretrained(tmp_path)
+    loaded = Borzoi.from_pretrained(tmp_path)
+
+    attentions = [module for module in loaded.modules() if isinstance(module, Attention)]
+    assert attentions
+    for attention in attentions:
+        expected = get_positional_embed(4096, attention.num_rel_pos_features, "cpu")
+        assert torch.equal(attention.positions, expected)
+
+
 def test_enformer_adapter_transposes_sequence_axes():
     adapter = EnformerBackboneAdapter(DummyEnformerModule())
     features = adapter.forward_features(torch.randn(2, 4, 16))

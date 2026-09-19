@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 from borzoi_pytorch import Borzoi as _Borzoi
 from borzoi_pytorch.config_borzoi import BorzoiConfig
+from borzoi_pytorch.pytorch_borzoi_transformer import Attention as BorzoiAttention
+from borzoi_pytorch.pytorch_borzoi_transformer import get_positional_embed
 from enformer_pytorch import Enformer
 from enformer_pytorch.config_enformer import EnformerConfig
 
@@ -93,7 +95,9 @@ class Borzoi(_Borzoi):
     and relies on ``_init_weights`` to refill them. flash_attn's ``RotaryEmbedding``
     keeps ``inv_freq`` that way (it is not in the checkpoint) and upstream
     ``_init_weights`` ignores it, leaving garbage rotary frequencies — NaN out of
-    ``rotary_emb`` in every FlashZoi forward. ``_init_weights`` recomputes them.
+    ``rotary_emb`` in every FlashZoi forward. ``_init_weights`` recomputes them. Non-flash
+    Borzoi's relative-position ``Attention.positions`` buffer is lost the same way —
+    garbage relative-position logits, NaN on MPS — and is recomputed alongside.
     """
 
     def __init__(self, config):
@@ -113,6 +117,15 @@ class Borzoi(_Borzoi):
             # Drop any cos/sin tables built from the uninitialised frequencies.
             module._seq_len_cached = 0
             module._cos_cached = None
+        if isinstance(module, BorzoiAttention):
+            with torch.no_grad():
+                module.positions.copy_(
+                    get_positional_embed(
+                        module.positions.shape[0] // 2 + 1,
+                        module.num_rel_pos_features,
+                        module.positions.device,
+                    )
+                )
 
 
 class BaseBackboneAdapter(nn.Module):
