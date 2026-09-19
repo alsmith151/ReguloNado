@@ -41,3 +41,9 @@ notebooks/
 
 # Machine- and cluster-specific configs belong here, never in published examples.
 /local/
+examples/2026-09-17-hl60-anchor-deep-unfreeze.yaml
+examples/2026-09-16-hl60-anchor-pipeline.yaml
+tracks.parquet
+.gitignore
+test-00010-of-00026.parquet
+examples/2026-09-16-hl60-anchor-pipeline.yaml
