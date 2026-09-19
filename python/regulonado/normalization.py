@@ -44,6 +44,20 @@ def read_regions(path: Path) -> list[tuple[str, int, int]]:
     ]
 
 
+def rolling_window_stat(values: np.ndarray, width: int) -> float:
+    """Maximum rolling mean of ``values`` at ``width`` bins, or the plain mean if it doesn't fit.
+
+    NaN/Inf entries in ``values`` are treated as 0. If ``width >= len(values)`` there is no
+    room for a rolling window, so this returns the plain mean instead.
+    """
+    values = np.asarray(values, dtype=np.float32)
+    np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+    if width >= len(values):
+        return float(values.mean())
+    means = np.convolve(values, np.ones(width, dtype=np.float32) / width, mode="valid")
+    return float(means.max())
+
+
 def track_window_stat(reader, windows, *, bin_size: int, window_stat_bp: int) -> np.ndarray:
     """Summarise each window using the maximum rolling mean at model bin size."""
     stats = []
@@ -54,12 +68,7 @@ def track_window_stat(reader, windows, *, bin_size: int, window_stat_bp: int) ->
             reader.values(chrom, start, end, bins=n_bins, summary="mean", exact=True, missing=0),
             dtype=np.float32,
         )
-        np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
-        if width >= len(values):
-            stats.append(float(values.mean()))
-        else:
-            means = np.convolve(values, np.ones(width, dtype=np.float32) / width, mode="valid")
-            stats.append(float(means.max()))
+        stats.append(rolling_window_stat(values, width))
     return np.asarray(stats, dtype=np.float32)
 
 
