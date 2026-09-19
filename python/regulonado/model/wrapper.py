@@ -93,6 +93,11 @@ class RegulonadoModel(PreTrainedModel):
             self.head = head
         else:
             self.head = _build_head(config)
+        # Carried on the model (per the composite-head plan) so compute_loss/metrics code
+        # can split concatenated [B, T + G, L] logits without guessing from shape alone.
+        # Plain single-output heads don't set this attribute, so it falls back to n_tracks
+        # (the whole of logits) -- a no-op split, keeping that path unchanged.
+        self.track_channel_count: int = getattr(self.head, "track_channel_count", config.n_tracks)
         self.post_init()
 
     def _init_weights(self, module: nn.Module) -> None:
@@ -162,7 +167,7 @@ class RegulonadoModel(PreTrainedModel):
 
 
 def _build_head(config: RegulonadoConfig) -> nn.Module:
-    from regulonado.model.heads import build_transfer_learning_head
+    from regulonado.model.heads import CompositeTrackGroupHead, build_transfer_learning_head
 
     shared_track_index = config.condition_shared_track_index or None
     head_kwargs: dict = {
@@ -184,8 +189,28 @@ def _build_head(config: RegulonadoConfig) -> nn.Module:
         head_kwargs["mlp_hidden"] = config.mlp_hidden
     head_kwargs["output_bias_init"] = config.output_bias_init
     head_kwargs["zero_output_weights"] = config.zero_output_weights
-    return build_transfer_learning_head(
+    track_head = build_transfer_learning_head(
         head_type=config.head_type,
         activation_type=config.activation_type,
         **head_kwargs,
+    )
+    if config.group_contrast_n_groups <= 0:
+        return track_head
+
+    # Strictly opt-in: only reached when group_contrast_n_groups > 0. The group head
+    # always uses activation_type="identity" regardless of the per-track head's
+    # activation_type -- its target is a signed log2 contrast, not a rate.
+    group_head = build_transfer_learning_head(
+        head_type="group_contrast",
+        activation_type="identity",
+        in_ch=config.feature_dim,
+        hidden=config.group_contrast_hidden,
+        n_groups=config.group_contrast_n_groups,
+        mlp_hidden=config.group_contrast_mlp_hidden,
+        dropout=config.group_contrast_dropout,
+    )
+    return CompositeTrackGroupHead(
+        track_head=track_head,
+        group_head=group_head,
+        track_channel_count=config.n_tracks,
     )

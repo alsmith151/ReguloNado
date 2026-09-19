@@ -246,6 +246,15 @@ class EvalExampleDiagnostics(TrainerCallback):
             out = model(**inputs)
         preds_raw = (out["logits"] if isinstance(out, dict) else out).float().cpu().numpy()
         labels_raw = labels_tensor.float().cpu().numpy()
+        # A group-contrast composite head concatenates [B, T, L] per-track logits with
+        # [B, G, L] group-contrast logits; labels here are always per-track only. Slice
+        # back to the leading T channels before comparing, the same split
+        # runner._split_track_and_group_logits applies for compute_loss/prediction_step.
+        track_channel_count = getattr(
+            model, "track_channel_count", getattr(getattr(model, "module", None), "track_channel_count", None)
+        )
+        if track_channel_count is not None and preds_raw.shape[-2] > track_channel_count:
+            preds_raw = preds_raw[..., :track_channel_count, :]
         if labels_raw.shape[-2:] != preds_raw.shape[-2:]:
             labels_raw = labels_raw.transpose(0, 2, 1)
         if labels_raw.shape != preds_raw.shape:
@@ -376,3 +385,72 @@ class PerTrackMetricsReport(TrainerCallback):
             {key.replace("test_", "test/", 1): value for key, value in (metrics or {}).items()}
         )
         wandb.log({"test/per_track_metrics": wandb.Table(columns=columns, data=rows)})
+
+
+class PerGroupMetricsReport(TrainerCallback):
+    """Write the per-group values behind the group-contrast head's evaluation metrics.
+
+    Sibling of :class:`PerTrackMetricsReport`, kept separate rather than generalising that
+    class: its column layout is keyed off ``records`` (one row per *track*), which does not
+    map onto the group axis (one row per *group*, a different, smaller cardinality with no
+    per-record fields of its own — just a name). ``record`` is the ``per_group_sink`` of
+    ``make_compute_metrics``. Validation evals write
+    ``per_group_metrics/validation_step_<step>.csv``; the final test-split ``predict``
+    writes ``per_group_metrics/test.csv`` and, when W&B is active, logs one
+    ``test/per_group_metrics`` table.
+    """
+
+    def __init__(self, *, output_dir: Path, group_names: Sequence[str]) -> None:
+        self._dir = output_dir / "per_group_metrics"
+        self._group_names = [str(name) for name in group_names]
+        self._latest: dict[str, np.ndarray] | None = None
+
+    def record(self, per_group: Mapping[str, np.ndarray]) -> None:
+        self._latest = dict(per_group)
+
+    def _rows(self) -> tuple[list[str], list[list[Any]]]:
+        assert self._latest is not None
+        columns = ["group", *self._latest]
+        values = [self._group_names, *(v.tolist() for v in self._latest.values())]
+        return columns, [list(row) for row in zip(*values, strict=True)]
+
+    def _write_csv(self, name: str) -> tuple[list[str], list[list[Any]]]:
+        columns, rows = self._rows()
+        self._dir.mkdir(parents=True, exist_ok=True)
+        with (self._dir / f"{name}.csv").open("w", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(columns)
+            writer.writerows(rows)
+        return columns, rows
+
+    def on_evaluate(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs: Any,
+    ) -> None:
+        if self._latest is not None and state.is_world_process_zero:
+            self._write_csv(f"validation_step_{int(state.global_step)}")
+        self._latest = None
+
+    def on_predict(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        metrics: Mapping[str, float] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if self._latest is None or not state.is_world_process_zero:
+            self._latest = None
+            return
+        columns, rows = self._write_csv("test")
+        self._latest = None
+        try:
+            import wandb
+        except ModuleNotFoundError:
+            return
+        if wandb.run is None:
+            return
+        wandb.log({"test/per_group_metrics": wandb.Table(columns=columns, data=rows)})

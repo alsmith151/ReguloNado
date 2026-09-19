@@ -27,6 +27,18 @@ class RegulonadoConfig(PretrainedConfig):
         mlp_hidden: int | None = None,
         output_bias_init: float | list[float] | None = None,
         zero_output_weights: bool = False,
+        # Group-contrast head: a second output head producing [B, G, L] gauge-centred
+        # log2 group-contrast channels, concatenated after the n_tracks per-track
+        # channels. group_contrast_n_groups == 0 disables it entirely (the model then
+        # builds the plain single-head path, unchanged).
+        group_contrast_n_groups: int = 0,
+        group_contrast_hidden: int = 512,
+        group_contrast_mlp_hidden: int | None = None,
+        group_contrast_dropout: float = 0.0,
+        # Canonical group ordering (group_contrast_group_names[g] names channel g of the
+        # group-contrast head's output), derived once from track records at config build
+        # time so it stays stable between training and inference.
+        group_contrast_group_names: list[str] | None = None,
         # Architecture dimensions
         n_tracks: int = 1,
         feature_dim: int = 1920,
@@ -62,6 +74,11 @@ class RegulonadoConfig(PretrainedConfig):
         self.mlp_hidden = mlp_hidden
         self.output_bias_init = output_bias_init
         self.zero_output_weights = zero_output_weights
+        self.group_contrast_n_groups = group_contrast_n_groups
+        self.group_contrast_hidden = group_contrast_hidden
+        self.group_contrast_mlp_hidden = group_contrast_mlp_hidden
+        self.group_contrast_dropout = group_contrast_dropout
+        self.group_contrast_group_names = group_contrast_group_names or []
         self.n_tracks = n_tracks
         self.feature_dim = feature_dim
         self.use_track_metadata = use_track_metadata

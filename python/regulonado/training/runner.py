@@ -35,14 +35,21 @@ from regulonado.model import (
     build_backbone_adapter,
     build_condition_shared_track_index,
 )
+from regulonado.target_specificity import group_index_from_records
 from regulonado.training.callbacks import (
     EvalExampleDiagnostics,
     LRLogCallback,
+    PerGroupMetricsReport,
     PerTrackMetricsReport,
     WandbConfigCallback,
 )
 from regulonado.training.config import TrainerConfig
 from regulonado.training.data import WindowParquetDataset
+from regulonado.training.group_contrast import (
+    group_contrast_labels,
+    group_replicate_weights,
+    reduce_target_score,
+)
 from regulonado.training.label_space import (
     CountLabelSpace,
     resolve_count_label_space,
@@ -456,6 +463,253 @@ def _contrast_weights_from_records(records: Sequence[Mapping[str, Any]]) -> torc
     )
 
 
+def group_contrast_unit_factors(
+    records: Sequence[Mapping[str, Any]],
+    count_space: CountLabelSpace,
+    *,
+    background_mode: str,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Per-track ``(k, b)`` converting ``normalised_target`` into anchor units.
+
+    ``normalised_target = counts / exposure`` is *not* anchor units in general (only when
+    ``exposure`` happens to equal the track's anchor reference with zero background — see
+    the group-contrast-head plan). The exact conversion, derived from
+    ``target_specificity.to_anchor_units``'s ``a = max(y - bg, 0) * sf`` (``y`` = stored
+    mean coverage, ``bg`` = ``record["background"]``, ``sf`` = ``record["scale_factor"]``,
+    verified numerically on real records to satisfy ``sf == 1 / (anchor_reference - bg)``)
+    and ``counts = y * count_factors``, ``normalised = counts / exposure``:
+
+        y = normalised * exposure / count_factors
+        a = max(y - bg, 0) * sf = max(normalised - b, 0) * k
+
+    with ``k = exposure * sf / count_factors`` and ``b = bg * count_factors / exposure``.
+
+    Rather than apply this elementwise formula directly (which would require reimplementing
+    :func:`regulonado.training.group_contrast.group_contrast_labels`'s smooth-then-subtract
+    order), the caller instead feeds ``group_contrast_labels`` the rescaled tensor
+    ``normalised_target * k`` and this function's ``k``-scaled background threshold
+    ``k * b = sf * bg`` (the algebra: since ``k > 0``, ``max(x, 0) * k == max(x * k, 0)``,
+    so ``max(smoothed - b, 0) * k == max(smoothed * k - k * b, 0)`` — smoothing is linear
+    and commutes with the constant per-track ``k`` multiply, so it does not matter whether
+    ``k`` is applied before or after :func:`~regulonado.training.group_contrast.smooth_bins`).
+    This reproduces ``group_contrast_labels``' existing (already-tested) subtract-then-clamp
+    step exactly, with no duplicated clamp/subtract logic.
+
+    Returns ``(k, k * b)`` for ``background_mode="subtract"`` (the second element is what
+    the caller passes as ``group_contrast_labels(..., background=...)``), or ``(k, None)``
+    for ``"scale-only"`` (matching :func:`~regulonado.target_specificity.to_anchor_units`'s
+    ``background_mode="scale-only"``, which skips subtraction entirely: ``a = normalised * k
+    == y * sf``).
+    """
+    if background_mode not in ("subtract", "scale-only"):
+        raise ValueError(
+            "trainer.group_contrast_background must be 'subtract' or 'scale-only', got "
+            f"{background_mode!r}"
+        )
+    scale_factors, _, _, background = resolve_scale_and_clip(records)
+    exposure = count_space.exposure.astype(np.float64)
+    count_factors = count_space.count_factors.astype(np.float64)
+    sf = scale_factors.astype(np.float64)
+    k = (exposure * sf / count_factors).astype(np.float32)
+    if background_mode == "scale-only":
+        return k, None
+    scaled_background = (sf * background.astype(np.float64)).astype(np.float32)
+    return k, scaled_background
+
+
+@dataclasses.dataclass(frozen=True)
+class GroupContrastLossConfig:
+    """Everything :func:`_build_loss_fn` needs to compute the two group-contrast terms."""
+
+    group_weights: torch.Tensor  # [G, T], from group_replicate_weights
+    unit_k: torch.Tensor  # [T]
+    unit_b: torch.Tensor | None  # [T], only for background_mode="subtract"
+    target_index: int | None  # into group axis; required when score_weight > 0
+    smoothing_bins: int
+    pseudocount: float
+    gauge: str
+    quantile: float
+    floor: float
+    clamp: tuple[float, float]
+    channel_weight: float
+    score_weight: float
+    delta: float
+
+
+def _resolve_group_contrast_loss_config(
+    loss_cfg: Mapping[str, Any],
+    trainer_cfg: Mapping[str, Any],
+    *,
+    records: Sequence[Mapping[str, Any]],
+    count_space: CountLabelSpace | None,
+    group_contrast_n_groups: int,
+    group_contrast_group_names: Sequence[str],
+    require_active_weight: bool = True,
+) -> GroupContrastLossConfig | None:
+    """Build the group-contrast loss config, or ``None`` when both weights are unset/0.
+
+    Raises ``ValueError`` (at build time, before training starts) when either weight is
+    enabled without the group head, without ``data.exposure`` (count label space), or when
+    ``trainer.group_contrast_target`` is missing/unresolvable and ``group_score_weight`` is
+    set.
+
+    ``require_active_weight=False`` (used to resolve the same config for group-space
+    *metrics*, independent of whether the group-contrast loss terms are actually weighted)
+    skips the "both weights are 0 -> None" short-circuit and, when the group head or
+    ``data.exposure`` are missing, returns ``None`` instead of raising — metrics are simply
+    unavailable rather than a hard training-config error. An explicitly misconfigured
+    ``trainer.group_contrast_target`` still raises either way.
+    """
+    channel_weight = float(loss_cfg.get("group_contrast_weight") or 0.0)
+    score_weight = float(loss_cfg.get("group_score_weight") or 0.0)
+    if require_active_weight and channel_weight <= 0.0 and score_weight <= 0.0:
+        return None
+    if group_contrast_n_groups <= 0:
+        if not require_active_weight:
+            return None
+        raise ValueError(
+            "loss.group_contrast_weight and loss.group_score_weight require "
+            "head.group_contrast_enabled (no group-contrast channels on the model)"
+        )
+    if count_space is None:
+        if not require_active_weight:
+            return None
+        raise ValueError(
+            "loss.group_contrast_weight and loss.group_score_weight require "
+            "data.label_space=counts with a data.exposure setting (e.g. 'anchor'); "
+            "got data.label_space=transformed, so anchor units cannot be recovered"
+        )
+    target_name = trainer_cfg.get("group_contrast_target")
+    target_index: int | None = None
+    if target_name is not None:
+        group_names = list(group_contrast_group_names)
+        if target_name not in group_names:
+            raise ValueError(
+                f"trainer.group_contrast_target {target_name!r} not found in the model's "
+                f"group_contrast_group_names: {group_names}"
+            )
+        target_index = group_names.index(target_name)
+    if score_weight > 0.0 and target_index is None:
+        raise ValueError(
+            "loss.group_score_weight requires trainer.group_contrast_target to name one of "
+            f"the model's group_contrast_group_names: {list(group_contrast_group_names)}"
+        )
+
+    background_mode = str(trainer_cfg.get("group_contrast_background", "subtract"))
+    unit_k, unit_b = group_contrast_unit_factors(
+        records, count_space, background_mode=background_mode
+    )
+    group_index, _ = group_index_from_records(records)
+    group_weights = group_replicate_weights(
+        torch.as_tensor(group_index), group_contrast_n_groups
+    )
+    clamp_min = float(trainer_cfg.get("group_contrast_clamp_min", -6.0))
+    clamp_max = float(trainer_cfg.get("group_contrast_clamp_max", 6.0))
+    return GroupContrastLossConfig(
+        group_weights=group_weights,
+        unit_k=torch.as_tensor(unit_k),
+        unit_b=None if unit_b is None else torch.as_tensor(unit_b),
+        target_index=target_index,
+        smoothing_bins=int(trainer_cfg.get("group_contrast_smoothing_bins", 31)),
+        pseudocount=float(trainer_cfg.get("group_contrast_pseudocount", 0.1)),
+        gauge=str(trainer_cfg.get("group_contrast_gauge", "median")),
+        quantile=float(trainer_cfg.get("group_contrast_quantile", 0.9)),
+        floor=float(trainer_cfg.get("group_contrast_floor", 0.139)),
+        clamp=(clamp_min, clamp_max),
+        channel_weight=channel_weight,
+        score_weight=score_weight,
+        delta=float(loss_cfg.get("group_contrast_delta") or 1.0),
+    )
+
+
+def _group_contrast_metrics_kwargs(cfg: GroupContrastLossConfig | None) -> dict[str, Any]:
+    """``make_preprocess_logits_for_metrics``'s ``group_contrast_*`` kwargs from ``cfg``.
+
+    ``cfg=None`` (no group head, or one not resolvable into a metrics config) returns
+    ``group_contrast_group_weights=None`` and defaults for the rest — the preprocess
+    closure ignores everything except ``group_weights`` when it is ``None``, so the exact
+    defaults used here for the other fields don't matter in that case.
+    """
+    if cfg is None:
+        return {
+            "group_contrast_group_weights": None,
+            "group_contrast_unit_k": None,
+            "group_contrast_unit_b": None,
+            "group_contrast_target_index": None,
+            "group_contrast_smoothing_bins": 31,
+            "group_contrast_pseudocount": 0.1,
+            "group_contrast_gauge": "median",
+            "group_contrast_floor": 0.139,
+            "group_contrast_clamp": (-6.0, 6.0),
+            "group_contrast_quantile": 0.9,
+        }
+    return {
+        "group_contrast_group_weights": cfg.group_weights,
+        "group_contrast_unit_k": cfg.unit_k,
+        "group_contrast_unit_b": cfg.unit_b,
+        "group_contrast_target_index": cfg.target_index,
+        "group_contrast_smoothing_bins": cfg.smoothing_bins,
+        "group_contrast_pseudocount": cfg.pseudocount,
+        "group_contrast_gauge": cfg.gauge,
+        "group_contrast_floor": cfg.floor,
+        "group_contrast_clamp": cfg.clamp,
+        "group_contrast_quantile": cfg.quantile,
+    }
+
+
+def _group_contrast_loss_terms(
+    group_pred: torch.Tensor,
+    normalised_target: torch.Tensor,
+    cfg: GroupContrastLossConfig,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(channel_loss, score_loss)`` for the group-contrast head; each a scalar tensor.
+
+    Both terms keep a gradient path (``+ group_pred.sum() * 0.0``) even when the mask
+    excludes every bin, matching :func:`track_contrast_magnitude_loss`'s convention.
+    """
+    unit_k = cfg.unit_k.to(device=group_pred.device, dtype=group_pred.dtype)
+    unit_b = (
+        None
+        if cfg.unit_b is None
+        else cfg.unit_b.to(device=group_pred.device, dtype=group_pred.dtype)
+    )
+    scaled_target = normalised_target * unit_k[None, :, None]
+    labels, mask = group_contrast_labels(
+        scaled_target,
+        group_weights=cfg.group_weights,
+        background=unit_b,
+        smoothing_bins=cfg.smoothing_bins,
+        pseudocount=cfg.pseudocount,
+        gauge=cfg.gauge,  # type: ignore[arg-type]
+        floor=cfg.floor,
+        clamp=cfg.clamp,
+    )
+    zero_keepalive = group_pred.sum() * 0.0
+    channel_loss = zero_keepalive
+    if cfg.channel_weight > 0.0:
+        huber = torch.nn.functional.huber_loss(
+            group_pred, labels, delta=cfg.delta, reduction="none"
+        )
+        denom = (mask.sum() * group_pred.shape[1]).clamp_min(1.0)
+        channel_loss = (huber * mask).sum() / denom + zero_keepalive
+    score_loss = zero_keepalive
+    if cfg.score_weight > 0.0:
+        assert cfg.target_index is not None
+        pred_score = reduce_target_score(
+            group_pred, target_index=cfg.target_index, quantile=cfg.quantile
+        )
+        label_score = reduce_target_score(
+            labels, target_index=cfg.target_index, quantile=cfg.quantile
+        )
+        mask_flat = mask[:, 0, :]
+        huber_s = torch.nn.functional.huber_loss(
+            pred_score, label_score, delta=cfg.delta, reduction="none"
+        )
+        denom_s = mask_flat.sum().clamp_min(1.0)
+        score_loss = (huber_s * mask_flat).sum() / denom_s + zero_keepalive
+    return channel_loss, score_loss
+
+
 def _build_loss_fn(
     loss_cfg: Mapping[str, Any],
     *,
@@ -468,7 +722,8 @@ def _build_loss_fn(
     contrast_pseudocount: float = 0.1,
     contrast_active_fraction: float = 0.1,
     exposure: torch.Tensor | None = None,
-) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    group_contrast: GroupContrastLossConfig | None = None,
+) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor | None], torch.Tensor]:
     """Build the configured base loss, plus the cross-track contrast term when weighted.
 
     Missing bins (NaN targets) are removed from every term: prediction and target are
@@ -477,6 +732,14 @@ def _build_loss_fn(
     With ``exposure`` (``data.label_space: counts``), targets are counts and predictions
     are exposure-normalised rates: the base loss sees ``pred * exposure`` against the
     counts, and the contrast terms compare ``pred`` with ``target / exposure``.
+
+    The returned closure takes an optional third argument, ``group_pred`` — the
+    group-contrast head's ``[B, G, L]`` channels, sliced from the model's concatenated
+    logits by the caller. When ``group_contrast`` (this function's argument) is ``None``,
+    ``group_pred`` is ignored entirely and behaviour is byte-identical to a build without
+    group-contrast support. The two group-contrast term values are exposed for logging as
+    ``loss_fn.last_group_channel_loss`` / ``loss_fn.last_group_score_loss`` (Python floats,
+    updated on every call that supplies ``group_pred``; ``None`` otherwise).
     """
     if exposure is not None and str(loss_cfg.get("name")) == "scaled_poisson_multinomial":
         raise ValueError(
@@ -504,7 +767,9 @@ def _build_loss_fn(
         active_fraction=contrast_active_fraction,
     )
 
-    def loss_fn(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def loss_fn(
+        pred: torch.Tensor, target: torch.Tensor, group_pred: torch.Tensor | None = None
+    ) -> torch.Tensor:
         pred, target = mask_missing_bins(pred, target)
         if exposure is None:
             base_pred, normalised_target = pred, target
@@ -520,8 +785,20 @@ def _build_loss_fn(
             loss = loss + magnitude_weight * track_contrast_magnitude_loss(
                 pred, normalised_target, contrast_weights, **geometry
             )
+        if group_contrast is not None and group_pred is not None:
+            channel_loss, score_loss = _group_contrast_loss_terms(
+                group_pred, normalised_target, group_contrast
+            )
+            loss_fn.last_group_channel_loss = float(channel_loss.detach())
+            loss_fn.last_group_score_loss = float(score_loss.detach())
+            if group_contrast.channel_weight > 0.0:
+                loss = loss + group_contrast.channel_weight * channel_loss
+            if group_contrast.score_weight > 0.0:
+                loss = loss + group_contrast.score_weight * score_loss
         return loss
 
+    loss_fn.last_group_channel_loss = None
+    loss_fn.last_group_score_loss = None
     return loss_fn
 
 
@@ -803,6 +1080,20 @@ def _build_regulonado_config(
 
     head_type = str(head_cfg.get("type", "residual_film"))
 
+    group_contrast_n_groups = 0
+    group_contrast_group_names: list[str] = []
+    if bool(head_cfg.get("group_contrast_enabled", False)):
+        # Canonical group ordering: derived once, here, from the same records list used
+        # to build the rest of the model config, so head construction and any later
+        # label computation see the same group axis (see target_specificity plan).
+        _, group_contrast_group_names = group_index_from_records(records)
+        group_contrast_n_groups = len(group_contrast_group_names)
+        if group_contrast_n_groups < 2:
+            raise ValueError(
+                "head.group_contrast_enabled requires at least two distinct 'group' "
+                f"values across the track records; got {group_contrast_n_groups}"
+            )
+
     # Derive filesystem-safe track names from the resolved BigWig paths.
     track_names: list[str] = []
     seen: dict[str, int] = {}
@@ -849,6 +1140,15 @@ def _build_regulonado_config(
         mlp_hidden=int(head_cfg["mlp_hidden"]) if head_cfg.get("mlp_hidden") is not None else None,
         output_bias_init=head_cfg.get("resolved_output_bias"),
         zero_output_weights=bool(head_cfg.get("zero_output_weights", False)),
+        group_contrast_n_groups=group_contrast_n_groups,
+        group_contrast_hidden=int(head_cfg.get("group_contrast_hidden", 512)),
+        group_contrast_mlp_hidden=(
+            int(head_cfg["group_contrast_mlp_hidden"])
+            if head_cfg.get("group_contrast_mlp_hidden") is not None
+            else None
+        ),
+        group_contrast_dropout=float(head_cfg.get("group_contrast_dropout", 0.0)),
+        group_contrast_group_names=group_contrast_group_names,
         n_tracks=len(records),
         feature_dim=int(getattr(backbone, "feature_dim", 1920)),
         use_track_metadata=use_track_metadata,
@@ -1306,6 +1606,42 @@ def _build_scheduler_for_trainer(
     )
 
 
+def _model_track_channel_count(model: torch.nn.Module) -> int | None:
+    """Per-track channel count carried on ``model`` (or a DDP-wrapped ``model.module``).
+
+    A composite group-contrast head sets this on ``RegulonadoModel`` so logits can be
+    split into their leading ``[B, T, L]`` per-track slice before comparing against
+    per-track labels; a plain single-output head has no need to split anything, so this
+    resolves to ``None`` for it (and for any model that never set the attribute), leaving
+    logits untouched.
+    """
+    count = getattr(model, "track_channel_count", None)
+    if count is None:
+        count = getattr(getattr(model, "module", None), "track_channel_count", None)
+    return count
+
+
+def _split_track_and_group_logits(
+    logits: torch.Tensor, model: torch.nn.Module
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Split concatenated ``[B, T(+G), L]`` logits into per-track and group-contrast slices.
+
+    Shared by ``compute_loss`` and ``prediction_step`` so the split logic (and the "labels
+    are always per-track only" invariant it protects — see the group-contrast-head plan's
+    silent-transpose trap) can never diverge between training and evaluation. A plain
+    single-output head (``track_channel_count is None``) returns ``(logits, None)``
+    unchanged.
+    """
+    track_channel_count = _model_track_channel_count(model)
+    if track_channel_count is None:
+        return logits, None
+    track_logits = logits[..., :track_channel_count, :]
+    group_logits = (
+        logits[..., track_channel_count:, :] if logits.shape[-2] > track_channel_count else None
+    )
+    return track_logits, group_logits
+
+
 class RegulonadoTrainer(Trainer):
     """Trainer subclass with custom loss, checkpoint saving, and metrics preprocessing.
 
@@ -1318,11 +1654,50 @@ class RegulonadoTrainer(Trainer):
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self._loss_fn: Callable = kwargs.pop("loss_fn", torch.nn.functional.mse_loss)
+        self._loss_fn: Callable = kwargs.pop(
+            "loss_fn",
+            lambda pred, target, group_pred=None: torch.nn.functional.mse_loss(pred, target),
+        )
         self._metrics_preprocess: Callable | None = kwargs.pop(
             "preprocess_logits_for_metrics", None
         )
+        # Accumulates the group-contrast loss terms between log events (the same
+        # since-last-log averaging HF applies to "loss" itself), so a flat group term is
+        # visible in the same logs as everything else rather than only in the total loss —
+        # see the group-contrast-head plan's "group term starvation" risk.
+        self._group_contrast_sum = 0.0
+        self._group_score_sum = 0.0
+        self._group_contrast_count = 0
         super().__init__(*args, **kwargs)
+
+    def _record_group_contrast_metrics(self) -> None:
+        """Accumulate this step's group-contrast term values, if the loss computed any."""
+        channel_value = getattr(self._loss_fn, "last_group_channel_loss", None)
+        score_value = getattr(self._loss_fn, "last_group_score_loss", None)
+        if channel_value is None and score_value is None:
+            return
+        self._group_contrast_sum += channel_value or 0.0
+        self._group_score_sum += score_value or 0.0
+        self._group_contrast_count += 1
+
+    def log(self, logs: dict[str, float], *args: Any, **kwargs: Any) -> None:
+        """Merge the averaged-since-last-log group-contrast term values into ``logs``.
+
+        Mirrors how Trainer's own ``loss`` entry is an average since the previous log
+        event, not the last micro-step's value, so the two are directly comparable.
+        Mutating ``logs`` before delegating to ``Trainer.log`` (rather than reading it
+        back afterwards via an ``on_log`` callback) guarantees every configured reporting
+        backend — console, W&B, etc. — sees these keys, since they all receive this same
+        dict.
+        """
+        if self._group_contrast_count > 0 and "loss" in logs:
+            logs = dict(logs)
+            logs["group_channel_loss"] = self._group_contrast_sum / self._group_contrast_count
+            logs["group_score_loss"] = self._group_score_sum / self._group_contrast_count
+            self._group_contrast_sum = 0.0
+            self._group_score_sum = 0.0
+            self._group_contrast_count = 0
+        super().log(logs, *args, **kwargs)
 
     def _get_dataloader(
         self,
@@ -1387,10 +1762,21 @@ class RegulonadoTrainer(Trainer):
 
         loss: torch.Tensor | None = None
         if labels is not None:
+            # A composite group-contrast head concatenates group channels after the
+            # per-track ones, so logits may be [B, T + G, L]; split to the per-track
+            # slice *before* aligning against labels, which are always per-track only.
+            # Comparing labels against the full (unsplit) logits here would silently
+            # transpose them into [B, L, T] whenever T + G != T, corrupting training.
+            track_logits, group_logits = _split_track_and_group_logits(logits, model)
             # Labels may arrive as [B, L, T]; align to [B, T, L] expected by the loss.
-            aligned = labels if labels.shape[-2:] == logits.shape[-2:] else labels.transpose(-2, -1)
-            loss = self._loss_fn(logits, aligned)
+            aligned = (
+                labels
+                if labels.shape[-2:] == track_logits.shape[-2:]
+                else labels.transpose(-2, -1)
+            )
+            loss = self._loss_fn(track_logits, aligned, group_logits)
             outputs["loss"] = loss
+            self._record_group_contrast_metrics()
 
         if return_outputs:
             return loss, outputs  # type: ignore[return-value]
@@ -1455,8 +1841,15 @@ class RegulonadoTrainer(Trainer):
         loss, logits, labels = super().prediction_step(
             model, inputs, prediction_loss_only, ignore_keys
         )
+        group_logits: torch.Tensor | None = None
+        if logits is not None:
+            # Same split as compute_loss: a composite head's logits carry group-contrast
+            # channels after the per-track ones. The per-track slice is what per-track
+            # metrics preprocessing (built for [B, T, L] logits) expects; the group slice
+            # (if any) is passed through separately so group-space metrics can see it too.
+            logits, group_logits = _split_track_and_group_logits(logits, model)
         if self._metrics_preprocess is not None and logits is not None and labels is not None:
-            logits = self._metrics_preprocess(logits, labels)
+            logits = self._metrics_preprocess(logits, labels, group_logits=group_logits)
             # Reduce labels to [B, T] to avoid storing full [B, T, L] across the eval set.
             if labels.ndim == 3:
                 bin_dim = -1 if labels.shape[-1] > labels.shape[-2] else -2
@@ -1633,7 +2026,7 @@ def _build_collate_and_loss(
     count_space: CountLabelSpace | None = None,
 ) -> tuple[
     Callable[[list[dict[str, Any]]], dict[str, torch.Tensor]],
-    Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    Callable[[torch.Tensor, torch.Tensor, torch.Tensor | None], torch.Tensor],
     np.ndarray,
     np.ndarray,
 ]:
@@ -1671,6 +2064,15 @@ def _build_collate_and_loss(
         track_log_var = torch.nn.Parameter(torch.zeros(len(records)))
         model.track_loss_log_var = track_log_var
     trainer_cfg_for_loss = cfg.get("trainer", {})
+    model_config = getattr(model, "config", None)
+    group_contrast_cfg = _resolve_group_contrast_loss_config(
+        cfg["loss"],
+        trainer_cfg_for_loss,
+        records=records,
+        count_space=count_space,
+        group_contrast_n_groups=int(getattr(model_config, "group_contrast_n_groups", 0) or 0),
+        group_contrast_group_names=getattr(model_config, "group_contrast_group_names", None) or [],
+    )
     loss_fn = _build_loss_fn(
         cfg["loss"],
         scale_factors=scale_factors,
@@ -1682,6 +2084,7 @@ def _build_collate_and_loss(
         contrast_pseudocount=float(trainer_cfg_for_loss.get("contrast_pseudocount", 0.1)),
         contrast_active_fraction=float(trainer_cfg_for_loss.get("contrast_active_fraction", 0.1)),
         exposure=None if count_space is None else torch.as_tensor(count_space.exposure),
+        group_contrast=group_contrast_cfg,
     )
     return collate_fn, loss_fn, scale_factors, background
 
@@ -2036,6 +2439,35 @@ def run_training(
         ),
         per_track_report,
     ]
+
+    # Group-space evaluation metrics reuse the same config the group-contrast loss builds
+    # (group replicate weights, unit conversion, target index, ...), but resolved
+    # independently of whether the loss terms are actually weighted (require_active_weight
+    # =False): metrics on a configured group head should be visible even mid-warmup, before
+    # loss.group_contrast_weight/loss.group_score_weight are turned on.
+    model_config_for_metrics = getattr(model, "config", None)
+    group_contrast_n_groups = int(
+        getattr(model_config_for_metrics, "group_contrast_n_groups", 0) or 0
+    )
+    group_contrast_group_names = (
+        getattr(model_config_for_metrics, "group_contrast_group_names", None) or []
+    )
+    group_contrast_metrics_cfg = _resolve_group_contrast_loss_config(
+        cfg["loss"],
+        cfg.get("trainer", {}),
+        records=records,
+        count_space=count_space,
+        group_contrast_n_groups=group_contrast_n_groups,
+        group_contrast_group_names=group_contrast_group_names,
+        require_active_weight=False,
+    )
+    per_group_report: PerGroupMetricsReport | None = None
+    if group_contrast_metrics_cfg is not None:
+        per_group_report = PerGroupMetricsReport(
+            output_dir=output_dir, group_names=group_contrast_group_names
+        )
+        callbacks.append(per_group_report)
+
     topk_bins = int(cfg["trainer"].get("topk_bins", 256))
     trainer = RegulonadoTrainer(
         model=model,
@@ -2050,6 +2482,7 @@ def run_training(
             len(records),
             trainer_cfg.calibration_shape_pearson_weight,
             per_track_sink=per_track_report.record,
+            per_group_sink=None if per_group_report is None else per_group_report.record,
         ),
         preprocess_logits_for_metrics=make_preprocess_logits_for_metrics(
             topk_bins,
@@ -2058,6 +2491,7 @@ def run_training(
             contrast_pseudocount=trainer_cfg.contrast_pseudocount,
             contrast_active_fraction=trainer_cfg.contrast_active_fraction,
             label_divisor=None if count_space is None else torch.as_tensor(count_space.exposure),
+            **_group_contrast_metrics_kwargs(group_contrast_metrics_cfg),
         ),
     )
 

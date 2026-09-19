@@ -9,7 +9,9 @@ from regulonado.model.adapters import (
 from regulonado.model.config import RegulonadoConfig
 from regulonado.model.heads import (
     ActivationType,
+    CompositeTrackGroupHead,
     FiLMHead,
+    GroupContrastHead,
     HeadType,
     HiddenFiLMHead,
     MetadataBiasHead,
@@ -32,9 +34,11 @@ __all__ = [
     "BackboneAdapter",
     "BackboneType",
     "BorzoiBackboneAdapter",
+    "CompositeTrackGroupHead",
     "EnformerBackboneAdapter",
     "FiLMHead",
     "FreezePolicy",
+    "GroupContrastHead",
     "HeadType",
     "RegulonadoModel",
     "HiddenFiLMHead",

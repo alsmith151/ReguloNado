@@ -430,7 +430,7 @@ class TestRegulonadoTrainerPredictionStep:
         B, T, L = 3, 5, 16
         captured = {}
 
-        def spy_preprocess(logits, labels):
+        def spy_preprocess(logits, labels, group_logits=None):
             captured["label_shape"] = tuple(labels.shape)
             return logits  # pass-through for shape test
 
@@ -456,7 +456,7 @@ class TestRegulonadoTrainerPredictionStep:
         """Labels already in [B, T, L] orientation must also be reduced to [B, T]."""
         B, T, L = 3, 5, 16
 
-        trainer = self._make_trainer(preprocess_fn=lambda logits, labels: logits)
+        trainer = self._make_trainer(preprocess_fn=lambda logits, labels, group_logits=None: logits)
 
         raw_logits = torch.rand(B, T, L)
         raw_labels = torch.rand(B, T, L)
@@ -469,6 +469,120 @@ class TestRegulonadoTrainerPredictionStep:
             )
 
         assert out_labels.shape == (B, T), out_labels.shape
+
+
+# ---------------------------------------------------------------------------
+# RegulonadoTrainer.compute_loss label alignment
+# ---------------------------------------------------------------------------
+
+
+class TestRegulonadoTrainerComputeLossAlignment:
+    """Pins the compute_loss label-alignment fix for composite [B, T + G, L] logits.
+
+    Before the fix, ``compute_loss`` aligned labels by comparing ``labels.shape[-2:]``
+    against the *full* logits shape. With a composite group-contrast head's concatenated
+    ``[B, T + G, L]`` logits and genuine ``[B, T, L]`` labels, that comparison always
+    failed and the labels were silently transposed to ``[B, L, T]`` -- garbage input to
+    the loss, with no error raised. The fix splits the per-track logits (using the
+    model's ``track_channel_count``) out *before* the shape comparison.
+    """
+
+    def _make_trainer(self, *, model: torch.nn.Module, loss_fn):
+        from transformers import TrainingArguments
+
+        args = TrainingArguments(output_dir="/tmp/regulonado_test", use_cpu=True)
+        return RegulonadoTrainer(model=model, args=args, loss_fn=loss_fn)
+
+    def _spy_loss_fn(self, captured: dict):
+        def loss_fn(
+            pred: torch.Tensor, target: torch.Tensor, group_pred: torch.Tensor | None = None
+        ) -> torch.Tensor:
+            captured["pred"] = pred
+            captured["target"] = target
+            captured["group_pred"] = group_pred
+            return (pred - target).float().pow(2).mean()
+
+        return loss_fn
+
+    def test_concatenated_composite_output_splits_before_aligning(self):
+        """[B, T+G, L] logits with genuine [B, T, L] labels: loss must see only the
+        per-track slice, aligned untransposed against the labels as given."""
+        B, T, G, L = 2, 3, 4, 5
+        track_part = torch.randn(B, T, L)
+        group_part = torch.randn(B, G, L)
+        logits = torch.cat([track_part, group_part], dim=1)
+        labels = torch.randn(B, T, L)
+
+        class _CompositeStub(torch.nn.Module):
+            track_channel_count = T
+
+            def forward(self, input_ids, **_):
+                return logits
+
+        captured: dict = {}
+        trainer = self._make_trainer(model=_CompositeStub(), loss_fn=self._spy_loss_fn(captured))
+
+        trainer.compute_loss(
+            trainer.model, {"input_ids": torch.zeros(B, 1), "labels": labels}
+        )
+
+        assert captured["pred"].shape == (B, T, L)
+        torch.testing.assert_close(captured["pred"], track_part)
+        torch.testing.assert_close(captured["target"], labels)
+
+    def test_concatenated_composite_output_with_blt_labels(self):
+        """A genuine [B, L, T] label layout must still be transposed correctly even when
+        logits carry extra group channels after the per-track ones."""
+        B, T, G, L = 2, 3, 4, 5
+        track_part = torch.randn(B, T, L)
+        group_part = torch.randn(B, G, L)
+        logits = torch.cat([track_part, group_part], dim=1)
+        labels_blt = track_part.transpose(-2, -1).contiguous()  # [B, L, T]
+
+        class _CompositeStub(torch.nn.Module):
+            track_channel_count = T
+
+            def forward(self, input_ids, **_):
+                return logits
+
+        captured: dict = {}
+        trainer = self._make_trainer(model=_CompositeStub(), loss_fn=self._spy_loss_fn(captured))
+
+        trainer.compute_loss(
+            trainer.model, {"input_ids": torch.zeros(B, 1), "labels": labels_blt}
+        )
+
+        assert captured["pred"].shape == (B, T, L)
+        torch.testing.assert_close(captured["pred"], track_part)
+        torch.testing.assert_close(captured["target"], track_part)
+
+    def test_single_head_path_is_byte_identical_to_pre_fix_behaviour(self):
+        """A model with no track_channel_count (the single-head path, e.g. any head
+        predating the composite head) must produce exactly the old alignment result:
+        labels compared directly against the (unsplit) logits, transposed only when the
+        direct shape comparison fails."""
+        B, T, L = 2, 3, 5
+        logits = torch.randn(B, T, L)
+        labels_btl = torch.randn(B, T, L)
+        labels_blt = logits.transpose(-2, -1).contiguous() + 1.0  # deliberately mismatched values
+
+        class _PlainStub(torch.nn.Module):
+            def forward(self, input_ids, **_):
+                return logits
+
+        def old_alignment(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+            return labels if labels.shape[-2:] == logits.shape[-2:] else labels.transpose(-2, -1)
+
+        for labels in (labels_btl, labels_blt):
+            captured: dict = {}
+            trainer = self._make_trainer(
+                model=_PlainStub(), loss_fn=self._spy_loss_fn(captured)
+            )
+            trainer.compute_loss(
+                trainer.model, {"input_ids": torch.zeros(B, 1), "labels": labels}
+            )
+            torch.testing.assert_close(captured["pred"], logits)
+            torch.testing.assert_close(captured["target"], old_alignment(logits, labels))
 
 
 def test_preprocess_logits_accumulates_in_float32_for_half_precision_outputs() -> None:

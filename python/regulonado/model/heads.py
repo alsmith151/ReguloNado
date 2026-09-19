@@ -6,7 +6,9 @@ from typing import Literal
 import torch
 import torch.nn as nn
 
-HeadType = Literal["bias", "film", "hidden_film", "residual_film", "transfer_mlp"]
+HeadType = Literal[
+    "bias", "film", "hidden_film", "residual_film", "transfer_mlp", "group_contrast"
+]
 ActivationType = Literal["softplus", "softplus_beta2", "exp", "identity"]
 
 _CONDITION_COLLAPSE_IGNORED_FIELDS = {
@@ -1162,6 +1164,137 @@ class TransferMLPHead(nn.Module):
         return self.activation(self.proj(x))
 
 
+class GroupContrastHead(nn.Module):
+    """1x1 conv stack producing gauge-centred log2 group-contrast channels, ``[B, G, L]``.
+
+    Sibling of :class:`TransferMLPHead` with ``n_groups`` output channels in place of
+    ``n_tracks``: same plain projection architecture, no :class:`TrackMetadataEncoder`,
+    because the group axis is itself the conditioning (see
+    ``docs``/the group-contrast-head plan for the label this head is trained against).
+
+    The target is a signed log2 contrast (gauge-centred: zero is "typical", not "absent"),
+    so ``softplus``/``exp`` activations would clamp away the negative half of the range and
+    are refused outright. ``activation_type`` defaults to, and must be, ``"identity"``.
+
+    Parameters
+    ----------
+    in_ch : int, optional
+        Input channels from backbone, by default 1920.
+    hidden : int, optional
+        First hidden layer size, by default 512.
+    n_groups : int
+        Number of output group channels.
+    mlp_hidden : int | None, optional
+        Second MLP hidden layer size; defaults to hidden if None.
+    dropout : float, optional
+        Dropout rate between layers, by default 0.0.
+    activation_type : ActivationType, optional
+        Output activation function; only "identity" is accepted, by default "identity".
+    **_
+        Ignored additional keyword arguments (for interface compatibility with the other
+        heads' metadata kwargs, which this head does not use).
+
+    Raises
+    ------
+    ValueError
+        If activation_type is not "identity".
+    """
+
+    def __init__(
+        self,
+        *,
+        in_ch: int = 1920,
+        hidden: int = 512,
+        n_groups: int,
+        mlp_hidden: int | None = None,
+        dropout: float = 0.0,
+        activation_type: ActivationType = "identity",
+        output_bias_init: float | list[float] | None = None,
+        zero_output_weights: bool = False,
+        **_: object,
+    ):
+        super().__init__()
+        if activation_type != "identity":
+            raise ValueError(
+                "GroupContrastHead requires activation_type='identity': its target is a "
+                f"signed log2 contrast, so softplus/exp would be wrong; got {activation_type!r}"
+            )
+        self.n_groups = n_groups
+        mlp_hidden = mlp_hidden or hidden
+        self.proj = nn.Sequential(
+            nn.Conv1d(in_ch, mlp_hidden, 1),
+            nn.GELU(),
+            nn.Dropout1d(dropout),
+            nn.Conv1d(mlp_hidden, hidden, 1),
+            nn.GELU(),
+            nn.Dropout1d(dropout),
+            nn.Conv1d(hidden, n_groups, 1),
+        )
+        _initialise_output_layer(
+            self.proj[-1],
+            n_tracks=n_groups,
+            output_bias_init=output_bias_init,
+            zero_output_weights=zero_output_weights,
+        )
+        self.activation: nn.Module = nn.Identity()
+
+    def forward(self, x: torch.Tensor, **_: torch.Tensor | None) -> torch.Tensor:
+        """Project backbone features through the MLP.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Backbone features, shape [batch, in_ch, length].
+        **_
+            Ignored keyword arguments (metadata is not used).
+
+        Returns
+        -------
+        torch.Tensor
+            Predictions with shape [batch, n_groups, length].
+        """
+        return self.activation(self.proj(x))
+
+
+class CompositeTrackGroupHead(nn.Module):
+    """Concatenates a per-track head with a group-contrast head along the channel axis.
+
+    ``forward`` returns a single ``[B, T + G, L]`` tensor: the per-track head's ``T``
+    channels first, the group-contrast head's ``G`` channels second. ``track_channel_count``
+    (``T``) is exposed as an attribute so downstream code (loss alignment, metrics
+    preprocessing) can split the concatenated output back into its two halves without
+    guessing from shape alone.
+
+    Track metadata kwargs (``track_condition_ids`` etc.) are forwarded to ``track_head``
+    only; ``group_head`` does not use them (the group axis is its own conditioning).
+    """
+
+    def __init__(self, *, track_head: nn.Module, group_head: nn.Module, track_channel_count: int):
+        super().__init__()
+        self.track_head = track_head
+        self.group_head = group_head
+        self.track_channel_count = track_channel_count
+
+    def forward(self, x: torch.Tensor, **head_kwargs: torch.Tensor | None) -> torch.Tensor:
+        """Compute per-track and group-contrast logits and concatenate them.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Backbone features, shape [batch, in_ch, length].
+        **head_kwargs
+            Track metadata kwargs forwarded to ``track_head`` only.
+
+        Returns
+        -------
+        torch.Tensor
+            Concatenated predictions, shape [batch, track_channel_count + n_groups, length].
+        """
+        track_logits = self.track_head(x, **head_kwargs)
+        group_logits = self.group_head(x)
+        return torch.cat([track_logits, group_logits], dim=1)
+
+
 def build_transfer_learning_head(
     *,
     head_type: HeadType,
@@ -1211,6 +1344,7 @@ def build_transfer_learning_head(
         "hidden_film": HiddenFiLMHead,
         "residual_film": ResidualFiLMHead,
         "transfer_mlp": TransferMLPHead,
+        "group_contrast": GroupContrastHead,
     }
     try:
         constructor = constructors[head_type]

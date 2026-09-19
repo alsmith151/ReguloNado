@@ -73,6 +73,14 @@ class HeadConfig:
     mlp_hidden: int | None = None
     output_init: str = "default"
     output_init_samples: int = 256
+    # Group-contrast head: a second, opt-in output head producing [B, G, L] gauge-centred
+    # log2 group-contrast channels, concatenated after the per-track channels. G (the
+    # group count) and its canonical ordering are derived at build time from the track
+    # records' "group" field via target_specificity.group_index_from_records, not set here.
+    group_contrast_enabled: bool = False
+    group_contrast_hidden: int = 512
+    group_contrast_mlp_hidden: int | None = None
+    group_contrast_dropout: float = 0.0
 
 
 @dataclass(slots=True)
@@ -105,6 +113,16 @@ class LossConfig:
     contrast_magnitude_weight: float | None = None
     # Kendall et al. homoscedastic uncertainty weighting across tracks for the base loss.
     learn_track_weights: bool | None = None
+    # Weight of the masked Huber term between the group-contrast head's predicted [B, G, L]
+    # channels and group_contrast_labels' gauge-centred log2 targets. Unset/0 disables it;
+    # requires head.group_contrast_enabled and data.exposure set (label_space: counts).
+    group_contrast_weight: float | None = None
+    # Weight of the masked Huber term on reduce_target_score(...) — the gauge-invariant
+    # target-vs-reference quantity validated at AUC 0.964. Unset/0 disables it; requires
+    # trainer.group_contrast_target to resolve against the model's canonical group names.
+    group_score_weight: float | None = None
+    # Huber delta (log2 units) shared by both group-contrast loss terms.
+    group_contrast_delta: float = 1.0
 
 
 @dataclass(slots=True)
@@ -189,6 +207,24 @@ class TrainerConfig:
     contrast_region_bins: int = 16
     contrast_pseudocount: float = 0.1
     contrast_active_fraction: float = 0.1
+    # Group-contrast label geometry (training.group_contrast.group_contrast_labels): rolling
+    # mean width in bins (31 == round(1000 / 32), the validated 1000 bp window at 32 bp
+    # bins — do not default to 32), log2 pseudocount, per-bin gauge ("median" | "mean"), the
+    # quantile reduce_target_score uses over non-target groups, and the anchor-unit noise
+    # floor/clamp bounding the labels. Shared by both group-contrast loss terms.
+    group_contrast_smoothing_bins: int = 31
+    group_contrast_pseudocount: float = 0.1
+    group_contrast_gauge: str = "median"
+    group_contrast_quantile: float = 0.9
+    group_contrast_floor: float = 0.139
+    group_contrast_clamp_min: float = -6.0
+    group_contrast_clamp_max: float = 6.0
+    # "subtract": subtract per-track background (anchor units) and clamp at 0 before the
+    # group average (the notebook's validated arm). "scale-only": skip subtraction.
+    group_contrast_background: str = "subtract"
+    # Target group name (e.g. "HL-60"), resolved against the model's canonical
+    # group_contrast_group_names ordering. Required when loss.group_score_weight is set.
+    group_contrast_target: str | None = None
     # Stop training when eval metric has not improved for this many eval calls.
     # None disables early stopping.
     early_stopping_patience: int | None = None
