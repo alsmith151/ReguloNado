@@ -75,6 +75,7 @@ from regulonado.training.metrics import (
     make_preprocess_logits_for_metrics,
 )
 from regulonado.training.provenance import write_provenance
+from regulonado.training.specificity_panel import SpecificityPanelEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -619,6 +620,45 @@ def _resolve_group_contrast_loss_config(
         channel_weight=channel_weight,
         score_weight=score_weight,
         delta=float(loss_cfg.get("group_contrast_delta") or 1.0),
+    )
+
+
+def _build_specificity_panel(
+    trainer_cfg: TrainerConfig,
+    metadata: Mapping[str, Any],
+    *,
+    group_contrast_group_names: Sequence[str],
+) -> SpecificityPanelEvaluator | None:
+    """Build the eval-time specificity panel, or ``None`` when no panel is configured.
+
+    Raises ``ValueError`` before training starts when the panel is set without a FASTA, a
+    group-contrast head, or a ``trainer.group_contrast_target`` in the model's groups.
+    """
+    if not trainer_cfg.specificity_panel_path:
+        return None
+    if not trainer_cfg.specificity_panel_fasta:
+        raise ValueError("trainer.specificity_panel_path requires trainer.specificity_panel_fasta")
+    group_names = list(group_contrast_group_names)
+    if not group_names:
+        raise ValueError(
+            "trainer.specificity_panel_path requires head.group_contrast_enabled "
+            "(the panel scores the group-contrast channels)"
+        )
+    target = trainer_cfg.group_contrast_target
+    if target not in group_names:
+        raise ValueError(
+            f"trainer.specificity_panel_path requires trainer.group_contrast_target to name one "
+            f"of the model's group_contrast_group_names; got {target!r}"
+        )
+    return SpecificityPanelEvaluator(
+        trainer_cfg.specificity_panel_path,
+        trainer_cfg.specificity_panel_fasta,
+        target_index=group_names.index(target),
+        quantile=trainer_cfg.group_contrast_quantile,
+        n_pred_bins=int(metadata.get("n_pred_bins", 6_144)),
+        bin_size=int(metadata.get("bin_size", 32)),
+        context_length=int(metadata.get("context_length", 524_288)),
+        batch_size=trainer_cfg.specificity_panel_batch_size,
     )
 
 
@@ -1661,6 +1701,9 @@ class RegulonadoTrainer(Trainer):
         self._metrics_preprocess: Callable | None = kwargs.pop(
             "preprocess_logits_for_metrics", None
         )
+        self._specificity_panel: SpecificityPanelEvaluator | None = kwargs.pop(
+            "specificity_panel", None
+        )
         # Accumulates the group-contrast loss terms between log events (the same
         # since-last-log averaging HF applies to "loss" itself), so a flat group term is
         # visible in the same logs as everything else rather than only in the total loss —
@@ -1698,6 +1741,26 @@ class RegulonadoTrainer(Trainer):
             self._group_score_sum = 0.0
             self._group_contrast_count = 0
         super().log(logs, *args, **kwargs)
+
+    def evaluation_loop(self, *args: Any, **kwargs: Any) -> Any:
+        """Run the standard evaluation loop, then score the specificity panel when configured.
+
+        Hooked here rather than in ``evaluate`` so the ``<prefix>_panel_*`` metrics are part
+        of the loop's output before ``evaluate`` logs it and fires ``on_evaluate``: early
+        stopping and ``metric_for_best_model`` can then select on them. Rank 0 predicts;
+        other ranks receive its values, keeping best-model decisions in step.
+        """
+        output = super().evaluation_loop(*args, **kwargs)
+        if self._specificity_panel is None:
+            return output
+        prefix = kwargs.get("metric_key_prefix", args[4] if len(args) > 4 else "eval")
+        panel: list[dict[str, float] | None] = [None]
+        if self.is_world_process_zero():
+            panel[0] = self._specificity_panel.evaluate(self.accelerator.unwrap_model(self.model))
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.broadcast_object_list(panel, src=0)
+        output.metrics.update({f"{prefix}_{key}": value for key, value in (panel[0] or {}).items()})
+        return output
 
     def _get_dataloader(
         self,
@@ -2467,6 +2530,9 @@ def run_training(
             output_dir=output_dir, group_names=group_contrast_group_names
         )
         callbacks.append(per_group_report)
+    specificity_panel = _build_specificity_panel(
+        trainer_cfg, metadata, group_contrast_group_names=group_contrast_group_names
+    )
 
     topk_bins = int(cfg["trainer"].get("topk_bins", 256))
     trainer = RegulonadoTrainer(
@@ -2478,6 +2544,7 @@ def run_training(
         optimizers=(optimizer, scheduler),
         callbacks=callbacks,
         loss_fn=loss_fn,
+        specificity_panel=specificity_panel,
         compute_metrics=make_compute_metrics(
             len(records),
             trainer_cfg.calibration_shape_pearson_weight,

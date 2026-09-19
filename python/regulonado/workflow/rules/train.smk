@@ -19,6 +19,8 @@ def _override_flags(wildcards):
         seed=run["seed"],
         pretrained_model=run["pretrained_model"],
     )
+    if merged.get("trainer.specificity_panel_path"):
+        merged.setdefault("trainer.specificity_panel_fasta", config["inputs"]["fasta"])
     merged.setdefault("trainer.wandb_project", "regulonado-training")
     merged.setdefault("trainer.wandb_group", f"{RESULTS.name}/{wildcards.run}")
     merged.setdefault("trainer.wandb_job_type", wildcards.phase)

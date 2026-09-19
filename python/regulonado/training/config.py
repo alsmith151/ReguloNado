@@ -225,6 +225,13 @@ class TrainerConfig:
     # Target group name (e.g. "HL-60"), resolved against the model's canonical
     # group_contrast_group_names ordering. Required when loss.group_score_weight is set.
     group_contrast_target: str | None = None
+    # Fixed region panel of observed target-group specificity
+    # (scripts/build_specificity_panel.py). When set, every evaluation predicts on windows
+    # read from specificity_panel_fasta and logs eval_panel_* metrics (training.
+    # specificity_panel). Requires the group-contrast head and group_contrast_target.
+    specificity_panel_path: str | None = None
+    specificity_panel_fasta: str | None = None
+    specificity_panel_batch_size: int = 4
     # Stop training when eval metric has not improved for this many eval calls.
     # None disables early stopping.
     early_stopping_patience: int | None = None
