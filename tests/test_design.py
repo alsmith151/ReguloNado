@@ -15,7 +15,7 @@ from regulonado.design.objective import (
     resolve_track_group_indices,
     resolve_track_groups,
 )
-from regulonado.design.predictor import FoldEnsemble, FoldSpec
+from regulonado.design.predictor import FoldEnsemble, FoldSpec, SequencePredictor
 from regulonado.design.search import AdaLead, AdaLeadConfig, adalead, ism_greedy
 from regulonado.design.sequence import (
     DatasetWindowIndex,
@@ -563,6 +563,42 @@ def test_adalead_seeded_from_endogenous_sequence_and_correct_length():
 # --------------------------------------------------------------------------- #
 # 7. FoldEnsemble                                                            #
 # --------------------------------------------------------------------------- #
+
+
+def test_sequence_predictor_excludes_auxiliary_group_channels(monkeypatch):
+    from types import SimpleNamespace
+
+    from regulonado import inference
+
+    class AuxiliaryHeadModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.tensor(0.0))
+            self.config = SimpleNamespace(
+                context_length=CONTEXT,
+                n_pred_bins=N_PRED_BINS,
+                bin_size=BIN_SIZE,
+                n_tracks=2,
+                track_names=["alpha", "beta"],
+            )
+
+        def forward(self, x, **kwargs):
+            channels = torch.tensor([1.0, 2.0, 99.0], device=x.device, dtype=x.dtype)
+            return channels.view(1, 3, 1).expand(x.shape[0], 3, N_PRED_BINS)
+
+    monkeypatch.setattr(
+        inference,
+        "load_model_for_inference",
+        lambda *args, **kwargs: AuxiliaryHeadModel(),
+    )
+    monkeypatch.setattr(inference, "model_track_metadata", lambda *args, **kwargs: {})
+
+    predictor = SequencePredictor("unused", device="cpu", batch_size=2)
+    predictions = predictor(np.zeros((3, 4, CONTEXT), dtype=np.float32))
+
+    assert predictions.shape == (3, 2, N_PRED_BINS)
+    assert predictions[:, 0].eq(1.0).all()
+    assert predictions[:, 1].eq(2.0).all()
 
 
 def _make_checkpoint(tmp_path, name, *, n_pred_bins=N_PRED_BINS):

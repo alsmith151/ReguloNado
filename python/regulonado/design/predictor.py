@@ -67,7 +67,18 @@ class SequencePredictor:
                     device=self.device, dtype=self.dtype
                 )
                 try:
-                    outputs.append(self.model(chunk, **self.track_metadata))
+                    prediction = self.model(chunk, **self.track_metadata)
+                    # Composite training heads append auxiliary group-contrast channels
+                    # after the ordinary per-track channels. Design resolves replicate
+                    # groups from ``track_names`` and intentionally scores the per-track
+                    # predictions, so never let auxiliary channels leak into that axis.
+                    n_tracks = len(self.track_names)
+                    if prediction.shape[1] < n_tracks:
+                        raise RuntimeError(
+                            "Model returned fewer output channels than its configured tracks: "
+                            f"{prediction.shape[1]} < {n_tracks}"
+                        )
+                    outputs.append(prediction[:, :n_tracks])
                     start += width
                 except RuntimeError as exc:
                     message = str(exc).lower()
