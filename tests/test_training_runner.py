@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import pickle
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pyarrow as pa
@@ -19,8 +20,10 @@ import torch
 from accelerate.data_loader import BatchSamplerShard
 from regulonado.training.config import TrainerConfig
 from regulonado.training.data import WindowParquetDataset
+from regulonado.training.label_space import CountLabelSpace
 from regulonado.training.runner import (
     RegulonadoTrainer,
+    _apply_dataset_transforms,
     _build_collate_and_loss,
     _build_scheduler_for_trainer,
     _build_training_arguments,
@@ -569,6 +572,18 @@ class TestResolveScaleAndClip:
         with pytest.raises(ValueError, match="clip_soft_counts.*clip_hard_counts"):
             resolve_scale_and_clip(records, label_space="counts", scaling_method=None)
 
+    def test_missing_clip_columns_are_identities_when_clipping_is_disabled(self) -> None:
+        sf, soft, hard, bg = resolve_scale_and_clip(
+            [{"track_name": "t0"}],
+            label_space="counts",
+            scaling_method="anchor",
+            require_clip=False,
+        )
+        np.testing.assert_allclose(sf, [1.0])
+        np.testing.assert_array_equal(soft, [np.inf])
+        np.testing.assert_array_equal(hard, [np.inf])
+        np.testing.assert_allclose(bg, [0.0])
+
     def test_missing_anchor_clip_columns_raise_even_if_squash_present(self) -> None:
         """A track scaled by a non-anchor method must not silently clip at squash
         thresholds if scaling_method is (mis)reported as anchor."""
@@ -606,6 +621,27 @@ class TestResolveScaleAndClip:
         np.testing.assert_allclose(bg, [0.0])
 
 
+def test_unclipped_count_transform_does_not_require_qc_clip_columns() -> None:
+    train = SimpleNamespace(transform=None)
+    count_space = CountLabelSpace(
+        count_factors=np.ones(1, dtype=np.float32),
+        exposure=np.ones(1, dtype=np.float32),
+    )
+    result = _apply_dataset_transforms(
+        {"train": train},
+        {"bin_size": 32, "context_length": 64, "n_pred_bins": 2},
+        [{"track_name": "a"}],
+        {
+            "apply_scale": False,
+            "apply_squash": False,
+            "apply_clip": False,
+            "mask_missing": True,
+        },
+        count_space,
+    )
+    assert result["train"].transform is not None
+
+
 class TestBuildCollateAndLoss:
     # Two tracks; scale_factor/background default via resolve_scale_and_clip's harmless
     # fallbacks, but the clip columns for the active space (label_space="transformed",
@@ -619,6 +655,21 @@ class TestBuildCollateAndLoss:
         assert scale_factors.shape == (2,)
         assert background.shape == (2,)
         assert callable(collate_fn)
+        assert callable(loss_fn)
+
+    def test_unclipped_count_loss_does_not_require_qc_clip_columns(self) -> None:
+        cfg = {
+            "model": {"use_track_metadata": False},
+            "data": {"apply_scale": False, "apply_squash": False, "apply_clip": False},
+            "loss": {"name": "poisson_multinomial_binwise"},
+        }
+        count_space = CountLabelSpace(
+            count_factors=np.ones(2, dtype=np.float32),
+            exposure=np.ones(2, dtype=np.float32),
+        )
+        _, loss_fn, _, _ = _build_collate_and_loss(
+            cfg, [{"track_name": "a"}, {"track_name": "b"}], count_space=count_space
+        )
         assert callable(loss_fn)
 
     def test_collate_fn_stacks_batch_and_keeps_input_ids_uint8(self) -> None:

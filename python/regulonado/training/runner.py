@@ -408,6 +408,7 @@ def resolve_scale_and_clip(
     *,
     label_space: str,
     scaling_method: str | None,
+    require_clip: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Extract scale factors and clipping thresholds from track records.
 
@@ -422,10 +423,12 @@ def resolve_scale_and_clip(
     - ``label_space == "transformed"`` with any other ``scaling_method``:
       ``clip_soft_squash``/``clip_hard_squash``, in raw-count units pre-squash.
 
-    There is deliberately no numeric fallback for a missing pair (e.g. the historical
-    348.0/796.0 Borzoi raw-count defaults): silently clipping anchor-unit or
-    count-unit data at a raw-count magic number is exactly the wrong-unit failure
-    this column split exists to prevent, so a missing pair raises instead.
+    There is deliberately no numeric fallback for a missing pair when clipping is
+    active (e.g. the historical 348.0/796.0 Borzoi raw-count defaults): silently
+    clipping anchor-unit or count-unit data at a raw-count magic number is exactly the
+    wrong-unit failure this column split exists to prevent. When ``require_clip`` is
+    false, missing thresholds become ``inf`` identities; downstream code still gets
+    shape-stable arrays, but no disabled transform requires QC columns it cannot use.
 
     ``scale_factor`` (default 1.0) and ``background`` (default 0.0) are unit-agnostic
     identities, so they keep a harmless fallback for tracks that were never scaled.
@@ -439,6 +442,9 @@ def resolve_scale_and_clip(
     scaling_method : str | None
         ``tracks.parquet``'s run-level ``scaling_method`` attr (``metadata
         ["scaling_method"]``), or ``None`` if the table predates that attr.
+    require_clip : bool
+        Require finite thresholds. Set false only when neither the data transform nor
+        the selected loss applies clipping.
 
     Returns
     -------
@@ -449,7 +455,8 @@ def resolve_scale_and_clip(
     Raises
     ------
     ValueError
-        If any record is missing the clip column pair for the active space.
+        If ``require_clip`` is true and any record is missing the clip column pair
+        for the active space.
     """
     scale_factors = _track_array(records, "scale_factor", dtype=np.float32, fill_value=1.0)
     background = _track_array(records, "background", dtype=np.float32, fill_value=0.0)
@@ -473,7 +480,7 @@ def resolve_scale_and_clip(
     clip_soft = _track_array(records, soft_key, dtype=np.float32, fill_value=np.nan)
     clip_hard = _track_array(records, hard_key, dtype=np.float32, fill_value=np.nan)
     unpopulated = ~(np.isfinite(clip_soft) & np.isfinite(clip_hard))
-    if unpopulated.any():
+    if unpopulated.any() and require_clip:
         names = [records[i].get("track_name", i) for i in np.flatnonzero(unpopulated).tolist()]
         raise ValueError(
             f"{len(names)} track record(s) have no usable {soft_key!r}/{hard_key!r} "
@@ -482,6 +489,9 @@ def resolve_scale_and_clip(
             "populates this clip family (regulonado normalization ... / regulonado "
             "tracks qc --check interval_signal) before training."
         )
+    if unpopulated.any():
+        clip_soft = np.where(np.isfinite(clip_soft), clip_soft, np.inf).astype(np.float32)
+        clip_hard = np.where(np.isfinite(clip_hard), clip_hard, np.inf).astype(np.float32)
     return scale_factors, clip_soft, clip_hard, background
 
 
@@ -1083,8 +1093,12 @@ def _apply_dataset_transforms(
     count_space: CountLabelSpace | None = None,
 ) -> Mapping[str, Any]:
     label_space = "counts" if count_space is not None else "transformed"
+    apply_clip = bool(data_cfg.get("apply_clip", True))
     scale_factors, clip_soft, clip_hard, background = resolve_scale_and_clip(
-        records, label_space=label_space, scaling_method=metadata.get("scaling_method")
+        records,
+        label_space=label_space,
+        scaling_method=metadata.get("scaling_method"),
+        require_clip=apply_clip,
     )
     label_space_kwargs: dict[str, Any] = {
         "label_space": label_space,
@@ -1107,7 +1121,7 @@ def _apply_dataset_transforms(
         background,
         apply_scale=bool(data_cfg.get("apply_scale", True)),
         apply_squash=bool(data_cfg.get("apply_squash", True)),
-        apply_clip=bool(data_cfg.get("apply_clip", True)),
+        apply_clip=apply_clip,
         enable_rc_aug=bool(data_cfg.get("enable_rc_aug", False)),
         rc_permutation=rc_perm,
         shift_max_bins=shift_max_bins,
@@ -1123,7 +1137,7 @@ def _apply_dataset_transforms(
         background,
         apply_scale=bool(data_cfg.get("apply_scale", True)),
         apply_squash=bool(data_cfg.get("apply_squash", True)),
-        apply_clip=bool(data_cfg.get("apply_clip", True)),
+        apply_clip=apply_clip,
         enable_rc_aug=False,
         rc_permutation=None,
         shift_max_bins=shift_max_bins,
@@ -2221,15 +2235,22 @@ def _build_collate_and_loss(
     )
     collate_fn = _build_collate_fn(track_metadata_tensors)
 
-    scale_factors, _, clip_hard, background = resolve_scale_and_clip(
-        records,
-        label_space="counts" if count_space is not None else "transformed",
-        scaling_method=scaling_method,
-    )
     labels_already_scaled = bool(
         cfg["data"].get("apply_scale", True)
         or cfg["data"].get("apply_squash", True)
         or cfg["data"].get("apply_clip", True)
+    )
+    # Only scaled_poisson_multinomial can consume a loss-time clip ceiling. Every
+    # other loss receives already transformed labels or ignores clip_hard entirely.
+    require_loss_clip = (
+        str(cfg["loss"].get("name")) == "scaled_poisson_multinomial"
+        and not labels_already_scaled
+    )
+    scale_factors, _, clip_hard, background = resolve_scale_and_clip(
+        records,
+        label_space="counts" if count_space is not None else "transformed",
+        scaling_method=scaling_method,
+        require_clip=require_loss_clip,
     )
     track_log_var: torch.nn.Parameter | None = None
     if bool(cfg["loss"].get("learn_track_weights", False)):
