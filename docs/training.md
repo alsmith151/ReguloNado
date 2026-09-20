@@ -264,7 +264,8 @@ question; the checkpoint-selection objectives combine them.
 | `dispersion_slope_median` | Is the dynamic range right? (slope of log prediction on log target) | 1 | Below 1: compressed towards the mean; a pure scale error leaves it at 1 |
 | `contrast_pearson_median` | Are cell-type differences ranked right? ([Cross-track contrast](#cross-track-contrast)) | 1 | Model predicts a shared profile for every cell type |
 | `contrast_sd_ratio_median` | Are cell-type differences the right size? | 1 | Below 1: differences shrunk; a post-hoc stretch by 1/ratio would undo it |
-| `contrast_objective` | Selection objective: `abs_log_ratio - contrast_pearson - w * pearson_bin` | lower | Use as `metric_for_best_model` when contrast families exist |
+| `design_contrast_objective` | Are per-track cell-type differences both correlated and correctly dispersed? `abs(log(contrast_sd_ratio)) - contrast_pearson` | lower | Use for design checkpoints; unlike correlation alone, penalises compressed or exaggerated group effects |
+| `contrast_objective` | Selection objective: `abs_log_ratio - contrast_pearson - w * pearson_bin` | lower | Use when total calibration and generic profile shape matter alongside contrast; for design use `design_contrast_objective` |
 | `calibration_shape_objective` | Selection objective without contrast: `abs_log_ratio - w * pearson_bin` | lower | Fallback when tracks carry no `assay_class`/`group` families |
 
 `w` is `trainer.calibration_shape_pearson_weight`. `dispersion_slope_median` adds

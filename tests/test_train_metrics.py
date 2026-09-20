@@ -202,17 +202,20 @@ class TestComputeMetrics:
         m = self._specificity_metrics(compression=1.0)
         assert m["contrast_pearson_median"] == pytest.approx(1.0, abs=1e-4)
         assert m["contrast_sd_ratio_median"] == pytest.approx(1.0, abs=1e-3)
+        assert m["design_contrast_objective"] == pytest.approx(-1.0, abs=1e-3)
 
     def test_specificity_compressed_differences_keep_rank_but_shrink_spread(self):
         m = self._specificity_metrics(compression=0.5)
         assert m["contrast_pearson_median"] == pytest.approx(1.0, abs=1e-3)
         assert m["contrast_sd_ratio_median"] == pytest.approx(0.5, abs=0.01)
         assert np.isfinite(m["contrast_objective"])
+        assert m["design_contrast_objective"] > -1.0
 
     def test_specificity_absent_without_families(self):
         metrics = self._run()
         assert np.isnan(metrics["contrast_pearson_median"])
         assert np.isnan(metrics["contrast_objective"])
+        assert np.isnan(metrics["design_contrast_objective"])
 
     @staticmethod
     def _dispersion_metrics(exponent: float, scale: float) -> dict[str, float]:
@@ -522,9 +525,7 @@ class TestRegulonadoTrainerComputeLossAlignment:
         captured: dict = {}
         trainer = self._make_trainer(model=_CompositeStub(), loss_fn=self._spy_loss_fn(captured))
 
-        trainer.compute_loss(
-            trainer.model, {"input_ids": torch.zeros(B, 1), "labels": labels}
-        )
+        trainer.compute_loss(trainer.model, {"input_ids": torch.zeros(B, 1), "labels": labels})
 
         assert captured["pred"].shape == (B, T, L)
         torch.testing.assert_close(captured["pred"], track_part)
@@ -548,9 +549,7 @@ class TestRegulonadoTrainerComputeLossAlignment:
         captured: dict = {}
         trainer = self._make_trainer(model=_CompositeStub(), loss_fn=self._spy_loss_fn(captured))
 
-        trainer.compute_loss(
-            trainer.model, {"input_ids": torch.zeros(B, 1), "labels": labels_blt}
-        )
+        trainer.compute_loss(trainer.model, {"input_ids": torch.zeros(B, 1), "labels": labels_blt})
 
         assert captured["pred"].shape == (B, T, L)
         torch.testing.assert_close(captured["pred"], track_part)
@@ -575,12 +574,8 @@ class TestRegulonadoTrainerComputeLossAlignment:
 
         for labels in (labels_btl, labels_blt):
             captured: dict = {}
-            trainer = self._make_trainer(
-                model=_PlainStub(), loss_fn=self._spy_loss_fn(captured)
-            )
-            trainer.compute_loss(
-                trainer.model, {"input_ids": torch.zeros(B, 1), "labels": labels}
-            )
+            trainer = self._make_trainer(model=_PlainStub(), loss_fn=self._spy_loss_fn(captured))
+            trainer.compute_loss(trainer.model, {"input_ids": torch.zeros(B, 1), "labels": labels})
             torch.testing.assert_close(captured["pred"], logits)
             torch.testing.assert_close(captured["target"], old_alignment(logits, labels))
 

@@ -337,7 +337,11 @@ def make_compute_metrics(
         sp_s, st_s, spt_s, sp2_s, st2_s, n_s = gs[0, 6:12]
         score_pearson = float(
             _pearson_from_stats(
-                np.array(sp_s), np.array(st_s), np.array(spt_s), np.array(sp2_s), np.array(st2_s),
+                np.array(sp_s),
+                np.array(st_s),
+                np.array(spt_s),
+                np.array(sp2_s),
+                np.array(st2_s),
                 np.array(n_s),
             )
         )
@@ -437,6 +441,22 @@ def make_compute_metrics(
         fin_contrast = r_contrast[np.isfinite(r_contrast)]
         fin_contrast_sd_ratios = contrast_sd_ratios[np.isfinite(contrast_sd_ratios)]
         contrast_pearson = float(np.median(fin_contrast)) if fin_contrast.size else float("nan")
+        contrast_sd_ratio = (
+            float(np.median(fin_contrast_sd_ratios))
+            if fin_contrast_sd_ratios.size
+            else float("nan")
+        )
+        # Design consumes these per-track channels after replicate averaging. Correlation
+        # alone rewards the right ordering even when group differences collapse toward
+        # zero; |log(sd ratio)| is symmetric around the desired ratio of one and makes
+        # compression and over-dispersion equally costly.
+        design_contrast_objective = (
+            abs(float(np.log(contrast_sd_ratio))) - contrast_pearson
+            if np.isfinite(contrast_pearson)
+            and np.isfinite(contrast_sd_ratio)
+            and contrast_sd_ratio > 0.0
+            else float("nan")
+        )
 
         if per_track_sink is not None:
             per_track_sink(
@@ -471,9 +491,8 @@ def make_compute_metrics(
             if amplitude_ratios.size
             else float("nan"),
             "contrast_pearson_median": contrast_pearson,
-            "contrast_sd_ratio_median": float(np.median(fin_contrast_sd_ratios))
-            if fin_contrast_sd_ratios.size
-            else float("nan"),
+            "contrast_sd_ratio_median": contrast_sd_ratio,
+            "design_contrast_objective": design_contrast_objective,
             # Cell-type differences first, with total calibration and profile shape as guards.
             "contrast_objective": (
                 abs_log_ratio
