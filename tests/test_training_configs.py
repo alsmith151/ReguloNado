@@ -22,10 +22,11 @@ sys.modules[CONFIG_SPEC.name] = CONFIG_MODULE
 CONFIG_SPEC.loader.exec_module(CONFIG_MODULE)
 TrainerConfig = CONFIG_MODULE.TrainerConfig
 PRESETS = {
-    "head_only": (0, "poisson_multinomial"),
-    "unfreeze_output": (4, "poisson_multinomial"),
-    "deep_finetune": (6, "poisson_multinomial"),
-    "peak_finetune": (4, "topk_additive"),
+    "head_only": (0, "poisson_multinomial", "transfer_mlp"),
+    "unfreeze_output": (4, "poisson_multinomial", "transfer_mlp"),
+    "deep_finetune": (6, "poisson_multinomial", "transfer_mlp"),
+    "peak_finetune": (4, "topk_additive", "transfer_mlp"),
+    "lora_finetune": (0, "poisson_multinomial_binwise", "film"),
 }
 
 
@@ -35,12 +36,12 @@ def _compose(preset: str) -> Any:
 
 
 @pytest.mark.parametrize(("preset", "expected"), PRESETS.items())
-def test_phase_preset_composes(preset: str, expected: tuple[int, str]) -> None:
+def test_phase_preset_composes(preset: str, expected: tuple[int, str, str]) -> None:
     cfg = _compose(preset)
-    unfreeze_stages, loss_name = expected
+    unfreeze_stages, loss_name, head_type = expected
 
     assert cfg.backbone.name == "borzoi"
-    assert cfg.head.type == "transfer_mlp"
+    assert cfg.head.type == head_type
     assert cfg.loss.name == loss_name
     assert cfg.trainer.unfreeze_backbone_stages_from_output_end == unfreeze_stages
     assert cfg.trainer.persistent_workers is True
@@ -80,6 +81,24 @@ def test_trainer_schema_covers_base_config() -> None:
 
     assert set(cfg.trainer) <= schema_fields
     assert cfg.trainer.topk_bins == 256
+
+
+def test_adapter_config_round_trips_through_trainer_schema() -> None:
+    """The nested ``adapter`` block must survive the same structured merge as any
+    other trainer setting, exercised through the ``lora_finetune`` preset's overrides.
+    """
+    cfg = _compose("lora_finetune")
+
+    assert cfg.trainer.adapter.enabled is True
+    assert cfg.trainer.adapter.locon_conv_blocks == 4
+    assert cfg.trainer.lora_learning_rate == pytest.approx(1.0e-4)
+
+    schema = omegaconf.OmegaConf.structured(TrainerConfig)
+    merged = omegaconf.OmegaConf.merge(schema, {"adapter": {"enabled": True, "lora_r": 16}})
+    assert merged.adapter.enabled is True
+    assert merged.adapter.lora_r == 16
+    # Fields not present in the override keep their dataclass defaults.
+    assert merged.adapter.locon_r == 4
 
 
 def test_trainer_schema_rejects_unknown_keys() -> None:
@@ -224,3 +243,42 @@ def test_selected_contrast_config_resolves_strict_production_settings() -> None:
     assert resolved["loss"]["name"] == "poisson_multinomial_binwise"
     assert resolved["loss"]["contrast_weight"] == pytest.approx(0.5)
     assert resolved["data"]["apply_squash"] is False
+
+
+def test_selected_lora_locon_config_resolves_adapter_settings() -> None:
+    from regulonado.config.models import RegulonadoConfig
+    from regulonado.training.compose import resolved_training_config
+    from regulonado.training.overrides import hydra_override_items, merge_training_settings
+
+    path = Path(__file__).parents[1] / "examples" / "lora-locon-finetune.yaml"
+    raw = yaml.safe_load(path.read_text())
+    RegulonadoConfig.model_validate(raw)
+    phase = raw["train"]["phases"][0]
+    run = raw["train"]["runs"][0]
+    settings = merge_training_settings(
+        [raw["train"]["common"], phase["settings"], run.get("settings", {})],
+        seed=run["seed"],
+        pretrained_model=run["pretrained_model"],
+    )
+    overrides = hydra_override_items(settings)
+    first_dotted = next(index for index, item in enumerate(overrides) if item.startswith("++"))
+    assert all("." not in item.split("=", 1)[0] for item in overrides[:first_dotted])
+    resolved = yaml.safe_load(
+        resolved_training_config(
+            phase["preset"],
+            ["data.path=/dataset", "output_dir=/output", *overrides],
+        )
+    )
+
+    assert resolved["trainer"]["adapter"]["enabled"] is True
+    assert resolved["trainer"]["adapter"]["locon_conv_blocks"] == 4
+    assert resolved["trainer"]["lora_learning_rate"] == pytest.approx(1e-4)
+    assert resolved["trainer"]["greater_is_better"] is True
+    # Anchor-scaled datasets store clip thresholds in anchor units (clip_soft 10 /
+    # clip_hard 20). label_space: counts ignores apply_* entirely, but they are pinned
+    # false so switching to label_space: transformed cannot silently apply anchor-unit
+    # ceilings to raw counts.
+    assert resolved["data"]["label_space"] == "counts"
+    assert resolved["data"]["apply_squash"] is False
+    assert resolved["data"]["apply_clip"] is False
+    assert resolved["data"]["apply_scale"] is False

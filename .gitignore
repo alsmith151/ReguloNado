@@ -43,6 +43,8 @@ notebooks/
 /local/
 examples/2026-09-17-hl60-anchor-deep-unfreeze.yaml
 examples/2026-09-16-hl60-anchor-pipeline.yaml
+examples/2026-09-18-hl60-group-contrast.yaml
+examples/2026-09-20-hl60-lora-locon.yaml
 tracks.parquet
 .gitignore
 test-00010-of-00026.parquet

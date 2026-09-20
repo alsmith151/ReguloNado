@@ -1,0 +1,41 @@
+# @package _global_
+# LoRA + LoCon parameter-efficient fine-tuning of the frozen backbone.
+
+defaults:
+  - override /backbone: borzoi
+  - override /head: film
+  - override /loss: poisson_multinomial_binwise
+
+data:
+  enable_rc_aug: true
+
+model:
+  use_track_metadata: false
+  share_condition_base_channels: false
+
+trainer:
+  batch_size: 12
+  eval_batch_size: 12
+  num_workers: 8
+  persistent_workers: true
+  learning_rate: 2.0e-4
+  lora_learning_rate: 1.0e-4
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_steps: 200
+  max_epochs: 3
+  gradient_accumulation_steps: 1
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+  log_every_n_steps: 10
+  evals_per_epoch: 4
+  freeze_backbone: true
+  unfreeze_backbone_stages_from_output_end: 0
+  adapter:
+    enabled: true
+    locon_conv_blocks: 4
+  report_to: [wandb]
+  metric_for_best_model: pearson_bin_median
+  greater_is_better: true
+  max_eval_samples: 500
+  early_stopping_patience: 5

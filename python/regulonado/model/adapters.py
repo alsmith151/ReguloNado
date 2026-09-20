@@ -159,6 +159,14 @@ class BaseBackboneAdapter(nn.Module):
         """
         raise NotImplementedError
 
+    def iter_locon_conv_candidates(self) -> Iterable[str]:
+        """Conv1d-bearing module names eligible for LoCon, in data-flow order.
+
+        Only implemented for :class:`BorzoiBackboneAdapter`; see there for the
+        eight-entry candidate list.
+        """
+        raise NotImplementedError
+
     def forward_features(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Extract sequence features.
 
@@ -220,6 +228,56 @@ class BorzoiBackboneAdapter(BaseBackboneAdapter):
                 yield f"unet{level}", nn.ModuleList(getattr(self.model, name) for name in names)
         if hasattr(self.model, "final_joined_convs"):
             yield "final_joined_convs", self.model.final_joined_convs
+
+    def iter_locon_conv_candidates(self) -> Iterable[str]:
+        """Conv1d-bearing module names eligible for LoCon, in data-flow order.
+
+        Mirrors Baskerville's reference-implementation ``conv_layers`` list
+        (``transfer.py``, ``add_locon``): ``conv_dna``, the five strided
+        ``res_tower`` ``ConvBlock``s, the ``unet1`` ``ConvBlock`` immediately
+        before attention, and the final ``final_joined_convs`` ``ConvBlock``.
+        This exact eight-entry order was confirmed empirically against the
+        authors' TensorFlow implementation; do not reorder or extend it here.
+
+        Introspects the live module tree (``hasattr``/``len`` checks) rather
+        than assuming these attributes exist, so the method degrades safely —
+        yielding a partial or empty sequence — on dummy modules built for
+        tests instead of raising.
+
+        Yields
+        ------
+        str
+            Dotted module path, relative to ``self.model``, of each
+            Conv1d-bearing block, e.g. ``"res_tower.6"``. Append
+            ``".conv_layer"`` to reach the actual ``nn.Conv1d`` — none of
+            these eight blocks are ``separable`` ConvBlocks, so
+            ``.conv_layer`` is always a single ``nn.Conv1d``, never a
+            ``Sequential`` of depthwise/pointwise convs.
+        """
+        if hasattr(self.model, "conv_dna") and hasattr(self.model.conv_dna, "conv_layer"):
+            yield "conv_dna"
+
+        res_tower = getattr(self.model, "res_tower", None)
+        if isinstance(res_tower, (nn.Sequential, nn.ModuleList)):
+            for index in (0, 2, 4, 6, 8):
+                if index < len(res_tower) and hasattr(res_tower[index], "conv_layer"):
+                    yield f"res_tower.{index}"
+
+        unet1 = getattr(self.model, "unet1", None)
+        if (
+            isinstance(unet1, (nn.Sequential, nn.ModuleList))
+            and len(unet1) > 1
+            and hasattr(unet1[1], "conv_layer")
+        ):
+            yield "unet1.1"
+
+        final_joined_convs = getattr(self.model, "final_joined_convs", None)
+        if (
+            isinstance(final_joined_convs, (nn.Sequential, nn.ModuleList))
+            and len(final_joined_convs) > 0
+            and hasattr(final_joined_convs[0], "conv_layer")
+        ):
+            yield "final_joined_convs.0"
 
     @classmethod
     def from_spec(cls, spec: BackboneSpec) -> "BorzoiBackboneAdapter":

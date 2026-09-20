@@ -12,6 +12,33 @@ class ProvenanceConfig:
 
 
 @dataclass(slots=True)
+class AdapterConfig:
+    """LoRA/LoCon parameter-efficient fine-tuning of the backbone (peft).
+
+    Named ``AdapterConfig`` rather than ``LoraConfig`` to avoid colliding with
+    ``peft.LoraConfig``. Opt-in: disabled runs are unaffected.
+    """
+
+    enabled: bool = False
+    lora_r: int = 8  # Baskerville "adapter_latent": 8
+    lora_alpha: int = 8
+    locon_r: int = 4  # add_locon(rank=4, alpha=1) defaults
+    locon_alpha: int = 1
+    dropout: float = 0.05
+    attention: bool = True
+    # "default" | "full"; ignored for flashzoi's fused Wqkv projection. Validated at
+    # runtime, not by this annotation — omegaconf 2.3.0 cannot structure typing.Literal.
+    attention_mode: str = "default"
+    # Last N of the 8 Conv1d candidates (data-flow order, nearest the output); 0 disables LoCon.
+    locon_conv_blocks: int = 4
+    # When locon_conv_blocks selects every candidate, exclude the first conv from LoCon and
+    # fully unfreeze it instead, matching Baskerville's conv1_tune behaviour.
+    tune_first_conv_when_all: bool = True
+    # Merge adapters into base weights when the run-root checkpoint is written.
+    merge_on_final_save: bool = True
+
+
+@dataclass(slots=True)
 class DataConfig:
     """Dataset settings accepted by the training entrypoint."""
 
@@ -143,6 +170,10 @@ class TrainerConfig:
     learning_rate: float = 1e-3
     # Optional lower learning rate for backbone parameters.
     backbone_learning_rate: float | None = None
+    # Optional learning rate for adapter.* (LoRA/LoCon) parameters; falls back to
+    # backbone_learning_rate's group membership when unset, which existing presets set
+    # far below the paper's 1e-4, so set this explicitly whenever adapter.enabled.
+    lora_learning_rate: float | None = None
     # AdamW weight decay applied to all optimizer parameter groups.
     weight_decay: float = 1e-2
     # Scheduler name passed through to transformers.get_scheduler.
@@ -248,6 +279,7 @@ class TrainerConfig:
     # Number of eval examples to save prediction plots for. 0 disables plotting.
     num_plot_examples: int = 4
     provenance: ProvenanceConfig = field(default_factory=ProvenanceConfig)
+    adapter: AdapterConfig = field(default_factory=AdapterConfig)
 
     @property
     def unfreeze_backbone_blocks_from_end(self) -> int:

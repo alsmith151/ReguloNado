@@ -1029,6 +1029,7 @@ $defs:
         - unfreeze_output
         - deep_finetune
         - peak_finetune
+        - lora_finetune
         title: Preset
         type: string
       settings:

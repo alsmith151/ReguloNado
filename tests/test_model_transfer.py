@@ -21,10 +21,13 @@ from regulonado.model import (
     RegulonadoModel,
     ResidualFiLMHead,
     TransferMLPHead,
+    attach_adapters,
     build_condition_shared_track_index,
+    merge_adapters,
+    resolve_lora_targets,
 )
 from regulonado.tracks_table import write_track_table
-from regulonado.training.config import TrainerConfig
+from regulonado.training.config import AdapterConfig, TrainerConfig
 from regulonado.training.data import stack_batch_tensors
 from regulonado.training.losses import (
     contrast_group_weights,
@@ -291,6 +294,44 @@ class DummyBorzoiUNetModule(DummyBorzoiModule):
             setattr(self, f"separable{level}", nn.Conv1d(8, 8, 1))
 
 
+class _ConvLayerBlock(nn.Module):
+    """Stand-in for borzoi_pytorch's ``ConvBlock``: a Conv1d at ``.conv_layer``."""
+
+    def __init__(self, channels: int = 8):
+        super().__init__()
+        self.conv_layer = nn.Conv1d(channels, channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv_layer(x)
+
+
+class DummyBorzoiLoconModule(DummyBorzoiUNetModule):
+    """Adds the real Borzoi attribute names ``iter_locon_conv_candidates`` and
+    ``resolve_lora_targets`` introspect: ``conv_dna``, ``res_tower`` (five
+    ``ConvBlock``s at even indices, matching the real
+    max_pool/ConvBlock interleaving), ``unet1`` (``ConvBlock`` at index 1), a
+    non-flash attention projection set, and a ``final_joined_convs`` wrapped
+    in a ``Sequential`` like the real model (rather than the bare Conv1d
+    ``DummyBorzoiModule`` uses, which has no ``.conv_layer``).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.conv_dna = _ConvLayerBlock()
+        self.res_tower = nn.Sequential(
+            *(_ConvLayerBlock() if index % 2 == 0 else nn.Identity() for index in range(9))
+        )
+        self.unet1 = nn.Sequential(nn.Identity(), _ConvLayerBlock())
+        self.final_joined_convs = nn.Sequential(_ConvLayerBlock())
+        # Non-flash attention projections (plain Borzoi's `to_q`/`to_k`/`to_v`/`to_out`).
+        # Not wired into get_embs_after_crop's forward (that stays a passthrough), but
+        # must exist on the module tree for peft injection and trainable-set checks.
+        self.to_q = nn.Linear(8, 8, bias=False)
+        self.to_k = nn.Linear(8, 8, bias=False)
+        self.to_v = nn.Linear(8, 8, bias=False)
+        self.to_out = nn.Linear(8, 8)
+
+
 def test_borzoi_adapter_keeps_float32_master_weights_for_half_checkpoints():
     # A bf16 backbone would make AdamW round small updates to zero; the adapter must
     # restore float32 weights regardless of the dtype the checkpoint was loaded in.
@@ -338,6 +379,76 @@ def test_freeze_policy_unfreezes_unet_stages_between_transformer_and_output():
         "final_joined_convs",
     }
     assert not model.backbone.model.transformer[0].weight.requires_grad
+
+
+def _locon_names(targets: list[str]) -> set[str]:
+    return {name.removesuffix(".conv_layer") for name in targets if name.endswith(".conv_layer")}
+
+
+def test_resolve_lora_targets_selects_last_n_locon_conv_candidates():
+    adapter = BorzoiBackboneAdapter(DummyBorzoiLoconModule())
+
+    targets_n4 = resolve_lora_targets(adapter, AdapterConfig(locon_conv_blocks=4))
+    assert _locon_names(targets_n4) == {
+        "res_tower.6",
+        "res_tower.8",
+        "unet1.1",
+        "final_joined_convs.0",
+    }
+    assert {"to_q", "to_v"}.issubset(targets_n4)
+
+    targets_n2 = resolve_lora_targets(adapter, AdapterConfig(locon_conv_blocks=2))
+    assert _locon_names(targets_n2) == {"unet1.1", "final_joined_convs.0"}
+
+
+def test_attach_adapters_marks_only_lora_params_trainable():
+    model = RegulonadoModel(
+        backbone=BorzoiBackboneAdapter(DummyBorzoiLoconModule()),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
+    )
+    model.apply_freeze_policy(FreezePolicy(freeze_backbone=True))
+    assert not any(parameter.requires_grad for parameter in model.backbone.parameters())
+
+    attach_adapters(model, AdapterConfig(locon_conv_blocks=4))
+
+    trainable_names = {
+        name for name, parameter in model.backbone.named_parameters() if parameter.requires_grad
+    }
+    assert trainable_names
+    assert all("lora_" in name for name in trainable_names)
+
+    base_weight_names = {
+        name
+        for name, parameter in model.backbone.named_parameters()
+        if not parameter.requires_grad
+    }
+    assert base_weight_names
+    assert all("lora_" not in name for name in base_weight_names)
+
+
+def test_merge_adapters_round_trips_output_and_drops_lora_state():
+    torch.manual_seed(0)
+    model = RegulonadoModel(
+        backbone=BorzoiBackboneAdapter(DummyBorzoiLoconModule()),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
+    )
+    model.apply_freeze_policy(FreezePolicy(freeze_backbone=True))
+    lora_model = attach_adapters(model, AdapterConfig(locon_conv_blocks=4))
+    model.eval()
+
+    inputs = torch.randn(2, 8, 12)
+    with torch.no_grad():
+        before = model(inputs).clone()
+
+    merge_adapters(lora_model)
+
+    with torch.no_grad():
+        after = model(inputs)
+    torch.testing.assert_close(before, after)
+
+    state_dict_keys = model.backbone.state_dict().keys()
+    assert not any("lora_" in key for key in state_dict_keys)
+    assert not any("base_layer." in key for key in state_dict_keys)
 
 
 def test_train_mode_keeps_frozen_backbone_batchnorm_statistics_fixed():
@@ -503,6 +614,66 @@ def test_optimizer_excludes_bias_and_norm_from_weight_decay():
     optimizer = _build_optimizer(model, cfg)
     assert {group["weight_decay"] for group in optimizer.param_groups} == {0.0, 0.1}
     assert {group["lr"] for group in optimizer.param_groups} == {1e-3, 1e-4}
+
+
+def test_optimizer_groups_lora_params_separately_at_lora_learning_rate():
+    # backbone_learning_rate is set to a value low enough (peak_finetune.yaml uses
+    # 5e-8) that adapter params landing in the backbone group by mistake would be
+    # effectively untrained — the bug WP3 exists to prevent.
+    model = RegulonadoModel(
+        backbone=BorzoiBackboneAdapter(DummyBorzoiLoconModule()),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
+    )
+    model.apply_freeze_policy(FreezePolicy(freeze_backbone=True))
+    attach_adapters(model, AdapterConfig(locon_conv_blocks=4))
+
+    cfg = TrainerConfig(
+        learning_rate=1e-3,
+        backbone_learning_rate=5e-8,
+        lora_learning_rate=1e-4,
+        weight_decay=0.1,
+    )
+    optimizer = _build_optimizer(model, cfg)
+
+    groups_by_name: dict[str, list] = {}
+    for group in optimizer.param_groups:
+        groups_by_name.setdefault(group["name"], []).append(group)
+
+    assert "lora" in groups_by_name
+    lora_groups = groups_by_name["lora"]
+    assert all(group["lr"] == 1e-4 for group in lora_groups)
+    assert sum(len(group["params"]) for group in lora_groups) > 0
+
+    # No lora_ param leaked into the backbone group at the (near-zero) backbone lr.
+    backbone_groups = groups_by_name.get("backbone", [])
+    assert not any(1e-4 == group["lr"] for group in backbone_groups)
+    for group in backbone_groups:
+        for parameter in group["params"]:
+            names = [
+                name for name, p in model.named_parameters() if p is parameter and "lora_" in name
+            ]
+            assert not names
+
+
+def test_optimizer_lora_learning_rate_falls_back_to_head_not_backbone():
+    model = RegulonadoModel(
+        backbone=BorzoiBackboneAdapter(DummyBorzoiLoconModule()),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
+    )
+    model.apply_freeze_policy(FreezePolicy(freeze_backbone=True))
+    attach_adapters(model, AdapterConfig(locon_conv_blocks=4))
+
+    cfg = TrainerConfig(
+        learning_rate=1e-3,
+        backbone_learning_rate=5e-8,
+        lora_learning_rate=None,
+        weight_decay=0.1,
+    )
+    optimizer = _build_optimizer(model, cfg)
+
+    lora_lrs = {group["lr"] for group in optimizer.param_groups if group["name"] == "lora"}
+    assert lora_lrs == {1e-3}
+    assert 5e-8 not in lora_lrs
 
 
 def test_regulonado_model_save_pretrained_roundtrip(tmp_path, monkeypatch):
@@ -684,6 +855,161 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
     # This proves the enriched metadata path drives the persisted FiLM IDs.
     assert saved_config.track_metadata["track_condition_ids"] == [1, 0]
     assert saved_config.condition_source == "group"
+
+
+class _RunnableBorzoiLoconModule(DummyBorzoiLoconModule):
+    """``DummyBorzoiLoconModule`` wired so ``forward_features`` works on real
+    one-hot ``input_ids`` (4 channels), for the ``run_training`` end-to-end smoke
+    test below.
+
+    The parent fixture's ``get_embs_after_crop`` is an inherited passthrough
+    (fine for the architecture-only WP2 tests, which feed already-8-channel
+    tensors directly to ``model(...)``). ``run_training``'s real data pipeline
+    instead feeds ``[B, 4, L]`` one-hot sequence tensors, so this subclass
+    widens ``conv_dna`` to accept 4 input channels and actually chains
+    ``conv_dna -> res_tower -> unet1`` (mirroring
+    ``BorzoiBackboneAdapter.forward_features``'s real data flow, which applies
+    ``final_joined_convs`` separately afterwards) — using the exact same module
+    names ``resolve_lora_targets``/``attach_adapters`` target.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.conv_dna.conv_layer = nn.Conv1d(4, 8, kernel_size=1)
+
+    def get_embs_after_crop(self, input_ids: torch.Tensor) -> torch.Tensor:
+        x = self.conv_dna(input_ids)
+        x = self.res_tower(x)
+        x = self.unet1(x)
+        return x
+
+
+def _build_lora_locon_backbone(_spec):
+    adapter = BorzoiBackboneAdapter(_RunnableBorzoiLoconModule())
+    # The base class hardcodes feature_dim=1920 for the real (1920-channel) Borzoi
+    # trunk; this dummy's final_joined_convs outputs 8 channels, so the head's
+    # in_ch must match that, not the hardcoded default.
+    adapter.feature_dim = 8
+    return adapter
+
+
+def test_run_training_entrypoint_with_lora_locon_adapters_merges_on_save(tmp_path):
+    """End-to-end smoke test proving the run-root checkpoint is merged and clean.
+
+    Reuses the fixture pattern from test_run_training_entrypoint_with_dummy_adapter
+    but with a backbone that supports LoRA/LoCon (DummyBorzoiLoconModule, via
+    BorzoiBackboneAdapter) and trainer.adapter.enabled. Asserts training completes,
+    RegulonadoConfig.from_pretrained round-trips (proving the merged checkpoint stays
+    architecturally identical to a plain backbone), and the saved run-root state dict
+    has no lora_ keys and no base_layer. prefixes (proving the merge actually ran).
+    """
+    from safetensors.torch import load_file
+
+    data_dir = tmp_path / "dataset"
+    (data_dir / "README.md").parent.mkdir(parents=True, exist_ok=True)
+    (data_dir / "README.md").write_text("# fixture dataset\n")
+    _write_parquet_split(data_dir, "train", n_rows=4, context=12, n_tracks=2)
+    _write_parquet_split(data_dir, "validation", n_rows=2, context=12, n_tracks=2)
+    _write_parquet_split(data_dir, "test", n_rows=2, context=12, n_tracks=2)
+
+    def _write_tracks(path, conditions, scale_factors, groups):
+        write_track_table(
+            pd.DataFrame(
+                {
+                    "track_name": ["t0", "t1"],
+                    "status": ["included", "included"],
+                    "track_index": [0, 1],
+                    "condition": conditions,
+                    "group": groups,
+                    "assay": ["atac", "atac"],
+                    "scale_factor": scale_factors,
+                }
+            ),
+            path,
+            context_length=12,
+            bin_size=1,
+            n_pred_bins=12,
+            shift_max_bp=0,
+        )
+
+    _write_tracks(data_dir / "tracks.parquet", ["a", "b"], [1.0, 1.0], ["x", "y"])
+    enriched_metadata = tmp_path / "tracks.enriched.parquet"
+    _write_tracks(enriched_metadata, ["z", "a"], [2.0, 3.0], ["beta", "alpha"])
+
+    summary = run_training(
+        {
+            "seed": 1,
+            "output_dir": str(tmp_path / "run"),
+            "data": {
+                "path": str(data_dir),
+                "metadata_path": str(enriched_metadata),
+                "apply_scale": False,
+                "apply_squash": False,
+                "apply_clip": False,
+                "enable_rc_aug": False,
+                "context_length": 12,
+                "n_pred_bins": 12,
+            },
+            "backbone": {"name": "borzoi", "config_overrides": {}},
+            "model": {
+                "use_track_metadata": True,
+                "condition_source": "group",
+                "share_condition_base_channels": True,
+                "metadata_hidden": 8,
+                "activation_type": "softplus",
+            },
+            "head": {
+                "type": "film",
+                "hidden": 8,
+                "dropout": 0.0,
+                "refinement_kernel": 9,
+                "mlp_hidden": None,
+            },
+            "loss": {"name": "mse", "poisson_weight": 0.0, "delta": 1.0},
+            "trainer": {
+                "batch_size": 2,
+                "eval_batch_size": 2,
+                "num_workers": 0,
+                "learning_rate": 1e-3,
+                "backbone_learning_rate": 5e-8,
+                "lora_learning_rate": 1e-4,
+                "weight_decay": 0.0,
+                "scheduler": "linear",
+                "warmup_steps": 0,
+                "max_epochs": 1,
+                "max_steps": 2,
+                "gradient_accumulation_steps": 1,
+                "mixed_precision": "no",
+                "gradient_clip_norm": 1.0,
+                "eval_every_n_steps": 1,
+                "checkpoint_every_n_steps": None,
+                "freeze_backbone": True,
+                "unfreeze_backbone_stages_from_output_end": 0,
+                "unfreeze_module_names": [],
+                "provenance": {"enabled": True, "save_git_diff": False},
+                "adapter": {
+                    "enabled": True,
+                    "locon_conv_blocks": 4,
+                    "merge_on_final_save": True,
+                },
+            },
+        },
+        adapter_builder=_build_lora_locon_backbone,
+    )
+
+    assert summary["history"]["train/loss"]
+    run_dir = tmp_path / "run"
+    assert (run_dir / "model.safetensors").exists()
+
+    # Proves the merged run-root checkpoint stays architecturally identical to a
+    # plain backbone: config.json carries no adapter-specific fields, and loading
+    # it does not require peft.
+    saved_config = RegulonadoConfig.from_pretrained(run_dir)
+    assert saved_config.track_names == ["t0", "t1"]
+
+    state_dict = load_file(str(run_dir / "model.safetensors"))
+    assert not any("lora_" in key for key in state_dict)
+    assert not any("base_layer." in key for key in state_dict)
 
 
 @pytest.mark.parametrize("head_type", ["transfer_mlp", "film", "hidden_film", "bias"])

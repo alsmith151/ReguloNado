@@ -174,7 +174,9 @@ class TrainPhase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    preset: Literal["head_only", "unfreeze_output", "deep_finetune", "peak_finetune"]
+    preset: Literal[
+        "head_only", "unfreeze_output", "deep_finetune", "peak_finetune", "lora_finetune"
+    ]
     settings: dict[str, Any] = Field(default_factory=dict)
 
     _check_name = field_validator("name")(staticmethod(_validate_name))

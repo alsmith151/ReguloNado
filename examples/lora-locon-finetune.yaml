@@ -1,0 +1,155 @@
+# LoRA + LoCon parameter-efficient fine-tuning of the Borzoi/flashzoi trunk.
+#
+# Published template — replace every /path/to/... before running. For the concrete
+# cluster runs see the gitignored, machine-specific configs.
+#
+# WHY PEFT: a frozen trunk with only a FiLM head on top can rescale the channels of a
+# fixed feature map but cannot sharpen it. The symptom is an amplitude_ratio_median that
+# sits flat (~0.45) across every eval while total_ratio stays near 1.0 — peaks predicted
+# at half height with the missing mass smeared into background. PEFT unfreezes the trunk
+# within a single-GPU memory budget; full fine-tuning of Borzoi needs >40GB.
+#
+# Method: Sun, Linder & Kelley, "Parameter-efficient fine-tuning enables scalable
+# transfer of regulatory sequence models to novel contexts", Genome Biology 2026,
+# DOI 10.1186/s13059-026-03935-0. Reference implementation (TensorFlow):
+# github.com/calico/baskerville, src/baskerville/transfer.py.
+#
+# WHAT GETS ADAPTED (trainer.adapter):
+#   LoRA  — attention projections. flashzoi fuses q/k/v into a single Wqkv, so adapting
+#           it adapts all three; plain Borzoi exposes separate to_q/to_v.
+#   LoCon — the last `locon_conv_blocks` of the 8 candidate Conv1d blocks, counted from
+#           the attention stack backwards:
+#             conv_dna, res_tower.{0,2,4,6,8}, unet1.1, final_joined_convs.0
+#           locon_conv_blocks: 4 reproduces the paper's selected "Locon4" ->
+#             res_tower.6, res_tower.8, unet1.1, final_joined_convs.0
+#           Note the last of these is output-side, which is where profile sharpness is set.
+#
+# Adapters merge into the base weights when the run-root checkpoint is written
+# (adapter.merge_on_final_save, default true), so prediction and inference are unchanged
+# and need no PEFT-aware loading. Intermediate checkpoint-* dirs keep the adapters
+# attached so load_best_model_at_end can still restore them mid-run.
+
+results_dir: /path/to/regulonado-results
+
+inputs:
+  intervals: /path/to/intervals.bed.gz
+  fasta: /path/to/genome.fa
+  bigwig_dir: /path/to/bigwigs
+  track_annotations: /path/to/track_annotations.parquet
+
+qc:
+  checks: [anchor]
+  drop_degenerate: true
+  max_workers: 16
+
+scaling:
+  method: anchor
+  anchor_regions: /path/to/common_essential_windows.bed
+  background_regions: /path/to/null_windows.parquet
+  heldout_regions: /path/to/common_essential_windows_heldout.bed
+  background_sample: 5000
+
+dataset:
+  context_length: 524288
+  bin_size: 32
+  n_pred_bins: 6144
+  shift_max_bp: 64
+  extract_threads: 32
+  write_threads: 4
+  zstd_level: 3
+  rows_per_row_group: 1
+  stage_to_scratch: true
+  drop_missing: true
+  dedupe_tracks: content
+  bin_denominator: bin_width
+  missing_bins: nan
+
+train:
+  nproc_per_node: 1
+  common:
+    data:
+      # Raw-count labels with a per-track anchor exposure. Under label_space: counts the
+      # labels go through count_labels(), which never scales, background-subtracts, clips
+      # or squashes — so apply_scale/apply_clip/apply_squash are ignored on this path.
+      # They are pinned false anyway so the intent is explicit and a later switch to
+      # label_space: transformed cannot silently re-enable them: the stored clip
+      # thresholds (clip_soft 10 / clip_hard 20) are in ANCHOR units and would be far
+      # below raw count magnitudes.
+      label_space: counts
+      count_unit: fragments
+      exposure: anchor
+      apply_scale: false
+      apply_squash: false
+      apply_clip: false
+      mask_missing: true
+      enable_rc_aug: true
+
+    model:
+      use_track_metadata: true
+      condition_source: group
+      activation_type: softplus_beta2
+
+    head:
+      hidden: 2048
+      dropout: 0.1
+      output_init: empirical_mean_constant
+      output_init_samples: 512
+
+    loss:
+      poisson_weight: 1.0
+      contrast_weight: 2.0
+      contrast_magnitude_weight: 1.5
+      learn_track_weights: false
+
+    trainer:
+      batch_size: 12
+      eval_batch_size: 12
+      num_workers: 4
+      persistent_workers: true
+      learning_rate: 1.38e-3
+      # Adapter parameters get their own optimizer group. Without this they would be
+      # classified as backbone parameters (they live inside the backbone module tree) and
+      # inherit backbone_learning_rate, which some presets set as low as 5e-8.
+      # The reference implementation's borzoi_locon4.json uses 6e-5; the paper says 1e-4.
+      lora_learning_rate: 1.0e-4
+      weight_decay: 4.3e-5
+      scheduler: linear
+      warmup_steps: 300
+      max_epochs: 1
+      mixed_precision: bf16
+      gradient_clip_norm: 3.0
+      log_every_n_steps: 10
+      evals_per_epoch: 4
+      eval_on_start: true
+      # Keep the trunk frozen: it is adapted through adapters, not stage unfreezing, so
+      # there is nothing left for unfreeze_backbone_stages_from_output_end to do.
+      freeze_backbone: true
+      unfreeze_backbone_stages_from_output_end: 0
+      adapter:
+        enabled: true
+        locon_conv_blocks: 4
+      # Select on a metric that can see peak sharpness and rank. Objectives built only
+      # from total-ratio and Pearson terms cannot, and can be minimised by a smeared
+      # prediction that happens to get the totals right.
+      metric_for_best_model: pearson_top256_median
+      greater_is_better: true
+      early_stopping_patience: 3
+      report_to: [wandb]
+      wandb_project: regulonado-lora-locon
+
+  phases:
+    - name: lora_locon
+      preset: lora_finetune
+      settings:
+        head: film
+        loss: poisson_multinomial_binwise
+
+  runs:
+    - name: fold_3_lora_locon
+      seed: 3
+      pretrained_model: johahi/flashzoi-replicate-3
+
+prediction:
+  run: fold_3_lora_locon
+  whole_genome: true
+  batch_size: 4

@@ -16,6 +16,7 @@ import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import OmegaConfBaseException
+from peft import LoraModel
 from torch.optim import AdamW
 from torch.utils.data import Subset
 from transformers import (
@@ -35,6 +36,7 @@ from regulonado.model import (
     build_backbone_adapter,
     build_condition_shared_track_index,
 )
+from regulonado.model.peft_adapters import attach_adapters, merge_adapters
 from regulonado.target_specificity import group_index_from_records
 from regulonado.training.callbacks import (
     EvalExampleDiagnostics,
@@ -1362,6 +1364,13 @@ def _apply_freeze_policy(model: RegulonadoModel, trainer_cfg: TrainerConfig) -> 
 def _build_optimizer(model: RegulonadoModel, trainer_cfg: TrainerConfig) -> torch.optim.Optimizer:
     lr = trainer_cfg.learning_rate
     backbone_lr = trainer_cfg.backbone_learning_rate or lr
+    # Falls back to the head LR, not backbone_lr: adapter params live inside the
+    # backbone module tree, so id()-based backbone/head classification alone would
+    # sweep them into the backbone group, and presets set backbone_learning_rate as
+    # low as 5e-8 — effectively not training the adapters at all. Classifying by
+    # "lora_" in name below (before the trunk/head id() check) is what fixes that;
+    # this fallback is what keeps an unset lora_learning_rate from reintroducing it.
+    lora_lr = trainer_cfg.lora_learning_rate or lr
 
     head_ids = {id(parameter) for parameter in model.head_parameters()}
     trunk_ids = {id(parameter) for parameter in model.trunk_parameters()}
@@ -1371,11 +1380,15 @@ def _build_optimizer(model: RegulonadoModel, trainer_cfg: TrainerConfig) -> torc
         ("backbone", False): [],
         ("head", True): [],
         ("head", False): [],
+        ("lora", True): [],
+        ("lora", False): [],
     }
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        if id(parameter) in trunk_ids:
+        if "lora_" in name:
+            family = "lora"
+        elif id(parameter) in trunk_ids:
             family = "backbone"
         elif id(parameter) in head_ids:
             family = "head"
@@ -1385,7 +1398,7 @@ def _build_optimizer(model: RegulonadoModel, trainer_cfg: TrainerConfig) -> torc
         grouped[(family, use_decay)].append(parameter)
 
     param_groups: list[dict[str, Any]] = []
-    for family, group_lr in (("backbone", backbone_lr), ("head", lr)):
+    for family, group_lr in (("backbone", backbone_lr), ("head", lr), ("lora", lora_lr)):
         decay_params = grouped[(family, True)]
         no_decay_params = grouped[(family, False)]
         if decay_params:
@@ -1704,6 +1717,13 @@ class RegulonadoTrainer(Trainer):
         self._specificity_panel: SpecificityPanelEvaluator | None = kwargs.pop(
             "specificity_panel", None
         )
+        # Set only when trainer_cfg.adapter.enabled: the peft LoraModel handle wrapping
+        # model.backbone.model, used by save_model to merge adapters into base weights
+        # for the run-root checkpoint only (never intermediate checkpoint-* saves — see
+        # save_model).
+        self._lora_model: LoraModel | None = kwargs.pop("lora_model", None)
+        self._merge_adapters_on_final_save: bool = kwargs.pop("merge_adapters_on_final_save", False)
+        self._adapters_merged = False
         # Accumulates the group-contrast loss terms between log events (the same
         # since-last-log averaging HF applies to "loss" itself), so a flat group term is
         # visible in the same logs as everything else rather than only in the total loss —
@@ -1862,6 +1882,26 @@ class RegulonadoTrainer(Trainer):
         """
         output_path = Path(output_dir or self.args.output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
+        # Merge adapters only for the run-root save, never for intermediate
+        # checkpoint-* saves: HF passes the checkpoint subdirectory for periodic
+        # saves and the root output_dir for the final trainer.save_model() call, so
+        # comparing against self.args.output_dir distinguishes them.
+        # load_best_model_at_end=True reloads a checkpoint's state dict into the
+        # live, still-injected model, so a merged (unloaded) checkpoint would have
+        # different key names and fail to load. Consequence: intermediate
+        # checkpoint-* dirs are not loadable by inference.py — _find_weights
+        # (inference.py:141-183) prefers the run-root model.safetensors (the merged
+        # one), so the normal path works, but its checkpoint-* fallback would hand
+        # back an un-merged (still peft-wrapped) model.
+        is_root_save = output_path.resolve() == Path(self.args.output_dir).resolve()
+        if (
+            is_root_save
+            and self._lora_model is not None
+            and self._merge_adapters_on_final_save
+            and not self._adapters_merged
+        ):
+            merge_adapters(self._lora_model)
+            self._adapters_merged = True
         # Save the RegulonadoModel directly — config.json + model.safetensors with clean keys.
         self.model.save_pretrained(output_path, safe_serialization=True)
         # Preserve training arguments alongside the model for traceability.
@@ -2158,8 +2198,20 @@ def _prepare_model_for_training(
     *,
     rank: int,
     dataset_track_names: Sequence[str] | None = None,
-) -> None:
-    """Apply the freeze policy and, if configured, warm-start weights from a checkpoint."""
+) -> LoraModel | None:
+    """Apply the freeze policy, optionally warm-start, then optionally inject adapters.
+
+    Order is load-bearing: freeze -> warm start -> adapter injection.
+    - Injection must follow warm start: peft renames ``...conv_layer.weight`` to
+      ``...conv_layer.base_layer.weight``, so injecting first would break
+      warm-start state-dict key matching.
+    - Injection must follow the freeze pass: peft marks only adapter parameters
+      trainable, and running the freeze pass afterwards would undo that.
+
+    Returns the injected ``LoraModel`` handle when ``trainer_cfg.adapter.enabled``,
+    so callers can thread it through to the trainer for the merge-on-save step;
+    ``None`` otherwise.
+    """
     _apply_freeze_policy(model, trainer_cfg)
     if dataset_track_names is not None:
         assert_track_names_match(getattr(model.config, "track_names", []), dataset_track_names)
@@ -2175,6 +2227,16 @@ def _prepare_model_for_training(
         )
         load_model_weights_only(model, trainer_cfg.init_weights_from_checkpoint)
         logger.info(f"[rank {rank}] warm-start weights loaded")
+
+    lora_model: LoraModel | None = None
+    if trainer_cfg.adapter.enabled:
+        lora_model = attach_adapters(model, trainer_cfg.adapter)
+        n_trainable_after = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info(
+            f"[rank {rank}] LoRA/LoCon adapters attached | "
+            f"{n_trainable_after / 1e6:.1f}M trainable params (post-injection)"
+        )
+    return lora_model
 
 
 def _setup_optimization(
@@ -2464,7 +2526,7 @@ def run_training(
         for r in records
         if r.get("track_name") or r.get("bigwig_path")
     ]
-    _prepare_model_for_training(
+    lora_model = _prepare_model_for_training(
         model, trainer_cfg, rank=rank, dataset_track_names=dataset_track_names
     )
 
@@ -2545,6 +2607,8 @@ def run_training(
         callbacks=callbacks,
         loss_fn=loss_fn,
         specificity_panel=specificity_panel,
+        lora_model=lora_model,
+        merge_adapters_on_final_save=trainer_cfg.adapter.merge_on_final_save,
         compute_metrics=make_compute_metrics(
             len(records),
             trainer_cfg.calibration_shape_pearson_weight,
