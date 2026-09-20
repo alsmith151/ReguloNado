@@ -24,10 +24,18 @@ tracks_app = typer.Typer(
 # Bare scale_factors.parquet column -> its namespaced name in tracks.parquet.
 # 'path'/'resolved_path'/'track_index' are dropped before merging: they are
 # already on the discovery side and would otherwise collide.
+# clip_soft/clip_hard are split by unit family: anchor_scale_factors names its pair
+# clip_soft_anchor/clip_hard_anchor (anchor units), compute_clip_thresholds (the only
+# other producer, reached by every non-anchor scaling method) names its pair
+# clip_soft_squash/clip_hard_squash (raw-count units, pre-squash). A third family,
+# clip_soft_counts/clip_hard_counts (stored mean-coverage units), is populated by the
+# QC step's interval-quantile computation, not by this scale_factors merge at all.
 _SCALE_COLUMN_RENAME = {
     "background": "scale_background",
-    "clip_soft": "scale_clip_soft",
-    "clip_hard": "scale_clip_hard",
+    "clip_soft_anchor": "scale_clip_soft_anchor",
+    "clip_hard_anchor": "scale_clip_hard_anchor",
+    "clip_soft_squash": "scale_clip_soft_squash",
+    "clip_hard_squash": "scale_clip_hard_squash",
     "anchor_reference": "scale_anchor_reference",
     "background_q50": "scale_background_q50",
     "background_q99": "scale_background_q99",
@@ -46,7 +54,14 @@ _SCALE_COLUMN_RENAME = {
 # The full canonical column set, always present in tracks.parquet regardless of
 # which stages ran — an unrun stage leaves its columns null rather than absent,
 # so a reader never has to branch on which stages were enabled ("stable schema").
-_CANONICAL_SCALE_COLUMNS = tuple(_SCALE_COLUMN_RENAME.values()) + ("scale_factor",)
+# scale_clip_soft_counts/scale_clip_hard_counts are listed here too even though a QC
+# run (not the scale-factors merge) populates them: they belong to the same
+# scale_clip_* family as the anchor/squash pair (see _SCALE_COLUMN_RENAME above).
+_CANONICAL_SCALE_COLUMNS = tuple(_SCALE_COLUMN_RENAME.values()) + (
+    "scale_factor",
+    "scale_clip_soft_counts",
+    "scale_clip_hard_counts",
+)
 _CANONICAL_QC_COLUMNS = (
     "qc_verdict",
     "qc_failed_rules",
@@ -323,6 +338,12 @@ def qc_cmd(
         if "interval_signal" in checks:
             sig = pd.DataFrame(qc_module.interval_signal_stats(means), index=included.index)
             metrics = pd.concat([metrics, sig], axis=1)
+            # Feeds tracks.parquet's scale_clip_soft_counts/scale_clip_hard_counts (the
+            # label_space: counts clip family) — computed from the same interval-mean
+            # scan as interval_signal_stats, so it rides along with that check rather
+            # than needing its own BigWig pass or --check flag.
+            clip = pd.DataFrame(qc_module.interval_clip_quantiles(means), index=included.index)
+            metrics = pd.concat([metrics, clip], axis=1)
         if "replicate_concordance" in checks:
             group_col = next(
                 (c for c in ("scaling_group", "condition") if c in included.columns), None
@@ -430,6 +451,11 @@ def assemble(
         sf = sf.drop(columns=[c for c in ("path", "resolved_path", "track_index") if c in sf], )
         sf = sf.rename(columns=_SCALE_COLUMN_RENAME)
         merged = merged.merge(sf, on="track_name", how="left", validate="one_to_one")
+        # Stamped into tracks.parquet's attrs (below) and read back by
+        # training.runner.resolve_scale_and_clip to choose between the anchor-unit
+        # and raw-count-unit (squash) clip column families -- "inferred" covers every
+        # non-anchor method (original/tmm/seqnado/bamnado), which all write the
+        # squash family via normalization.compute_clip_thresholds.
         scaling_method = "anchor" if "scale_anchor_reference" in merged.columns else "inferred"
 
     if qc_report is not None:
@@ -634,6 +660,10 @@ def targets(
 
     ``sum_stat``/``strand_pair`` have no ReguloNado equivalent: every row gets
     ``sum`` and self-pairs (``strand_pair == index``).
+
+    Borzoi's ``clip``/``clip_soft`` columns are raw-count, pre-squash thresholds, so
+    this always reads the ``_squash`` clip family regardless of which scaling method
+    actually produced the track table (anchor-scaled tracks have no equivalent here).
     """
     df = _read_table(track_table)
     included = df[df["status"] == "included"].sort_values("track_index")
@@ -642,8 +672,8 @@ def targets(
             "index": int(row["track_index"]),
             "identifier": row["track_name"],
             "file": row.get("resolved_path", ""),
-            "clip": row.get("scale_clip_hard", ""),
-            "clip_soft": row.get("scale_clip_soft", ""),
+            "clip": row.get("scale_clip_hard_squash", ""),
+            "clip_soft": row.get("scale_clip_soft_squash", ""),
             "scale": row.get("scale_factor", ""),
             "sum_stat": "sum",
             "description": row.get("assay") or "",

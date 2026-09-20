@@ -32,6 +32,7 @@ from regulonado.training.runner import (
     _resolve_trainer_config,
     _resolve_training_schedule,
     _validate_dataset_schema,
+    resolve_scale_and_clip,
 )
 from torch.utils.data import BatchSampler, DataLoader, SequentialSampler, Subset
 from transformers import Trainer
@@ -44,6 +45,11 @@ MINIMAL_CFG = {
     "loss": {},
     "trainer": {},
 }
+
+# label_space="transformed" (cfg["data"]={} everywhere in this file) with no
+# scaling_method resolves to the "squash" clip family in resolve_scale_and_clip,
+# which has no fallback -- test track records must supply it explicitly.
+_SQUASH_CLIP = {"clip_soft_squash": 348.0, "clip_hard_squash": 796.0}
 
 
 def _write_shard(
@@ -513,8 +519,99 @@ class TestResolveTrainerConfig:
         assert trainer_cfg.resume_from_checkpoint is True
 
 
+class TestResolveScaleAndClip:
+    def test_counts_space_reads_the_counts_clip_family(self) -> None:
+        records = [
+            {
+                "scale_factor": 2.0,
+                "background": 1.0,
+                "clip_soft_counts": 3.0,
+                "clip_hard_counts": 30.0,
+                # Other families present too, must NOT be picked.
+                "clip_soft_anchor": 999.0,
+                "clip_hard_anchor": 999.0,
+                "clip_soft_squash": 999.0,
+                "clip_hard_squash": 999.0,
+            }
+        ]
+        sf, soft, hard, bg = resolve_scale_and_clip(
+            records, label_space="counts", scaling_method=None
+        )
+        np.testing.assert_allclose(sf, [2.0])
+        np.testing.assert_allclose(soft, [3.0])
+        np.testing.assert_allclose(hard, [30.0])
+        np.testing.assert_allclose(bg, [1.0])
+
+    def test_transformed_anchor_reads_the_anchor_clip_family(self) -> None:
+        records = [{"clip_soft_anchor": 10.0, "clip_hard_anchor": 20.0}]
+        _, soft, hard, _ = resolve_scale_and_clip(
+            records, label_space="transformed", scaling_method="anchor"
+        )
+        np.testing.assert_allclose(soft, [10.0])
+        np.testing.assert_allclose(hard, [20.0])
+
+    @pytest.mark.parametrize("scaling_method", [None, "inferred", "tmm", "bamnado"])
+    def test_transformed_non_anchor_reads_the_squash_clip_family(self, scaling_method) -> None:
+        records = [{"clip_soft_squash": 348.0, "clip_hard_squash": 796.0}]
+        _, soft, hard, _ = resolve_scale_and_clip(
+            records, label_space="transformed", scaling_method=scaling_method
+        )
+        np.testing.assert_allclose(soft, [348.0])
+        np.testing.assert_allclose(hard, [796.0])
+
+    def test_missing_clip_columns_raise_instead_of_falling_back(self) -> None:
+        records = [{"track_name": "t0"}, {"track_name": "t1"}]
+        with pytest.raises(ValueError, match="clip_soft_squash.*clip_hard_squash"):
+            resolve_scale_and_clip(records, label_space="transformed", scaling_method=None)
+
+    def test_missing_counts_clip_columns_raise(self) -> None:
+        records = [{"track_name": "t0"}]
+        with pytest.raises(ValueError, match="clip_soft_counts.*clip_hard_counts"):
+            resolve_scale_and_clip(records, label_space="counts", scaling_method=None)
+
+    def test_missing_anchor_clip_columns_raise_even_if_squash_present(self) -> None:
+        """A track scaled by a non-anchor method must not silently clip at squash
+        thresholds if scaling_method is (mis)reported as anchor."""
+        records = [{"clip_soft_squash": 348.0, "clip_hard_squash": 796.0}]
+        with pytest.raises(ValueError, match="clip_soft_anchor.*clip_hard_anchor"):
+            resolve_scale_and_clip(records, label_space="transformed", scaling_method="anchor")
+
+    @pytest.mark.parametrize("empty", [None, float("nan")])
+    def test_null_or_nan_clip_values_raise_like_absent_columns(self, empty) -> None:
+        """Present-but-empty is the dangerous case, not absent.
+
+        The clip families are nullable by design (``scaling_columns_present_together``
+        lets one be all-null when another method populated a different family), so a
+        null value is the expected shape of "QC has not run yet". Treating it as
+        populated would hand ``count_labels`` a 0.0 ceiling and silently zero every
+        label for that track, or a NaN ceiling and poison the loss.
+        """
+        records = [
+            {"track_name": "t0", "clip_soft_counts": 5.0, "clip_hard_counts": 10.0},
+            {"track_name": "t1", "clip_soft_counts": empty, "clip_hard_counts": empty},
+        ]
+        with pytest.raises(ValueError, match="t1"):
+            resolve_scale_and_clip(records, label_space="counts", scaling_method="anchor")
+
+    def test_unknown_label_space_raises(self) -> None:
+        with pytest.raises(ValueError, match="label_space"):
+            resolve_scale_and_clip([{}], label_space="bogus", scaling_method=None)
+
+    def test_scale_factor_and_background_keep_harmless_fallbacks(self) -> None:
+        records = [{"clip_soft_squash": 1.0, "clip_hard_squash": 2.0}]
+        sf, _, _, bg = resolve_scale_and_clip(
+            records, label_space="transformed", scaling_method=None
+        )
+        np.testing.assert_allclose(sf, [1.0])
+        np.testing.assert_allclose(bg, [0.0])
+
+
 class TestBuildCollateAndLoss:
-    RECORDS = [{}, {}]  # two tracks, all fields default via resolve_scale_and_clip fallbacks
+    # Two tracks; scale_factor/background default via resolve_scale_and_clip's harmless
+    # fallbacks, but the clip columns for the active space (label_space="transformed",
+    # scaling_method unset -> "squash", the default in these tests' cfg["data"]={}) have
+    # no fallback and must be given explicitly -- see resolve_scale_and_clip's docstring.
+    RECORDS = [dict(_SQUASH_CLIP), dict(_SQUASH_CLIP)]
 
     def test_returns_expected_shapes_and_defaults(self) -> None:
         cfg = {"model": {"use_track_metadata": False}, "data": {}, "loss": {"name": "mse"}}
@@ -549,9 +646,9 @@ class TestBuildCollateAndLoss:
         # exactly +/- symmetric, so r is always exactly -1 regardless of what the loss
         # actually computes -- a test that would pass for the wrong reason.
         records = [
-            {"assay_class": "ATAC", "group": "a"},
-            {"assay_class": "ATAC", "group": "b"},
-            {"assay_class": "ATAC", "group": "c"},
+            {"assay_class": "ATAC", "group": "a", **_SQUASH_CLIP},
+            {"assay_class": "ATAC", "group": "b", **_SQUASH_CLIP},
+            {"assay_class": "ATAC", "group": "c", **_SQUASH_CLIP},
         ]
         loss_cfg = {"name": "mse", "contrast_weight": 1.0}
         cfg = {
@@ -569,9 +666,9 @@ class TestBuildCollateAndLoss:
 
     def test_contrast_shape_params_come_from_trainer_config(self) -> None:
         records = [
-            {"assay_class": "ATAC", "group": "a"},
-            {"assay_class": "ATAC", "group": "b"},
-            {"assay_class": "ATAC", "group": "c"},
+            {"assay_class": "ATAC", "group": "a", **_SQUASH_CLIP},
+            {"assay_class": "ATAC", "group": "b", **_SQUASH_CLIP},
+            {"assay_class": "ATAC", "group": "c", **_SQUASH_CLIP},
         ]
         loss_cfg = {"name": "mse", "contrast_weight": 1.0}
         torch.manual_seed(1)
@@ -597,9 +694,9 @@ class TestBuildCollateAndLoss:
         """Compressed-but-correlated predictions cost nothing under the correlation term
         alone, and are penalised once contrast_magnitude_weight is set."""
         records = [
-            {"assay_class": "ATAC", "group": "a"},
-            {"assay_class": "ATAC", "group": "b"},
-            {"assay_class": "ATAC", "group": "c"},
+            {"assay_class": "ATAC", "group": "a", **_SQUASH_CLIP},
+            {"assay_class": "ATAC", "group": "b", **_SQUASH_CLIP},
+            {"assay_class": "ATAC", "group": "c", **_SQUASH_CLIP},
         ]
         trainer_cfg = {"contrast_region_bins": 2, "contrast_active_fraction": 1.0}
         torch.manual_seed(0)

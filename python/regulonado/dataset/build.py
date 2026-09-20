@@ -1291,19 +1291,42 @@ def transform_signal(
 
 
 def count_labels(
-    signal: np.ndarray, count_factors: np.ndarray, *, keep_missing: bool = True
+    signal: np.ndarray,
+    count_factors: np.ndarray,
+    *,
+    clip_hard: np.ndarray | float | None = None,
+    keep_missing: bool = True,
 ) -> np.ndarray:
     """Convert stored mean-coverage signal ``(T, L)`` to count units, per track.
 
-    No background subtraction, clipping or squashing: the ``data.label_space: counts``
-    path (see ``regulonado.training.label_space``). Negative and infinite values are
-    zeroed; missing bins (NaN) stay NaN when ``keep_missing``, else become 0.0.
+    No background subtraction or squashing: the ``data.label_space: counts`` path
+    (see ``regulonado.training.label_space``). Order: zero negatives -> multiply by
+    ``count_factors`` -> apply ``clip_hard`` (if given) as an absolute ceiling.
+    Negative and infinite values are zeroed; missing bins (NaN) stay NaN when
+    ``keep_missing``, else become 0.0.
+
+    ``clip_hard``: per-track hard ceiling in STORED MEAN-COVERAGE units (i.e.
+    ``tracks.parquet``'s ``clip_hard_counts`` field — the BigWig's own unit, same as
+    ``signal`` before the ``count_factors`` multiply). Converted into count-label
+    units by multiplying by ``count_factors`` (exact: a quantile-derived threshold
+    commutes with the same positive linear scaling applied to the signal it was
+    computed from), then applied as a ceiling. ``None`` disables clipping.
+
+    No soft clip: ``transform_signal``'s soft clip is a sqrt compression defined only
+    in squashed space, which this counts path never enters, so there is nothing for
+    a "soft clip" to mean here. ``clip_soft_counts`` is stored in ``tracks.parquet``
+    for completeness (and possible future use) but this function does not apply it —
+    do not invent a compression for it.
     """
     out = np.asarray(signal, dtype=np.float32).copy()
     missing = np.isnan(out)
     np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
     np.maximum(out, 0.0, out=out)
-    out *= np.asarray(count_factors, dtype=np.float32).reshape(-1, 1)
+    cf = np.asarray(count_factors, dtype=np.float32).reshape(-1, 1)
+    out *= cf
+    if clip_hard is not None:
+        ceiling = np.broadcast_to(np.asarray(clip_hard, dtype=np.float32), (out.shape[0],))
+        np.minimum(out, ceiling.reshape(-1, 1) * cf, out=out)
     if keep_missing and missing.any():
         out[missing] = np.nan
     return out
@@ -1383,7 +1406,9 @@ def make_transform(
         2. RC augmentation    (if enable_rc_aug)
         3. Signal transform   (scale → squash → clip) for ``label_space="transformed"``;
            conversion to count units (``count_labels``) for ``label_space="counts"``,
-           which ignores the scale/clip/squash/background arguments
+           which ignores the scale/squash/background arguments and applies only
+           ``clip_hard`` (converted to count-label units), gated on ``apply_clip`` —
+           ``clip_soft`` has no meaning off the squash path and is never applied here
 
     Writes ``input_ids`` (uint8 tokens; one-hot encoding happens on the GPU in
     ``RegulonadoModel.forward``) and ``labels`` (float32) into the example.
@@ -1445,7 +1470,9 @@ def make_transform(
 
         example["input_ids"] = seq.astype(np.uint8, copy=False)
         if label_space == "counts":
-            example["labels"] = count_labels(sig, _cf, keep_missing=mask_missing)
+            example["labels"] = count_labels(
+                sig, _cf, clip_hard=_ch if apply_clip else None, keep_missing=mask_missing
+            )
         else:
             example["labels"] = transform_signal(
                 sig,

@@ -6,6 +6,10 @@
  ``sum_stat``/``strand_pair`` have no ReguloNado equivalent: every row gets                         
  ``sum`` and self-pairs (``strand_pair == index``).                                                 
                                                                                                     
+ Borzoi's ``clip``/``clip_soft`` columns are raw-count, pre-squash thresholds, so                   
+ this always reads the ``_squash`` clip family regardless of which scaling method                   
+ actually produced the track table (anchor-scaled tracks have no equivalent here).                  
+                                                                                                    
 ╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
 │ *    track_table      PATH  [required]                                                           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

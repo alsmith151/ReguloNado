@@ -66,9 +66,78 @@ def test_missing_status_value_raises():
 
 
 def test_scaling_columns_must_be_present_or_absent_together():
-    df = _table(scale_factor=[1.0, None, None], scale_clip_soft=[None, None, None])
+    # Row 0's squash pair disagrees (soft null, hard populated) -> must raise.
+    df = _table(
+        scale_factor=[1.0, None, None],
+        scale_clip_soft_squash=[None, None, None],
+        scale_clip_hard_squash=[6.0, None, None],
+    )
     with pytest.raises(ValueError):
         validate_track_table(df)
+
+
+def test_a_populated_clip_family_requires_scale_factor():
+    # Squash pair populated but scale_factor missing on that row -> must raise.
+    df = _table(
+        scale_factor=[None, None, None],
+        scale_clip_soft_squash=[4.0, None, None],
+        scale_clip_hard_squash=[6.0, None, None],
+    )
+    with pytest.raises(ValueError):
+        validate_track_table(df)
+
+
+def test_scale_factor_alone_does_not_require_either_clip_family():
+    # scale_factor populated with NEITHER clip family populated is fine: the anchor
+    # and squash families are mutually exclusive alternatives, not both-required.
+    df = _table(
+        scale_factor=[1.0, 2.0, None],
+        scale_clip_soft_squash=[None, None, None],
+        scale_clip_hard_squash=[None, None, None],
+    )
+    validate_track_table(df)  # does not raise
+
+
+def test_counts_clip_columns_are_independent_of_scale_factor():
+    """scale_clip_*_counts is QC-derived, not tied to scale_factor at all."""
+    df = _table(
+        scale_factor=[None, None, None],
+        scale_clip_soft_counts=[1.0, 2.0, 3.0],
+        scale_clip_hard_counts=[10.0, 20.0, 30.0],
+    )
+    validate_track_table(df)  # does not raise
+
+
+def test_counts_clip_columns_must_be_present_or_absent_together():
+    df = _table(scale_clip_soft_counts=[1.0, None, None], scale_clip_hard_counts=[None, None, None])
+    with pytest.raises(ValueError):
+        validate_track_table(df)
+
+
+def test_new_clip_columns_round_trip_and_strip_scale_prefix(tmp_path):
+    """The three clip-unit families survive a write/read round trip and to_track_records
+    strips their 'scale_' prefix, same as the other scale_* fields (tracks_table.py:229ish)."""
+    df = _table(
+        scale_factor=[1.0, None, None],
+        scale_clip_soft_anchor=[10.0, None, None],
+        scale_clip_hard_anchor=[20.0, None, None],
+        scale_clip_soft_counts=[3.0, 4.0, None],
+        scale_clip_hard_counts=[30.0, 40.0, None],
+    )
+    path = tmp_path / "tracks.parquet"
+    write_track_table(df, path, scaling_method="anchor")
+    back = read_track_table(path)
+    assert back.attrs["scaling_method"] == "anchor"
+
+    records = to_track_records(back)
+    assert records[0]["clip_soft_anchor"] == 10.0
+    assert records[0]["clip_hard_anchor"] == 20.0
+    assert records[0]["clip_soft_counts"] == 3.0
+    assert records[0]["clip_hard_counts"] == 30.0
+    # Track "b" has no anchor clip values (None above), so to_track_records omits
+    # the field entirely rather than inventing a null/NaN entry.
+    assert "clip_soft_anchor" not in records[1]
+    assert records[1]["clip_soft_counts"] == 4.0
 
 
 def test_schema_version_mismatch_fails_loudly(tmp_path):

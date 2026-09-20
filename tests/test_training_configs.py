@@ -274,10 +274,11 @@ def test_selected_lora_locon_config_resolves_adapter_settings() -> None:
     assert resolved["trainer"]["adapter"]["locon_conv_blocks"] == 4
     assert resolved["trainer"]["lora_learning_rate"] == pytest.approx(1e-4)
     assert resolved["trainer"]["greater_is_better"] is True
-    # Anchor-scaled datasets store clip thresholds in anchor units (clip_soft 10 /
-    # clip_hard 20). label_space: counts ignores apply_* entirely, but they are pinned
-    # false so switching to label_space: transformed cannot silently apply anchor-unit
-    # ceilings to raw counts.
+    # label_space: counts ignores apply_scale/apply_squash entirely and applies only
+    # a (converted) hard clip when apply_clip; all three are pinned false here so the
+    # intent is explicit. tracks.parquet now keeps anchor/squash/counts clip
+    # thresholds in separate column families, so a later switch to label_space:
+    # transformed picks up the matching (anchor-unit) pair on its own.
     assert resolved["data"]["label_space"] == "counts"
     assert resolved["data"]["apply_squash"] is False
     assert resolved["data"]["apply_clip"] is False

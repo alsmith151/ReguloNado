@@ -69,12 +69,13 @@ train:
   common:
     data:
       # Raw-count labels with a per-track anchor exposure. Under label_space: counts the
-      # labels go through count_labels(), which never scales, background-subtracts, clips
-      # or squashes — so apply_scale/apply_clip/apply_squash are ignored on this path.
-      # They are pinned false anyway so the intent is explicit and a later switch to
-      # label_space: transformed cannot silently re-enable them: the stored clip
-      # thresholds (clip_soft 10 / clip_hard 20) are in ANCHOR units and would be far
-      # below raw count magnitudes.
+      # labels go through count_labels(), which never scales, background-subtracts or
+      # squashes, and applies only a hard clip (in clip_soft_counts/clip_hard_counts
+      # units, gated on apply_clip) — apply_scale/apply_squash are ignored on this path
+      # regardless, and apply_clip is pinned false here so intent is explicit. A later
+      # switch to label_space: transformed picks up tracks.parquet's clip_soft_anchor/
+      # clip_hard_anchor pair instead (this dataset's scaling_method is anchor), so
+      # there is no wrong-unit ceiling to worry about either way.
       label_space: counts
       count_unit: fragments
       exposure: anchor

@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-from regulonado.dataset.build import make_transform, transform_signal
+from regulonado.dataset.build import count_labels, make_transform, transform_signal
 from regulonado.training.label_space import resolve_count_label_space, validate_label_space
 from regulonado.training.losses import (
     contrast_group_weights,
@@ -121,12 +121,13 @@ def _example(signal: np.ndarray) -> dict:
     return {"sequence_tokens": np.zeros(8, dtype=np.uint8), "signal": signal}
 
 
-def _counts_transform(**kwargs):
+def _counts_transform(*, clip_hard=1.0, apply_clip=False, **kwargs):
     return make_transform(
-        np.array([0.5, 0.5], dtype=np.float32),  # scale/clip/background must be ignored
-        1.0,
-        1.0,
+        np.array([0.5, 0.5], dtype=np.float32),  # scale/squash/background must be ignored
+        1.0,  # clip_soft: also always ignored on the counts path (no squash space)
+        clip_hard,
         np.array([100.0, 100.0], dtype=np.float32),
+        apply_clip=apply_clip,
         context_length=8,
         n_pred_bins=4,
         bin_size=2,
@@ -137,6 +138,8 @@ def _counts_transform(**kwargs):
 
 
 def test_counts_transform_only_converts_units_and_keeps_missing():
+    """apply_clip=False (the default here): scale/squash/background/clip all ignored,
+    only the count_factors multiply happens."""
     signal = np.array([[1.0, np.nan, 50.0, -1.0], [0.0, 2.0, 4.0, np.nan]], dtype=np.float32)
     labels = _counts_transform()(_example(signal))["labels"]
     expected = np.array([[2.0, np.nan, 100.0, 0.0], [0.0, 6.0, 12.0, np.nan]], dtype=np.float32)
@@ -153,6 +156,76 @@ def test_counts_transform_zeroes_missing_when_masking_is_off():
 def test_counts_transform_requires_count_factors():
     with pytest.raises(ValueError, match="count_factors"):
         make_transform(np.ones(2), 1.0, 1.0, label_space="counts")
+
+
+def test_counts_transform_applies_hard_clip_converted_to_label_units():
+    # clip_hard=10.0 (stored mean-coverage units) * count_factors [2.0, 3.0] -> ceilings
+    # [20.0, 30.0] in count-label units, applied AFTER the count_factors multiply.
+    signal = np.array([[1.0, 50.0], [0.0, 20.0]], dtype=np.float32)
+    labels = _counts_transform(clip_hard=10.0, apply_clip=True)(_example(signal))["labels"]
+    expected = np.array([[2.0, 20.0], [0.0, 30.0]], dtype=np.float32)
+    np.testing.assert_array_equal(labels, expected)
+
+
+def test_counts_transform_apply_clip_false_disables_clipping():
+    signal = np.array([[50.0, 50.0], [20.0, 20.0]], dtype=np.float32)
+    labels = _counts_transform(clip_hard=10.0, apply_clip=False)(_example(signal))["labels"]
+    expected = np.array([[100.0, 100.0], [60.0, 60.0]], dtype=np.float32)
+    np.testing.assert_array_equal(labels, expected)
+
+
+def test_counts_transform_never_applies_soft_clip():
+    # clip_soft is fixed at 1.0 (far below the signal) in _counts_transform; if it were
+    # applied (even without a squash) it would compress these values. clip_hard is set
+    # far above the signal so only a soft-clip bug could change the output.
+    signal = np.array([[500.0, 500.0]], dtype=np.float32)
+    labels = make_transform(
+        np.array([0.5], dtype=np.float32),
+        1.0,
+        1e9,
+        apply_clip=True,
+        context_length=8,
+        n_pred_bins=2,
+        bin_size=4,
+        label_space="counts",
+        count_factors=np.array([2.0], dtype=np.float32),
+    )(_example(signal))["labels"]
+    np.testing.assert_array_equal(labels, np.array([[1000.0, 1000.0]], dtype=np.float32))
+
+
+# ---------------------------------------------------------------------------
+# count_labels: order (zero -> scale -> hard clip only), converted units
+# ---------------------------------------------------------------------------
+
+
+def test_count_labels_without_clip_hard_only_scales():
+    signal = np.array([[1.0, -1.0, 50.0]], dtype=np.float32)
+    out = count_labels(signal, np.array([2.0], dtype=np.float32))
+    np.testing.assert_array_equal(out, np.array([[2.0, 0.0, 100.0]], dtype=np.float32))
+
+
+def test_count_labels_hard_clip_is_threshold_times_count_factor():
+    # clip_hard=10 (stored mean-coverage units) * count_factor=3 -> ceiling 30, applied
+    # AFTER the count_factor multiply (order: zero negatives -> scale -> clip).
+    signal = np.array([[1.0, 5.0, 20.0]], dtype=np.float32)
+    out = count_labels(signal, np.array([3.0], dtype=np.float32), clip_hard=10.0)
+    np.testing.assert_array_equal(out, np.array([[3.0, 15.0, 30.0]], dtype=np.float32))
+
+
+def test_count_labels_clip_hard_none_disables_clipping():
+    signal = np.array([[20.0]], dtype=np.float32)
+    out = count_labels(signal, np.array([3.0], dtype=np.float32), clip_hard=None)
+    np.testing.assert_array_equal(out, np.array([[60.0]], dtype=np.float32))
+
+
+def test_count_labels_per_track_clip_hard():
+    signal = np.array([[100.0], [100.0]], dtype=np.float32)
+    out = count_labels(
+        signal,
+        np.array([1.0, 1.0], dtype=np.float32),
+        clip_hard=np.array([10.0, 1000.0], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(out, np.array([[10.0], [100.0]], dtype=np.float32))
 
 
 @pytest.mark.parametrize("keep_missing", [False, True])

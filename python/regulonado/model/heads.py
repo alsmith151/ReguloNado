@@ -20,8 +20,15 @@ _CONDITION_COLLAPSE_IGNORED_FIELDS = {
     "display_name",
     "scale_factor",
     "scale_factors",
-    "clip_hard",
-    "clip_soft",
+    # Three unit-specific clip families (tracks_table.py's "Clip thresholds" note) —
+    # per-track technical fields, never condition metadata, same as the old bare
+    # clip_hard/clip_soft they replace.
+    "clip_hard_counts",
+    "clip_soft_counts",
+    "clip_hard_anchor",
+    "clip_soft_anchor",
+    "clip_hard_squash",
+    "clip_soft_squash",
     # Per-file/per-track technical fields, not condition metadata. Near-unique per
     # track, so leaving them in the fallback candidate set collapses base-channel
     # sharing to a no-op (every track ends up in its own singleton group).

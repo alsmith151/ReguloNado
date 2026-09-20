@@ -405,30 +405,83 @@ def constant_track_metadata(
 
 def resolve_scale_and_clip(
     records: Sequence[Mapping[str, Any]],
+    *,
+    label_space: str,
+    scaling_method: str | None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Extract scale factors and clipping thresholds from track records.
 
-    Retrieves per-track normalization and clipping parameters from dataset
-    metadata. Uses default values if fields are missing: 1.0 for scale,
-    348.0 for soft clip, 796.0 for hard clip.
+    ``tracks.parquet`` stores clip thresholds in three unit-specific column families
+    (see its module docstring's "Clip thresholds" note), because the unit a track's
+    stored signal ends up in depends on how it is read, not just on the track:
+
+    - ``label_space == "counts"``: ``clip_soft_counts``/``clip_hard_counts``, in
+      stored mean-coverage units.
+    - ``label_space == "transformed"`` with ``scaling_method == "anchor"``:
+      ``clip_soft_anchor``/``clip_hard_anchor``, in anchor units.
+    - ``label_space == "transformed"`` with any other ``scaling_method``:
+      ``clip_soft_squash``/``clip_hard_squash``, in raw-count units pre-squash.
+
+    There is deliberately no numeric fallback for a missing pair (e.g. the historical
+    348.0/796.0 Borzoi raw-count defaults): silently clipping anchor-unit or
+    count-unit data at a raw-count magic number is exactly the wrong-unit failure
+    this column split exists to prevent, so a missing pair raises instead.
+
+    ``scale_factor`` (default 1.0) and ``background`` (default 0.0) are unit-agnostic
+    identities, so they keep a harmless fallback for tracks that were never scaled.
 
     Parameters
     ----------
     records : Sequence[Mapping[str, Any]]
         Track record list from dataset metadata.
+    label_space : str
+        The active ``data.label_space`` ("counts" or "transformed").
+    scaling_method : str | None
+        ``tracks.parquet``'s run-level ``scaling_method`` attr (``metadata
+        ["scaling_method"]``), or ``None`` if the table predates that attr.
 
     Returns
     -------
-    tuple[np.ndarray, np.ndarray, np.ndarray]
-        Three float32 arrays of shape [n_tracks]:
-        - scale_factors: per-track normalization factor (default 1.0)
-        - clip_soft: soft clipping threshold (default 348.0)
-        - clip_hard: hard clipping threshold (default 796.0)
+    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        Four float32 arrays of shape [n_tracks]: scale_factors, clip_soft, clip_hard,
+        background.
+
+    Raises
+    ------
+    ValueError
+        If any record is missing the clip column pair for the active space.
     """
     scale_factors = _track_array(records, "scale_factor", dtype=np.float32, fill_value=1.0)
-    clip_soft = _track_array(records, "clip_soft", dtype=np.float32, fill_value=348.0)
-    clip_hard = _track_array(records, "clip_hard", dtype=np.float32, fill_value=796.0)
     background = _track_array(records, "background", dtype=np.float32, fill_value=0.0)
+
+    if label_space == "counts":
+        soft_key, hard_key = "clip_soft_counts", "clip_hard_counts"
+    elif label_space == "transformed":
+        if scaling_method == "anchor":
+            soft_key, hard_key = "clip_soft_anchor", "clip_hard_anchor"
+        else:
+            soft_key, hard_key = "clip_soft_squash", "clip_hard_squash"
+    else:
+        raise ValueError(f"label_space must be 'counts' or 'transformed', got {label_space!r}")
+
+    # Absent, null and NaN are all treated as "not populated". The column families are
+    # nullable by design (scaling_columns_present_together lets a family be all-null when
+    # a different method populated another one), so a present-but-null value is the
+    # expected shape of "QC has not run yet" — and it is the dangerous one: it would
+    # otherwise fall through to a 0.0 ceiling and silently zero every label for that
+    # track, or to NaN and poison the loss.
+    clip_soft = _track_array(records, soft_key, dtype=np.float32, fill_value=np.nan)
+    clip_hard = _track_array(records, hard_key, dtype=np.float32, fill_value=np.nan)
+    unpopulated = ~(np.isfinite(clip_soft) & np.isfinite(clip_hard))
+    if unpopulated.any():
+        names = [records[i].get("track_name", i) for i in np.flatnonzero(unpopulated).tolist()]
+        raise ValueError(
+            f"{len(names)} track record(s) have no usable {soft_key!r}/{hard_key!r} "
+            f"(label_space={label_space!r}, scaling_method={scaling_method!r}): "
+            f"{names[:10]}. Rebuild tracks.parquet with the scaling/QC step that "
+            "populates this clip family (regulonado normalization ... / regulonado "
+            "tracks qc --check interval_signal) before training."
+        )
     return scale_factors, clip_soft, clip_hard, background
 
 
@@ -509,7 +562,11 @@ def group_contrast_unit_factors(
             "trainer.group_contrast_background must be 'subtract' or 'scale-only', got "
             f"{background_mode!r}"
         )
-    scale_factors, _, _, background = resolve_scale_and_clip(records)
+    # scale_factor/background only -- no clip threshold needed here, so this reads
+    # the track records directly rather than going through resolve_scale_and_clip
+    # (which would otherwise demand a clip-column family the caller never uses).
+    scale_factors = _track_array(records, "scale_factor", dtype=np.float32, fill_value=1.0)
+    background = _track_array(records, "background", dtype=np.float32, fill_value=0.0)
     exposure = count_space.exposure.astype(np.float64)
     count_factors = count_space.count_factors.astype(np.float64)
     sf = scale_factors.astype(np.float64)
@@ -1025,9 +1082,12 @@ def _apply_dataset_transforms(
     data_cfg: Mapping[str, Any],
     count_space: CountLabelSpace | None = None,
 ) -> Mapping[str, Any]:
-    scale_factors, clip_soft, clip_hard, background = resolve_scale_and_clip(records)
+    label_space = "counts" if count_space is not None else "transformed"
+    scale_factors, clip_soft, clip_hard, background = resolve_scale_and_clip(
+        records, label_space=label_space, scaling_method=metadata.get("scaling_method")
+    )
     label_space_kwargs: dict[str, Any] = {
-        "label_space": "counts" if count_space is not None else "transformed",
+        "label_space": label_space,
         "count_factors": None if count_space is None else count_space.count_factors,
         "mask_missing": bool(data_cfg.get("mask_missing", True)),
     }
@@ -2127,6 +2187,7 @@ def _build_collate_and_loss(
     records: Sequence[Mapping[str, Any]],
     model: torch.nn.Module | None = None,
     count_space: CountLabelSpace | None = None,
+    scaling_method: str | None = None,
 ) -> tuple[
     Callable[[list[dict[str, Any]]], dict[str, torch.Tensor]],
     Callable[[torch.Tensor, torch.Tensor, torch.Tensor | None], torch.Tensor],
@@ -2137,6 +2198,12 @@ def _build_collate_and_loss(
 
     The scale factors and background arrays are also needed later by the eval-plot
     callback, so they are returned alongside the loss function rather than recomputed.
+
+    ``scaling_method`` (``metadata["scaling_method"]``, ``None`` if the track table
+    predates that attr) selects which clip-column family ``resolve_scale_and_clip``
+    reads for the loss-time ``clip_hard`` ceiling; label space is inferred from
+    ``count_space`` (``"counts"`` if given, else ``"transformed"``), matching
+    ``_apply_dataset_transforms``.
 
     When ``cfg["loss"]["learn_track_weights"]`` is set, a learnable per-track
     log-variance parameter (Kendall et al. uncertainty weighting) is registered on
@@ -2154,7 +2221,11 @@ def _build_collate_and_loss(
     )
     collate_fn = _build_collate_fn(track_metadata_tensors)
 
-    scale_factors, _, clip_hard, background = resolve_scale_and_clip(records)
+    scale_factors, _, clip_hard, background = resolve_scale_and_clip(
+        records,
+        label_space="counts" if count_space is not None else "transformed",
+        scaling_method=scaling_method,
+    )
     labels_already_scaled = bool(
         cfg["data"].get("apply_scale", True)
         or cfg["data"].get("apply_squash", True)
@@ -2515,7 +2586,7 @@ def run_training(
 
     model = _build_model_with_logging(cfg, metadata, records, adapter_builder, rank=rank)
     collate_fn, loss_fn, scale_factors, background = _build_collate_and_loss(
-        cfg, records, model, count_space=count_space
+        cfg, records, model, count_space=count_space, scaling_method=metadata.get("scaling_method")
     )
 
     output_dir = Path(str(cfg.get("output_dir") or Path.cwd() / "outputs"))

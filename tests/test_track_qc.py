@@ -64,6 +64,29 @@ def test_interval_signal_stats_nonzero_fraction_and_dynamic_range():
     assert stats[1]["qc_nonzero_bin_fraction"] == pytest.approx(1.0)
 
 
+def test_interval_clip_quantiles_are_in_stored_coverage_units_and_ordered():
+    rng = np.random.default_rng(0)
+    # Two tracks, 2000 regions each, so the tail quantiles are well-defined.
+    means = rng.exponential(scale=[1.0, 5.0], size=(2000, 2))
+    stats = qc.interval_clip_quantiles(means)
+    for i in range(2):
+        soft = stats[i]["scale_clip_soft_counts"]
+        hard = stats[i]["scale_clip_hard_counts"]
+        # Hard (q=0.9999) sits further into the tail than soft (q=0.999).
+        assert hard > soft > 0
+        # Directly in the column's own units (no scale_factor applied), matching a
+        # quantile computed straight from the interval-mean matrix.
+        assert soft == pytest.approx(np.quantile(means[:, i], 0.999))
+        assert hard == pytest.approx(np.quantile(means[:, i], 0.9999))
+
+
+def test_interval_clip_quantiles_respects_custom_quantiles():
+    means = np.linspace(0.0, 100.0, 1001).reshape(-1, 1)
+    stats = qc.interval_clip_quantiles(means, soft_q=0.5, hard_q=0.9)
+    assert stats[0]["scale_clip_soft_counts"] == pytest.approx(50.0, abs=0.5)
+    assert stats[0]["scale_clip_hard_counts"] == pytest.approx(90.0, abs=0.5)
+
+
 def test_evaluate_rules_min_and_max_thresholds():
     df = pd.DataFrame(
         {

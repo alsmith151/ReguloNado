@@ -418,12 +418,62 @@ def test_attach_adapters_marks_only_lora_params_trainable():
     assert all("lora_" in name for name in trainable_names)
 
     base_weight_names = {
-        name
-        for name, parameter in model.backbone.named_parameters()
-        if not parameter.requires_grad
+        name for name, parameter in model.backbone.named_parameters() if not parameter.requires_grad
     }
     assert base_weight_names
     assert all("lora_" not in name for name in base_weight_names)
+
+
+def test_attach_adapters_leaves_the_head_trainable_and_updated():
+    """The prediction head must stay trainable when adapters are attached.
+
+    ``LoraModel`` is handed ``model.backbone.model``, so peft's
+    mark-only-adapters-as-trainable pass never walks ``model.head`` — but nothing
+    downstream re-checks that, and a head frozen by accident would train silently
+    to no effect. Asserts the head is trainable, is routed to the ``head``
+    optimizer group at ``learning_rate`` (not the backbone group, which presets
+    set as low as 5e-8), and actually moves under an optimizer step.
+    """
+    model = RegulonadoModel(
+        backbone=BorzoiBackboneAdapter(DummyBorzoiLoconModule()),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
+    )
+    model.apply_freeze_policy(FreezePolicy(freeze_backbone=True))
+    attach_adapters(model, AdapterConfig(locon_conv_blocks=4))
+
+    assert all(parameter.requires_grad for parameter in model.head.parameters())
+
+    cfg = TrainerConfig(
+        learning_rate=1e-2,
+        backbone_learning_rate=5e-8,
+        lora_learning_rate=1e-3,
+    )
+    optimizer = _build_optimizer(model, cfg)
+
+    head_ids = {id(parameter) for parameter in model.head.parameters()}
+    routed = {
+        id(parameter)
+        for group in optimizer.param_groups
+        if group.get("name") == "head"
+        for parameter in group["params"]
+        if id(parameter) in head_ids
+    }
+    assert routed == head_ids
+    assert all(
+        group["lr"] == pytest.approx(1e-2)
+        for group in optimizer.param_groups
+        if group.get("name") == "head"
+    )
+
+    before = {name: parameter.detach().clone() for name, parameter in model.head.named_parameters()}
+    model.head(torch.randn(2, 8, 16)).sum().backward()
+    optimizer.step()
+    unchanged = [
+        name
+        for name, parameter in model.head.named_parameters()
+        if torch.equal(parameter.detach(), before[name])
+    ]
+    assert not unchanged
 
 
 def test_merge_adapters_round_trips_output_and_drops_lora_state():
@@ -768,6 +818,10 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
                     "group": groups,
                     "assay": ["atac", "atac"],
                     "scale_factor": scale_factors,
+                    # apply_clip: false below, but resolve_scale_and_clip still needs
+                    # this space's clip pair to exist (no wrong-unit fallback).
+                    "scale_clip_soft_squash": [348.0, 348.0],
+                    "scale_clip_hard_squash": [796.0, 796.0],
                 }
             ),
             path,
@@ -923,6 +977,10 @@ def test_run_training_entrypoint_with_lora_locon_adapters_merges_on_save(tmp_pat
                     "group": groups,
                     "assay": ["atac", "atac"],
                     "scale_factor": scale_factors,
+                    # apply_clip: false below, but resolve_scale_and_clip still needs
+                    # this space's clip pair to exist (no wrong-unit fallback).
+                    "scale_clip_soft_squash": [348.0, 348.0],
+                    "scale_clip_hard_squash": [796.0, 796.0],
                 }
             ),
             path,

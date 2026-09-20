@@ -146,8 +146,11 @@ def test_tracks_assemble_joins_scale_factors_by_track_name(tmp_path):
             "track_index": [0, 1],
             "track_name": ["a", "b"],
             "scale_factor": [2.0, 3.0],
-            "clip_soft": [4.0, 5.0],
-            "clip_hard": [6.0, 7.0],
+            # Bare names, mimicking a non-anchor scale_factors.parquet (e.g. from
+            # 'normalization original'): assemble renames these to the "squash"
+            # clip family (raw-count units, pre-squash).
+            "clip_soft_squash": [4.0, 5.0],
+            "clip_hard_squash": [6.0, 7.0],
         }
     ).to_parquet(factors, index=False)
     output = tmp_path / "tracks.parquet"
@@ -161,7 +164,7 @@ def test_tracks_assemble_joins_scale_factors_by_track_name(tmp_path):
     table = read_track_table(output)
     row_b = table.set_index("track_name").loc["b"]
     assert table.set_index("track_name").loc["a", "scale_factor"] == 2.0
-    assert row_b["scale_clip_hard"] == 7.0
+    assert row_b["scale_clip_hard_squash"] == 7.0
 
 
 # --------------------------------------------------------------------------- #

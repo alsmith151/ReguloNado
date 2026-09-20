@@ -10,6 +10,19 @@ Column prefixes namespace a wide table: ``fp_`` fingerprint, ``scale_``
 scaling, ``qc_`` QC. Identity/annotation/dedupe columns keep bare names.
 ``track_name`` is the join key everywhere; ``track_index`` is positional and
 renumbers under filtering.
+
+Clip thresholds: a track's stored signal can be read in one of three unit spaces
+depending on ``data.label_space``/scaling method, so there are three clip-threshold
+column families rather than one ambiguous pair (see ``training.runner.
+resolve_scale_and_clip``, which picks between them):
+
+- ``scale_clip_soft_counts``/``scale_clip_hard_counts`` — stored mean-coverage units
+  (the BigWig's own unit); QC-derived interval-mean quantiles, independent of
+  ``data.count_unit`` and of which scaling method (if any) ran.
+- ``scale_clip_soft_anchor``/``scale_clip_hard_anchor`` — anchor units (1.0 ==
+  housekeeping-promoter level); populated only by the anchor scaling method.
+- ``scale_clip_soft_squash``/``scale_clip_hard_squash`` — raw-count units, pre-squash;
+  populated by every other scaling method.
 """
 
 from __future__ import annotations
@@ -73,20 +86,49 @@ class TrackTableSchema(pa.DataFrameModel):
 
     @pa.dataframe_check
     def scaling_columns_present_together(cls, df: pd.DataFrame) -> Series[bool]:
-        """Per row, the core scaling columns are all null or all non-null.
+        """Per row and per clip-unit family: soft/hard agree, and a populated family
+        implies ``scale_factor`` is populated too (not the reverse).
 
-        ``scale_background`` is excluded: it is only ever populated by the
+        Three independent clip families, one per unit space a track's stored signal
+        might be read in (see the module docstring's "Clip thresholds" note):
+
+        - ``scale_clip_soft_anchor``/``scale_clip_hard_anchor`` (anchor units):
+          populated only by the anchor scaling method.
+        - ``scale_clip_soft_squash``/``scale_clip_hard_squash`` (raw-count units,
+          pre-squash): populated by every other scaling method.
+        - ``scale_clip_soft_counts``/``scale_clip_hard_counts`` (stored mean-coverage
+          units): checked only against each other, *not* ``scale_factor`` — these
+          come from a QC run's interval-quantile computation, independent of which
+          (if any) scaling method ran, and ``label_space: counts`` has no
+          "scale factor" concept at all.
+
+        ``scale_factor`` is shared by the anchor and squash families (exactly one of
+        the two is populated alongside it, depending on which scaling method ran), so
+        the check cannot be symmetric the way it is for a single family: "scale_factor
+        present" does not imply either family is present, only the other way round.
+        ``scale_background`` is excluded entirely: it is only ever populated by the
         anchor method, so it is legitimately absent even when a track has a
-        ``scale_factor``/``scale_clip_soft``/``scale_clip_hard`` triple from
-        one of the other four scaling methods.
+        ``scale_factor``/anchor-clip triple.
         """
-        core_cols = [
-            c for c in ("scale_factor", "scale_clip_soft", "scale_clip_hard") if c in df.columns
-        ]
-        if not core_cols:
-            return pd.Series(True, index=df.index)
-        is_null = df[core_cols].isna()
-        return is_null.all(axis=1) | (~is_null).all(axis=1)
+        # Not symmetric: scale_factor is shared by both the anchor and squash families
+        # (whichever scaling method ran populates scale_factor plus exactly one of the
+        # two), so "scale_factor present" cannot imply "this family present" -- only
+        # "this family present" implies "scale_factor present".
+        ok = pd.Series(True, index=df.index)
+        for suffix in ("anchor", "squash"):
+            soft_col, hard_col = f"scale_clip_soft_{suffix}", f"scale_clip_hard_{suffix}"
+            if soft_col not in df.columns or hard_col not in df.columns:
+                continue
+            soft_null = df[soft_col].isna()
+            hard_null = df[hard_col].isna()
+            ok &= soft_null == hard_null  # soft/hard of one family always agree
+            if "scale_factor" in df.columns:
+                populated = ~soft_null
+                ok &= ~(populated & df["scale_factor"].isna())
+        counts_soft, counts_hard = "scale_clip_soft_counts", "scale_clip_hard_counts"
+        if counts_soft in df.columns and counts_hard in df.columns:
+            ok &= df[counts_soft].isna() == df[counts_hard].isna()
+        return ok
 
 
 def _schema_metadata_dict(df: pd.DataFrame) -> dict[str, Any]:
@@ -226,8 +268,16 @@ def to_track_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     numeric_rename = {
         "scale_factor": "scale_factor",
         "scale_background": "background",
-        "scale_clip_soft": "clip_soft",
-        "scale_clip_hard": "clip_hard",
+        # Three unit-specific clip families (see the module docstring's "Clip
+        # thresholds" note and TrackTableSchema.scaling_columns_present_together) —
+        # training code (runner.resolve_scale_and_clip) picks the one matching the
+        # active label space/scaling method rather than reading one ambiguous pair.
+        "scale_clip_soft_counts": "clip_soft_counts",
+        "scale_clip_hard_counts": "clip_hard_counts",
+        "scale_clip_soft_anchor": "clip_soft_anchor",
+        "scale_clip_hard_anchor": "clip_hard_anchor",
+        "scale_clip_soft_squash": "clip_soft_squash",
+        "scale_clip_hard_squash": "clip_hard_squash",
         "scale_anchor_reference": "anchor_reference",
         "scale_library_size": "library_size",
         "fp_genome_sum": "genome_sum",

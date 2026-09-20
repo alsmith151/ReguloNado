@@ -115,7 +115,7 @@ def calculate_original_scaling(
     df = compute_clip_thresholds(df)
 
     # Put the fields consumed during training first.
-    priority = ["track_index", "track_name", "scale_factor", "clip_soft", "clip_hard"]
+    priority = ["track_index", "track_name", "scale_factor", "clip_soft_squash", "clip_hard_squash"]
     rest = [c for c in df.columns if c not in priority]
     df = df[priority + rest]
 
@@ -366,7 +366,8 @@ def calculate_tmm_scaling(
     if "track_name" not in sf_df.columns:
         sf_df["track_name"] = included["track_name"].to_numpy()
 
-    priority = ["track_index", "track_name", "scale_factor", "tmm_factor", "clip_soft", "clip_hard"]
+    priority = ["track_index", "track_name", "scale_factor", "tmm_factor", "clip_soft_squash",
+                "clip_hard_squash"]
     rest = [c for c in sf_df.columns if c not in priority]
     sf_df = sf_df[priority + rest]
 
@@ -702,8 +703,8 @@ def calculate_bamnado_scaling(
             f"{old_sf:>12.6f}  {float(row['scale_factor']):>12.6f}"
         )
 
-    priority = ["track_index", "track_name", "scale_factor", "bamnado_norm_factor", "clip_soft",
-                "clip_hard"]
+    priority = ["track_index", "track_name", "scale_factor", "bamnado_norm_factor",
+                "clip_soft_squash", "clip_hard_squash"]
     rest = [c for c in sf_df.columns if c not in priority]
     sf_df = sf_df[priority + rest]
 

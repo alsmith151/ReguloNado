@@ -185,6 +185,37 @@ def interval_signal_stats(means: np.ndarray) -> list[dict[str, float]]:
     return out
 
 
+def interval_clip_quantiles(
+    means: np.ndarray, *, soft_q: float = 0.999, hard_q: float = 0.9999
+) -> list[dict[str, float]]:
+    """Per-track soft/hard clip thresholds from the same interval-mean matrix.
+
+    Units: stored mean-coverage units — the BigWig's own unit, exactly what
+    ``track_interval_means`` returns. Deliberately NOT raw counts or anchor units:
+    a quantile of ``mean_coverage`` commutes with any positive linear rescaling, so
+    at train time these thresholds convert exactly into count-label units by
+    multiplying by ``count_factors`` (see ``dataset.build.count_labels``), whatever
+    ``data.count_unit`` happens to be. Feeds ``tracks.parquet``'s
+    ``scale_clip_soft_counts``/``scale_clip_hard_counts`` columns, read by the
+    ``label_space: counts`` training path.
+
+    Defaults (soft=0.999, hard=0.9999) sit far out in the tail, deliberately much
+    tighter than the q99 used elsewhere in this module (``interval_signal_stats``,
+    and ``background_q99`` in ``normalization.anchor_scale_factors``): those are
+    loose quantiles meant to characterise the bulk of a distribution, whereas a
+    clip ceiling should almost never fire on real signal, only on outlier spikes.
+    """
+    out: list[dict[str, float]] = []
+    for column in means.T:
+        out.append(
+            {
+                "scale_clip_soft_counts": float(np.quantile(column, soft_q)),
+                "scale_clip_hard_counts": float(np.quantile(column, hard_q)),
+            }
+        )
+    return out
+
+
 def replicate_concordance_stats(
     means: np.ndarray,
     group_labels: Sequence[str | None],

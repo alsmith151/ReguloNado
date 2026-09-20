@@ -132,8 +132,14 @@ def anchor_scale_factors(
             "track_index": index,
             "scale_factor": sf,
             "background": bg_q50,
-            "clip_soft": clip_soft_anchors,
-            "clip_hard": clip_hard_anchors,
+            # ANCHOR units: 1.0 == housekeeping-promoter level (scale_factor = 1 /
+            # (anchor_ref - bg_q50)), so these are ceilings in the same normalised
+            # space, not raw counts. Renamed (from bare clip_soft/clip_hard) so
+            # tracks.parquet keeps this family distinct from the raw-count/pre-squash
+            # (compute_clip_thresholds) and stored-coverage (QC interval-quantile)
+            # clip families -- see tracks_table.py's module docstring.
+            "clip_soft_anchor": clip_soft_anchors,
+            "clip_hard_anchor": clip_hard_anchors,
             "anchor_reference": anchor_ref,
             "background_q50": bg_q50,
             "background_q99": bg_q99,
@@ -227,16 +233,18 @@ def compute_clip_thresholds(
     soft_reads_per_million: float = 7.0,
     hard_reads_per_million: float = 16.0,
 ) -> pd.DataFrame:
-    """Add ``clip_soft`` and ``clip_hard`` columns to a scale-factors DataFrame.
+    """Add ``clip_soft_squash`` and ``clip_hard_squash`` columns to a scale-factors DataFrame.
 
-    Thresholds are in raw-count space (i.e. after multiplying the BigWig signal
-    by ``scale_factor``).  They scale linearly with ``library_size`` so that the
-    same fraction of the expected signal distribution is preserved regardless of
-    sequencing depth.
+    Thresholds are in RAW-COUNT units, pre-squash (i.e. after multiplying the BigWig
+    signal by ``scale_factor``, before the ``(x+1)^0.75 - 1`` squash transform). They
+    scale linearly with ``library_size`` so that the same fraction of the expected
+    signal distribution is preserved regardless of sequencing depth. Every
+    scaling method except ``anchor`` (original, tmm, seqnado, bamnado) reaches this
+    function, since only ``anchor`` produces its own anchor-unit clip pair.
 
-    The defaults (7 and 16 reads per million) are calibrated against the
-    hardcoded fallbacks used in ``_resolve_scale_and_clip`` (348 / 796), which
-    were tuned empirically for ~50 M-read ChIP-seq libraries:
+    The defaults (7 and 16 reads per million) were tuned empirically for ~50 M-read
+    ChIP-seq libraries, matching the historical hardcoded raw-count fallbacks (348 /
+    796) that this replaces:
         50 × 7  ≈ 350   50 × 16 ≈ 800
 
     Soft clip:  linear below threshold, sqrt-compressed above (in squash space).
@@ -244,8 +252,8 @@ def compute_clip_thresholds(
     """
     df = df.copy()
     lib = df["library_size"].astype(float)
-    df["clip_soft"] = (soft_reads_per_million * lib / 1e6).round(1)
-    df["clip_hard"] = (hard_reads_per_million * lib / 1e6).round(1)
+    df["clip_soft_squash"] = (soft_reads_per_million * lib / 1e6).round(1)
+    df["clip_hard_squash"] = (hard_reads_per_million * lib / 1e6).round(1)
     return df
 
 
