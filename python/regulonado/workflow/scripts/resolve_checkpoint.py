@@ -35,12 +35,21 @@ _CHECKPOINT_RE = re.compile(r"checkpoint-(\d+)")
 
 
 def resolve_checkpoint(run_dir: str | Path) -> Path:
-    """Return the best checkpoint directory inside ``run_dir``.
+    """Return the weights directory to load for a finished training run.
 
-    Prefers the ``best_model_checkpoint`` recorded by the HuggingFace trainer.
-    Falls back to the highest-numbered ``checkpoint-N`` directory when that key
-    is absent or points somewhere that no longer exists — which happens when a
-    run is resumed, or when checkpoints have been pruned by ``save_total_limit``.
+    Prefers ``run_dir`` itself once it holds ``model.safetensors``: that is the
+    final ``trainer.save_model(output_dir)`` write, which happens after
+    ``load_best_model_at_end`` has restored the best checkpoint *and* after PEFT
+    adapters have been merged into the base weights. Intermediate
+    ``checkpoint-N`` directories are written by the still-injected model, so
+    under ``trainer.adapter.enabled`` their keys carry peft's ``base_layer.``/
+    ``lora_`` naming and do not match a plain RegulonadoModel — loading one
+    through ``from_pretrained`` silently leaves every backbone weight at its
+    construction value.
+
+    Falls back to the ``best_model_checkpoint`` recorded by the HuggingFace
+    trainer, then to the highest-numbered ``checkpoint-N`` directory — which is
+    what a still-running or interrupted run offers.
 
     Parameters
     ----------
@@ -68,6 +77,10 @@ def resolve_checkpoint(run_dir: str | Path) -> Path:
     run_dir = Path(run_dir)
     if not run_dir.is_dir():
         raise FileNotFoundError(f"Training run directory does not exist: {run_dir}")
+
+    for name in ("model.safetensors", "pytorch_model.bin"):
+        if (run_dir / name).is_file():
+            return run_dir
 
     state_path = run_dir / "trainer_state.json"
     if state_path.is_file():

@@ -184,6 +184,45 @@ def _find_weights(checkpoint_dir: Path) -> Path:
     )
 
 
+def _assert_checkpoint_keys_matched(checkpoint_dir: Path, loading_info: dict) -> None:
+    """Reject a checkpoint whose weights did not actually land in the model.
+
+    ``from_pretrained`` reports key mismatches and carries on, leaving those weights at
+    their construction values — a silently wrong model that still predicts. The common
+    cause is pointing at an intermediate ``checkpoint-N`` directory of a run trained with
+    ``trainer.adapter.enabled``: those are saved from the still-injected model, so every
+    adapted module is stored under peft's ``base_layer.``/``lora_`` names. Only the run
+    root holds the merged, plainly-keyed weights.
+    """
+    missing = [key for key in loading_info.get("missing_keys") or [] if _key_matters(key)]
+    unexpected = [key for key in loading_info.get("unexpected_keys") or [] if _key_matters(key)]
+    mismatched = list(loading_info.get("mismatched_keys") or [])
+    if not (missing or unexpected or mismatched):
+        return
+    if any("lora_" in key or "base_layer." in key for key in unexpected):
+        raise RuntimeError(
+            f"{checkpoint_dir} holds un-merged PEFT adapter weights (lora_/base_layer keys), "
+            "which cannot be loaded into a plain model. Load the training run root instead: "
+            "that is where adapters are merged into the base weights."
+        )
+    raise RuntimeError(
+        f"Checkpoint {checkpoint_dir} does not match the architecture its config.json "
+        f"describes — missing={missing[:10]}, unexpected={unexpected[:10]}, "
+        f"mismatched={mismatched[:10]}"
+    )
+
+
+def _key_matters(key: str) -> bool:
+    """False for keys whose absence/presence never changes predictions.
+
+    ``num_batches_tracked`` are non-trainable BatchNorm counters; ``track_loss_log_var``
+    is loss state registered only under ``loss.learn_track_weights``, so a checkpoint may
+    legitimately carry or lack it. Mirrors the tolerance in
+    ``training.runner.load_model_weights_only``.
+    """
+    return not key.endswith("num_batches_tracked") and key != "track_loss_log_var"
+
+
 def load_model_for_inference(
     checkpoint_dir: str | Path,
     dataset_dir: str | Path | None = None,
@@ -209,7 +248,10 @@ def load_model_for_inference(
 
     checkpoint_dir = Path(checkpoint_dir)
     if (checkpoint_dir / "config.json").exists():
-        model = RegulonadoModel.from_pretrained(checkpoint_dir)
+        model, loading_info = RegulonadoModel.from_pretrained(
+            checkpoint_dir, output_loading_info=True
+        )
+        _assert_checkpoint_keys_matched(checkpoint_dir, loading_info)
         model.eval()
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"

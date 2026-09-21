@@ -1962,11 +1962,13 @@ class RegulonadoTrainer(Trainer):
         # comparing against self.args.output_dir distinguishes them.
         # load_best_model_at_end=True reloads a checkpoint's state dict into the
         # live, still-injected model, so a merged (unloaded) checkpoint would have
-        # different key names and fail to load. Consequence: intermediate
-        # checkpoint-* dirs are not loadable by inference.py — _find_weights
-        # (inference.py:141-183) prefers the run-root model.safetensors (the merged
-        # one), so the normal path works, but its checkpoint-* fallback would hand
-        # back an un-merged (still peft-wrapped) model.
+        # different key names and fail to load. Consequence: under adapters the
+        # intermediate checkpoint-* dirs carry peft's base_layer./lora_ key names and
+        # are NOT loadable as a plain RegulonadoModel. Two guards keep that from
+        # silently producing wrong predictions: the workflow's resolve_checkpoint
+        # returns this run root once model.safetensors exists, and
+        # inference.load_model_for_inference raises on adapter-keyed weights instead
+        # of letting from_pretrained skip them.
         is_root_save = output_path.resolve() == Path(self.args.output_dir).resolve()
         if (
             is_root_save

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -537,3 +538,73 @@ def test_write_spooled_bigwig_roundtrip(tmp_path):
     bw = pybigtools.open(str(written[0]))
     assert np.asarray(bw.values("chr1", 0, 10))[0] == pytest.approx(1.0)
     assert np.asarray(bw.values("chr2", 0, 10))[0] == pytest.approx(2.0)
+
+
+def test_load_model_for_inference_rejects_unmerged_adapter_checkpoint(tmp_path, monkeypatch):
+    """Intermediate checkpoint-N dirs of an adapter run must fail loudly, not load wrong.
+
+    Under ``trainer.adapter.enabled`` those directories are saved from the still-injected
+    model, so every adapted weight is stored under peft's ``base_layer.``/``lora_`` names.
+    ``from_pretrained`` reports the mismatch and carries on, which used to hand back a model
+    whose backbone was still at its construction values — wrong predictions, no error.
+    """
+    from regulonado.inference import load_model_for_inference
+    from regulonado.model import adapters
+    from safetensors.torch import save_file
+
+    config = RegulonadoConfig(
+        backbone_type="tiny",
+        head_type="transfer_mlp",
+        head_hidden=4,
+        mlp_hidden=4,
+        feature_dim=8,
+        n_tracks=2,
+        context_length=CONTEXT,
+        n_pred_bins=N_PRED_BINS,
+        bin_size=BIN_SIZE,
+        track_names=["alpha", "beta"],
+    )
+    model = RegulonadoModel(
+        config,
+        backbone=TinyBackbone(),
+        head=TransferMLPHead(in_ch=8, hidden=4, n_tracks=2),
+    )
+    checkpoint = tmp_path / "checkpoint-1"
+    model.save_pretrained(checkpoint, safe_serialization=True)
+
+    # Rewrite the state dict the way peft's in-place injection names it.
+    from safetensors.torch import load_file
+
+    state = load_file(str(checkpoint / "model.safetensors"))
+    key = next(k for k in state if k.startswith("backbone.") and k.endswith(".weight"))
+    renamed = {k: v for k, v in state.items() if k != key}
+    renamed[key.replace(".weight", ".base_layer.weight")] = state[key]
+    renamed[key.replace(".weight", ".lora_A.default.weight")] = state[key].clone()
+    save_file(renamed, str(checkpoint / "model.safetensors"))
+
+    monkeypatch.setattr(adapters, "build_backbone_architecture", lambda *_: TinyBackbone())
+    with pytest.raises(RuntimeError, match="un-merged PEFT adapter weights"):
+        load_model_for_inference(checkpoint, device="cpu")
+
+
+def test_resolve_checkpoint_prefers_the_merged_run_root(tmp_path):
+    """The run root's model.safetensors is the merged best model; checkpoints are not."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python" / "regulonado"
+                           / "workflow" / "scripts"))
+    from resolve_checkpoint import resolve_checkpoint
+
+    run_dir = tmp_path / "run"
+    checkpoint = run_dir / "checkpoint-500"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "model.safetensors").write_bytes(b"")
+    (run_dir / "trainer_state.json").write_text(
+        json.dumps({"best_model_checkpoint": str(checkpoint)})
+    )
+
+    # No run-root weights yet (run still in flight): fall back to the best checkpoint.
+    assert resolve_checkpoint(run_dir) == checkpoint
+
+    (run_dir / "model.safetensors").write_bytes(b"")
+    assert resolve_checkpoint(run_dir) == run_dir
