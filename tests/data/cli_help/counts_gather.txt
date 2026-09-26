@@ -3,7 +3,8 @@
                                                                                                     
  Gather ``counts bam``'s per-track cache into one ``RegionCountData`` run.                          
                                                                                                     
- Writes to ``--dataset-dir``.                                                                       
+ Writes to ``--dataset-dir``. Tracks with no finite ``log_size_factor`` (anchor not                 
+ clearing background) are dropped with a warning.                                                   
                                                                                                     
 ╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
 │ *    regions      PATH  Same region set passed to 'counts bam' [required]                        │

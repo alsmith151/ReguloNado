@@ -218,8 +218,10 @@ def gather(
 ) -> None:
     """Gather ``counts bam``'s per-track cache into one ``RegionCountData`` run.
 
-    Writes to ``--dataset-dir``.
+    Writes to ``--dataset-dir``. Tracks with no finite ``log_size_factor`` (anchor not
+    clearing background) are dropped with a warning.
     """
+    import numpy as np
     from regulonado.counts.bam import BamRegionCounter, read_count_tracks
     from regulonado.counts.dataset import RegionCountData
     from regulonado.genomics import read_chrom_sizes
@@ -233,6 +235,29 @@ def gather(
     counts_matrix, track_names, results = counter.gather(out_dir, tracks_frame)
     stats = counter.anchor_stats(results)
     tracks_meta = tracks_frame.join(stats, on="track_name", how="left", maintain_order="left")
+
+    # A track whose anchor windows don't clear background has no size factor, so the count
+    # model can't place it on the common scale: leave it out of the dataset, loudly.
+    scalable = np.isfinite(stats["log_size_factor"].to_numpy())
+    if not scalable.any():
+        typer.echo("No track has a finite log_size_factor; nothing to train on.", err=True)
+        raise typer.Exit(1)
+    if not scalable.all():
+        dropped = stats.filter(~pl.Series(scalable))
+        typer.echo(
+            f"WARNING: dropping {dropped.height} track(s) whose anchor does not clear "
+            "background (no finite log_size_factor):",
+            err=True,
+        )
+        for row in dropped.iter_rows(named=True):
+            typer.echo(
+                f"  {row['track_name']}: count_scale_low={row['count_scale_low']:.4g} "
+                f"count_scale_high={row['count_scale_high']:.4g}",
+                err=True,
+            )
+        counts_matrix = counts_matrix[:, scalable]
+        track_names = [name for name, keep in zip(track_names, scalable, strict=True) if keep]
+        tracks_meta = tracks_meta.filter(pl.Series(scalable))
 
     data = RegionCountData.from_arrays(counter.regions, counts_matrix, track_names, tracks_meta)
     written = data.write(dataset_dir)

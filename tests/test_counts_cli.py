@@ -180,10 +180,16 @@ def test_gather_command_assembles_a_region_count_dataset(
     )
     assert result.exit_code == 0, result.output
 
+    # "b" has no reads in the anchor window, so no finite size factor: dropped, with a warning.
+    assert "dropping 1 track(s)" in result.output
+    assert "  b: count_scale_low=" in result.output
+
     data = RegionCountData.read(dataset_dir)
     assert data.n_regions == 1
-    assert data.track_names == ["a", "b"]
-    assert data.counts.tolist() == [[5.0, 0.0]]
+    assert data.track_names == ["a"]
+    assert data.counts.tolist() == [[5.0]]
+    assert data.tracks["track_name"].to_list() == ["a"]
+    assert data.log_size_factors().tolist() == [0.0]
     assert data.regions["split"].to_list() == ["train"]  # chr1 not in --val-chroms
     assert "log_size_factor" in data.tracks.columns
     assert set(data.tracks.columns) >= {"track_name", "assay_class", "group"}
@@ -259,9 +265,13 @@ def test_bam_tracks_discovered_from_a_sheet_count_end_to_end(
         ],
     )
     assert result.exit_code == 0, result.output
+    # hl60_b has no anchor signal, so it is dropped; its 'ATAC-seq' alias still had to
+    # resolve for 'counts bam' to count it.
+    assert "  hl60_b: count_scale_low=" in result.output
     meta = RegionCountData.read(dataset_dir).tracks
-    assert meta["group"].to_list() == ["hl60", "hl60"]
-    assert meta["assay_class"].to_list() == ["ATAC", "ATAC"]
+    assert meta["track_name"].to_list() == ["hl60_a"]
+    assert meta["group"].to_list() == ["hl60"]
+    assert meta["assay_class"].to_list() == ["ATAC"]
 
 
 def test_bam_dir_alone_makes_every_bam_a_track(tmp_path, bam_dir):
