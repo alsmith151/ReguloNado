@@ -62,7 +62,7 @@ rule embed_chrom:
         out_dir=lambda w: str(EMBEDDINGS_DIR / w.cache),
         flags=lambda w: _embed_flags(w.cache),
     output:
-        str(EMBEDDINGS_DIR / "{cache}" / "{chrom}.parquet"),
+        str(EMBEDDINGS_DIR / "{cache}" / "{chrom}.arrow"),
     resources:
         gpu=1,
     wildcard_constraints:
@@ -91,7 +91,7 @@ rule embed_done:
     """
     input:
         chroms=lambda w: expand(
-            str(EMBEDDINGS_DIR / "{cache}" / "{chrom}.parquet"), cache=w.cache, chrom=EMBED_CHROMS
+            str(EMBEDDINGS_DIR / "{cache}" / "{chrom}.arrow"), cache=w.cache, chrom=EMBED_CHROMS
         ),
     output:
         touch(str(EMBEDDINGS_DIR / "{cache}" / ".done")),

@@ -30,8 +30,8 @@ data:
   count_mask_factor: 20.0
   # Randomly serve the reverse-complement pass in train mode, when the cache has one.
   enable_rc_aug: true
-  # Load every served region's features into RAM up front.
-  preload: false
+  # Read the whole embeddings cache into RAM once instead of memory-mapping it.
+  in_memory: false
   # A region missing from the embeddings cache is an error by default; set true to drop it
   # (with a warning) instead.
   drop_missing_from_cache: false

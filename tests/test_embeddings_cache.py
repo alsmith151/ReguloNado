@@ -13,7 +13,7 @@ pass's bins back into forward genomic order correctly (see ``cache.py``'s module
 This lets every test assert exact expected bin indices instead of just shapes, for: normal
 in-tile regions, a region whose K bins straddle two tiles (needs an extra window), a window
 that pads past both ends of a short contig, ``--pool-to`` averaging, the RC flip, resumable
-per-chromosome skipping, the parquet round trip (via ``EmbeddingStore``), and manifest
+per-chromosome skipping, the Arrow round trip (via ``EmbeddingStore``), and manifest
 mismatch detection.
 """
 
@@ -307,7 +307,7 @@ def test_per_chromosome_resume_skips_finished_files(tmp_path, fixed_genome):
     embed_regions(regions, fixed_genome, adapter, out_dir, backbone="stub", chroms=["chrTile"])
     assert adapter.forward_calls > 0
     calls_after_first = adapter.forward_calls
-    chrom_path = out_dir / "chrTile.parquet"
+    chrom_path = out_dir / "chrTile.arrow"
     mtime = chrom_path.stat().st_mtime_ns
 
     # Rerun over both chromosomes: chrTile is already finished and must be skipped (no new
@@ -316,7 +316,7 @@ def test_per_chromosome_resume_skips_finished_files(tmp_path, fixed_genome):
         regions, fixed_genome, adapter, out_dir, backbone="stub", chroms=["chrTile", "chrPad"]
     )
     assert chrom_path.stat().st_mtime_ns == mtime
-    assert (out_dir / "chrPad.parquet").exists()
+    assert (out_dir / "chrPad.arrow").exists()
     # forward_calls grew only from chrPad's one window, not a re-run of chrTile's.
     assert adapter.forward_calls > calls_after_first
 
@@ -433,4 +433,4 @@ def test_embed_cli_with_monkeypatched_stub_adapter(tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert (out_dir / "manifest.parquet").exists()
-    assert (out_dir / "chrTile.parquet").exists()
+    assert (out_dir / "chrTile.arrow").exists()

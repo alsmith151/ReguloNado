@@ -78,14 +78,12 @@ def regions(
             help="Allow a randomly initialised backbone when --pretrained is not given",
         ),
     ] = False,
-    row_group_size: Annotated[
-        int, typer.Option("--row-group-size", help="Parquet row group size per chromosome file")
-    ] = 256,
 ) -> None:
     """Cache one backbone's frozen embeddings over every region's scored target.
 
-    Writes ``<out>/<chrom>.parquet`` per chromosome (skipped if it already exists, so
-    this is safe to rerun -- one job per chromosome via ``--chroms``) and a shared
+    Writes ``<out>/<chrom>.arrow`` (a Hugging Face ``datasets`` Arrow file) per chromosome
+    (skipped if it already exists, so this is safe to rerun -- one job per chromosome via
+    ``--chroms``) and a shared
     ``<out>/manifest.parquet``, checked for consistency on every rerun.
     """
     import polars as pl
@@ -120,6 +118,5 @@ def regions(
         stride=stride,
         batch_size=batch_size,
         device=resolved_device,
-        row_group_size=row_group_size,
     )
     typer.echo(f"Wrote embeddings to {out}")

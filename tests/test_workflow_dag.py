@@ -1200,7 +1200,7 @@ def test_cached_run_plans_counts_embeddings_and_chained_phases(tmp_path):
     cache = results / "embeddings" / "alphagenome-all_folds-ctx1048576-stride524288"
     assert re.search(r"embed_chrom\s+2", output)
     assert re.search(r"embed_done\s+1", output)
-    assert str(cache / "chr1.parquet") in output
+    assert str(cache / "chr1.arrow") in output
     embed_inputs = re.findall(r"rule embed_chrom:\n\s+input: (.*)", output)
     assert embed_inputs and all("region_set.parquet" in line for line in embed_inputs)
     assert "--backbone alphagenome --pretrained all_folds" in output

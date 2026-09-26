@@ -1,9 +1,16 @@
-"""Frozen-backbone embedding cache: tiling, per-region extraction and parquet storage.
+"""Frozen-backbone embedding cache: tiling, per-region extraction and Arrow storage.
 
 Ported design (see the plan's embedding-cache section): the trunk runs frozen, once, at
 long context; the cache stores, per region, only the ``K`` backbone bins covering its
 scored 1 kb target, so a small region-count head can train from the cache without ever
 touching the (expensive) backbone again.
+
+Storage: one ``<chrom>.arrow`` per chromosome, each a Hugging Face ``datasets`` Arrow file
+with features ``region_row`` (int64), ``features`` (``Array2D((K, D), "float16")``) and,
+when cached, ``features_rc`` -- so any cache opens with ``Dataset.from_file`` or
+``load_dataset("arrow", data_files=...)``, and ``manifest.parquet`` alongside records how
+it was built. Arrow files are memory-mapped and read row by row, so fetching one region
+touches only its own ``K x D`` values, not a compressed block of its neighbours.
 
 Tiling is derived purely from the adapter's geometry (:class:`BaseBackboneAdapter`), with
 no backbone-specific cases:
@@ -39,30 +46,37 @@ from __future__ import annotations
 import hashlib
 import math
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import polars as pl
-import pyarrow as pa
-import pyarrow.parquet as pq
 import torch
+from datasets import Array2D, Dataset, Features, Value, concatenate_datasets
+from datasets.arrow_writer import ArrowWriter
 
 from regulonado.model.adapters import BaseBackboneAdapter
 from regulonado.sequence import Genome, fetch_window
 
 __all__ = [
+    "CHROM_SUFFIX",
     "MANIFEST_FILENAME",
     "EmbeddingManifest",
     "EmbeddingStore",
     "embed_regions",
+    "embedding_features",
     "read_manifest",
     "region_table_hash",
     "validate_manifest",
+    "write_chrom_embeddings",
 ]
 
 MANIFEST_FILENAME = "manifest.parquet"
+#: Extension of each per-chromosome embeddings file.
+CHROM_SUFFIX = ".arrow"
+#: Regions buffered before each write while embedding, to bound memory.
+_WRITE_BATCH_ROWS = 256
 
 _REQUIRED_REGION_COLUMNS = ("chrom", "target_start", "target_end")
 
@@ -301,40 +315,56 @@ def _region_segments(
     return segments_by_region, sorted(tile_indices)
 
 
-def _decode_fixed_size_list(table: pa.Table, name: str, k: int, d: int) -> np.ndarray:
-    column = table.column(name).combine_chunks()
-    flat = column.flatten()
-    values = flat.to_numpy(zero_copy_only=False).copy()
-    return values.reshape(table.num_rows, k, d)
-
-
-def _chrom_schema(k: int, d: int, rc: bool) -> pa.Schema:
-    fields = [
-        pa.field("region_row", pa.int64()),
-        pa.field("features", pa.list_(pa.float16(), k * d)),
-    ]
+def embedding_features(k: int, d: int, rc: bool) -> Features:
+    """The ``datasets`` schema of one chromosome's embeddings file."""
+    features = {
+        "region_row": Value("int64"),
+        "features": Array2D(shape=(k, d), dtype="float16"),
+    }
     if rc:
-        fields.append(pa.field("features_rc", pa.list_(pa.float16(), k * d)))
-    return pa.schema(fields)
+        features["features_rc"] = Array2D(shape=(k, d), dtype="float16")
+    return Features(features)
 
 
-def _chrom_batch(
-    schema: pa.Schema,
+def _batch(
     region_rows: Sequence[int],
     features: Sequence[np.ndarray],
     features_rc: Sequence[np.ndarray] | None,
-    k: int,
-    d: int,
-) -> pa.RecordBatch:
-    def _column(arrays: Sequence[np.ndarray]) -> pa.Array:
-        flat = np.stack(arrays).astype(np.float16).reshape(-1)
-        return pa.FixedSizeListArray.from_arrays(pa.array(flat, type=pa.float16()), k * d)
-
-    rows = pa.array(np.asarray(region_rows, dtype=np.int64), type=pa.int64())
-    columns = [rows, _column(features)]
+) -> dict[str, object]:
+    batch: dict[str, object] = {
+        "region_row": [int(row) for row in region_rows],
+        "features": np.stack(features).astype(np.float16),
+    }
     if features_rc is not None:
-        columns.append(_column(features_rc))
-    return pa.RecordBatch.from_arrays(columns, schema=schema)
+        batch["features_rc"] = np.stack(features_rc).astype(np.float16)
+    return batch
+
+
+def write_chrom_embeddings(
+    path: str | Path,
+    region_rows: Sequence[int],
+    features: Sequence[np.ndarray] | np.ndarray,
+    features_rc: Sequence[np.ndarray] | np.ndarray | None = None,
+) -> Path:
+    """Write one chromosome's ``[K, D]`` features per region to *path* in one go.
+
+    The streaming writer inside :func:`embed_regions` produces the same file; this is for
+    caches assembled outside it (and tests). Written via a temp file, then renamed.
+    """
+    path = Path(path)
+    features = np.asarray(features)
+    if features.ndim != 3:
+        raise ValueError(f"features must be [n, K, D]; got shape {features.shape}")
+    _, k, d = features.shape
+    partial = path.with_name(f".{path.name}.partial")
+    schema = embedding_features(k, d, features_rc is not None)
+    with ArrowWriter(features=schema, path=str(partial)) as writer:
+        writer.write_batch(
+            _batch(region_rows, list(features), None if features_rc is None else list(features_rc))
+        )
+        writer.finalize()
+    os.replace(partial, path)
+    return path
 
 
 def _embed_chrom(
@@ -353,14 +383,13 @@ def _embed_chrom(
     rc: bool,
     batch_size: int,
     device: str,
-    row_group_size: int,
     chrom_path: Path,
 ) -> None:
-    """Embed one chromosome's regions, streaming tiles and row groups to bound memory.
+    """Embed one chromosome's regions, streaming tiles and writes to bound memory.
 
     Tiles run in genomic order and are dropped as soon as no pending region needs them, and
-    finished regions are written out in float16 row groups as they fill, so peak memory is
-    a few tiles plus one row group -- not the whole chromosome.
+    finished regions are written out in float16 batches as they fill, so peak memory is a
+    few tiles plus one write batch -- not the whole chromosome.
     """
     segments_by_region, tile_indices = _region_segments(
         chrom_regions, bin_size=bin_size, pool_factor=pool_factor, k=k, keep_bp=keep_bp
@@ -372,11 +401,9 @@ def _embed_chrom(
     local_bin_offset = (keep_offset_bp - offset_bp) // bin_size
     n_bins_kept = keep_bp // bin_size
     kept_slice = slice(local_bin_offset, local_bin_offset + n_bins_kept)
-    row_group_size = max(row_group_size, 1)
 
-    schema = _chrom_schema(k, d, rc)
     partial = chrom_path.with_name(f".{chrom_path.name}.partial")
-    writer = pq.ParquetWriter(partial, schema, compression="none")
+    writer = ArrowWriter(features=embedding_features(k, d, rc), path=str(partial))
 
     # Each tile is run at most once, however many regions' segments touch it -- straddling
     # regions are handled by stitching tiles' bins together, not by extra windows.
@@ -396,10 +423,7 @@ def _embed_chrom(
 
     def _flush() -> None:
         if rows_out:
-            writer.write_batch(
-                _chrom_batch(schema, rows_out, features_out, features_rc_out if rc else None, k, d),
-                row_group_size=row_group_size,
-            )
+            writer.write_batch(_batch(rows_out, features_out, features_rc_out if rc else None))
             rows_out.clear()
             features_out.clear()
             features_rc_out.clear()
@@ -448,7 +472,7 @@ def _embed_chrom(
                     if rc:
                         features_rc_out.append(_stitch(tile_features_rc, segments))
                     next_region += 1
-                    if len(rows_out) >= row_group_size:
+                    if len(rows_out) >= _WRITE_BATCH_ROWS:
                         _flush()
 
                 # Drop tiles no pending region can still need. Sorting by (last, first) tile
@@ -461,6 +485,7 @@ def _embed_chrom(
                     del tile_features[tile_index]
                     tile_features_rc.pop(tile_index, None)
         _flush()
+        writer.finalize()
         writer.close()
     except BaseException:
         writer.close()
@@ -484,11 +509,10 @@ def embed_regions(
     stride: int = 524_288,
     batch_size: int = 1,
     device: str = "cpu",
-    row_group_size: int = 256,
 ) -> None:
     """Cache *adapter*'s frozen embeddings over every region's target in *regions_df*.
 
-    Writes one ``<out_dir>/<chrom>.parquet`` per chromosome and one shared
+    Writes one ``<out_dir>/<chrom>.arrow`` per chromosome and one shared
     ``<out_dir>/manifest.parquet`` (written on first use, checked on every rerun --
     see :func:`validate_manifest`). Already-finished chromosome files are skipped, so
     this can be called once per chromosome (e.g. one Slurm array job per chromosome via
@@ -581,7 +605,7 @@ def embed_regions(
     adapter.eval()
 
     for chrom in chrom_list:
-        chrom_path = out_path / f"{chrom}.parquet"
+        chrom_path = out_path / f"{chrom}{CHROM_SUFFIX}"
         if chrom_path.exists():
             continue
         chrom_regions = regions_indexed.filter(pl.col("chrom") == chrom)
@@ -600,7 +624,6 @@ def embed_regions(
             rc=rc,
             batch_size=batch_size,
             device=device,
-            row_group_size=row_group_size,
             chrom_path=chrom_path,
         )
 
@@ -608,65 +631,46 @@ def embed_regions(
 class EmbeddingStore:
     """Random access, by ``region_row``, over one embeddings directory.
 
-    Reuses ``training/data.py``'s ``WindowParquetDataset`` pattern: shard footers are
-    read once in the main process to build an index, and no Parquet file handle is
-    opened until the first :meth:`get` call -- so nothing keeps an open file descriptor
-    across a ``DataLoader`` worker fork. Each worker lazily opens (and caches) its own
-    ``pq.ParquetFile`` per chromosome shard.
-
-    Unlike ``WindowParquetDataset``, the index here maps a possibly-sparse,
-    non-contiguous ``region_row`` (only regions on chromosomes that have been embedded
-    so far) to its shard/row-group/local-row location, since a directory built one
-    chromosome at a time may not yet cover every region.
+    Every ``<chrom>.arrow`` is opened with ``datasets`` and concatenated -- memory-mapped by
+    default, so opening is cheap, a lookup reads only that region's bytes, and forked
+    ``DataLoader`` workers share the mapping; with ``in_memory=True`` the files are read
+    into RAM once, sequentially, instead. ``region_row`` -> position is a dense numpy
+    array, since a directory built one chromosome at a time may not yet cover every region.
+    Features come back as stored, ``float16``.
     """
 
-    def __init__(self, embeddings_dir: str | Path) -> None:
+    def __init__(self, embeddings_dir: str | Path, *, in_memory: bool = False) -> None:
         self.dir = Path(embeddings_dir)
         self.manifest = read_manifest(self.dir)
         self.k = self.manifest.k
         self.d = self.manifest.d
         self.has_rc = self.manifest.rc
-        self._columns = ["region_row", "features"] + (["features_rc"] if self.has_rc else [])
 
-        paths = sorted(p for p in self.dir.glob("*.parquet") if p.name != MANIFEST_FILENAME)
-        self._paths = paths
-        self._metadata = [pq.read_metadata(str(p)) for p in paths]
-
-        index: dict[int, tuple[int, int, int]] = {}
-        for shard_idx, metadata in enumerate(self._metadata):
-            file = pq.ParquetFile(str(paths[shard_idx]), metadata=metadata)
-            for row_group_idx in range(metadata.num_row_groups):
-                region_rows = (
-                    file.read_row_group(row_group_idx, columns=["region_row"])
-                    .column("region_row")
-                    .to_numpy()
-                )
-                for local_row, region_row in enumerate(region_rows):
-                    index[int(region_row)] = (shard_idx, row_group_idx, local_row)
-        self._index = index
-        self._files: dict[int, pq.ParquetFile] = {}
-        self._preloaded: dict[int, dict[str, np.ndarray]] = {}
+        paths = sorted(self.dir.glob(f"*{CHROM_SUFFIX}"))
+        self._position = np.full(self.manifest.n_regions, -1, dtype=np.int64)
+        self._columns: dict[str, Dataset] = {}
+        if not paths:
+            return
+        dataset = concatenate_datasets(
+            [Dataset.from_file(str(path), in_memory=in_memory) for path in paths]
+        )
+        rows = dataset.data.column("region_row").to_numpy()
+        self._position[rows] = np.arange(len(rows), dtype=np.int64)
+        for column in ("features", "features_rc") if self.has_rc else ("features",):
+            self._columns[column] = dataset.select_columns([column]).with_format("arrow")
 
     @property
-    def region_rows(self) -> list[int]:
-        """The ``region_row`` values currently present in this store, unordered."""
-        return list(self._index.keys())
+    def region_rows(self) -> np.ndarray:
+        """The ``region_row`` values present in this store, ascending."""
+        return np.flatnonzero(self._position >= 0)
 
-    def _file(self, shard_idx: int) -> pq.ParquetFile:
-        file = self._files.get(shard_idx)
-        if file is None:
-            file = pq.ParquetFile(
-                str(self._paths[shard_idx]), metadata=self._metadata[shard_idx], pre_buffer=True
-            )
-            self._files[shard_idx] = file
-        return file
-
-    def preload(self, region_rows: Iterable[int] | None = None) -> None:
-        """Load features for *region_rows* (default: everything) into RAM."""
-        rows = list(region_rows) if region_rows is not None else self.region_rows
-        for region_row in rows:
-            if region_row not in self._preloaded:
-                self._preloaded[region_row] = self._read(region_row)
+    def contains(self, region_rows: np.ndarray) -> np.ndarray:
+        """Boolean mask: which of *region_rows* this store holds."""
+        rows = np.asarray(region_rows, dtype=np.int64)
+        inside = (rows >= 0) & (rows < self._position.size)
+        found = np.zeros(rows.shape, dtype=bool)
+        found[inside] = self._position[rows[inside]] >= 0
+        return found
 
     def get(self, region_row: int, rc: bool = False) -> np.ndarray:
         """``[K, D]`` float16 features for *region_row* (forward, or RC if requested).
@@ -675,28 +679,36 @@ class EmbeddingStore:
             KeyError: if *region_row* is not in this store.
             ValueError: if ``rc=True`` but this store has no ``features_rc`` column.
         """
-        if rc and not self.has_rc:
+        return self.get_many([region_row], rc=rc)[0]
+
+    def get_many(
+        self, region_rows: Sequence[int] | np.ndarray, rc: bool | np.ndarray = False
+    ) -> np.ndarray:
+        """``[n, K, D]`` float16 features for *region_rows*, in the order given.
+
+        *rc* is one flag for every row, or a boolean array choosing the reverse-complement
+        pass per row.
+
+        Raises:
+            KeyError: if any of *region_rows* is not in this store.
+            ValueError: if any row asks for RC but this store has no ``features_rc`` column.
+        """
+        rows = np.asarray(region_rows, dtype=np.int64)
+        flip = np.broadcast_to(np.asarray(rc, dtype=bool), rows.shape)
+        if flip.any() and not self.has_rc:
             raise ValueError(f"{self.dir} has no features_rc column (built without --rc)")
-        data = self._preloaded.get(region_row)
-        if data is None:
-            data = self._read(region_row)
-        return data["features_rc" if rc else "features"]
+        missing = rows[~self.contains(rows)]
+        if missing.size:
+            raise KeyError(f"region_row {int(missing[0])} not found in {self.dir}")
+        positions = self._position[rows]
+        out = np.empty((rows.size, self.k, self.d), dtype=np.float16)
+        for column, take in (("features", ~flip), ("features_rc", flip)):
+            if take.any():
+                out[take] = self._read(column, positions[take])
+        return out
 
-    def _read(self, region_row: int) -> dict[str, np.ndarray]:
-        try:
-            shard_idx, row_group_idx, local_row = self._index[region_row]
-        except KeyError:
-            raise KeyError(f"region_row {region_row} not found in {self.dir}") from None
-        table = self._file(shard_idx).read_row_group(row_group_idx, columns=self._columns)
-        result = {"features": _decode_fixed_size_list(table, "features", self.k, self.d)[local_row]}
-        if self.has_rc:
-            result["features_rc"] = _decode_fixed_size_list(table, "features_rc", self.k, self.d)[
-                local_row
-            ]
-        return result
-
-    def __getstate__(self) -> dict:
-        # Never carry open file handles across a pickle/fork boundary (DataLoader workers).
-        state = self.__dict__.copy()
-        state["_files"] = {}
-        return state
+    def _read(self, column: str, positions: np.ndarray) -> np.ndarray:
+        table = self._columns[column][positions.tolist()]
+        # Array2D's storage is list<list<float16>>: flatten both levels for the raw values.
+        values = table.column(column).combine_chunks().storage.flatten().flatten()
+        return values.to_numpy(zero_copy_only=False).reshape(len(positions), self.k, self.d)

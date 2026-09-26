@@ -7,11 +7,9 @@ import json
 
 import numpy as np
 import polars as pl
-import pyarrow as pa
-import pyarrow.parquet as pq
 import torch
 from regulonado.counts.dataset import RegionCountData
-from regulonado.embeddings.cache import region_table_hash
+from regulonado.embeddings.cache import region_table_hash, write_chrom_embeddings
 from regulonado.training.cached.model import RegionCountConfig, RegionCountModel
 from regulonado.training.cached.runner import _build_optimizer, _load_warm_start, run_training
 from regulonado.training.config import TrainerConfig
@@ -76,15 +74,7 @@ def _write_cache(out_dir, regions_df: pl.DataFrame, *, k: int, d: int, seed: int
         },
     )
     manifest.write_parquet(out_dir / "manifest.parquet")
-    table = pa.table(
-        {
-            "region_row": pa.array(np.arange(n, dtype=np.int64), type=pa.int64()),
-            "features": pa.FixedSizeListArray.from_arrays(
-                pa.array(features.reshape(-1), type=pa.float16()), k * d
-            ),
-        }
-    )
-    pq.write_table(table, out_dir / "chr1.parquet")
+    write_chrom_embeddings(out_dir / "chr1.arrow", np.arange(n), features)
 
 
 def _base_cfg(dataset_dir, embeddings_dir, output_dir) -> dict:
@@ -103,7 +93,7 @@ def _base_cfg(dataset_dir, embeddings_dir, output_dir) -> dict:
             "count_mask_quantile": 0.999,
             "count_mask_factor": 0.0,
             "enable_rc_aug": False,
-            "preload": False,
+            "in_memory": False,
             "drop_missing_from_cache": False,
         },
         "model": {

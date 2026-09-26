@@ -3,8 +3,8 @@
 A run with `trunk: cached` and `target: region_counts` trains a small region-level count
 head on a **frozen** pretrained trunk (AlphaGenome, Borzoi, Flashzoi, Enformer, …). The
 trunk runs once, at long context, over every region. The embeddings covering each
-region's scored 1 kb target are cached as parquet, and the head trains on the cache in
-minutes. It is a run like any other (see [training.md](training.md)); only its trunk,
+region's scored 1 kb target are cached as a Hugging Face `datasets` Arrow file, and the
+head trains on the cache in minutes. It is a run like any other (see [training.md](training.md)); only its trunk,
 target and recipe differ from a fine-tuned profile model.
 
 ```
@@ -137,14 +137,20 @@ regulonado embed regions region_set.parquet genome.fa --backbone alphagenome \
 - **Pooling:** `--pool-to` averages adjacent bins after stitching.
 - **Reverse complement:** `--rc` stores a reverse-complement pass flipped back into forward
   bin order (`features_rc`).
-- **Storage:** one uncompressed parquet per chromosome, with `region_row` (int64) and
-  `features` as `fixed_size_list<halffloat>[K*D]`.
+- **Storage:** one `<chrom>.arrow` per chromosome, a Hugging Face `datasets` Arrow file
+  with `region_row` (int64) and `features` as `Array2D((K, D), "float16")` (plus
+  `features_rc` with `--rc`).
+  - Open one with `datasets.Dataset.from_file("chr1.arrow")`, or the whole cache with
+    `load_dataset("arrow", data_files="<cache>/*.arrow")`.
+  - Training memory-maps the files, so each region costs one read of its own `K x D`
+    values: cheap on network filesystems such as Ceph, and shared by forked `DataLoader`
+    workers. `data.in_memory: true` reads the whole cache into RAM once instead.
   - `manifest.parquet` records the backbone, checkpoint, bin size, K, D, context, stride,
     pool, rc and a hash of the region table.
   - A rerun with different settings, or against a different region table, fails rather
     than mixing.
 - **Resumability:** one chromosome per job. Finished chromosome files are skipped. Tiles
-  and row groups are streamed, so memory stays at a few tiles.
+  and writes are streamed, so memory stays at a few tiles.
 - **Size:** Borzoi at native 32 bp is about 140 GB for 1.16M regions; `--pool-to 128`
   brings it to about 35 GB.
 

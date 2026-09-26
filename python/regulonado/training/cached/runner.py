@@ -298,7 +298,7 @@ def _build_datasets(
     split_names = set(prepared.data.regions["split"].unique().to_list())
     has_eval = "val" in split_names
 
-    store = EmbeddingStore(data_cfg.embeddings_dir)
+    store = EmbeddingStore(data_cfg.embeddings_dir, in_memory=data_cfg.in_memory)
     train_dataset = CachedRegionDataset(
         prepared.data,
         store,
@@ -306,7 +306,6 @@ def _build_datasets(
         train=True,
         sample_weights=prepared.train_sample_weights,
         enable_rc_aug=data_cfg.enable_rc_aug,
-        preload=data_cfg.preload,
         drop_missing_from_cache=data_cfg.drop_missing_from_cache,
     )
     val_dataset: Any = None
@@ -317,7 +316,6 @@ def _build_datasets(
             split="val",
             train=False,
             enable_rc_aug=False,
-            preload=data_cfg.preload,
             drop_missing_from_cache=data_cfg.drop_missing_from_cache,
         )
         if trainer_cfg.max_eval_samples is not None:

@@ -139,9 +139,9 @@ class RegionsDataConfig:
     enable_rc_aug
         Randomly serve the reverse-complement pass in train mode, when the cache has
         one (:attr:`~regulonado.embeddings.cache.EmbeddingStore.has_rc`).
-    preload
-        Load every served region's features into RAM up front
-        (:meth:`~regulonado.embeddings.cache.EmbeddingStore.preload`).
+    in_memory
+        Read the whole embeddings cache into RAM once, instead of memory-mapping it
+        (:class:`~regulonado.embeddings.cache.EmbeddingStore`).
     drop_missing_from_cache
         A region absent from the embeddings cache is a clear error by default (a
         cache/region-table mismatch that should never be silently masked); set this to
@@ -164,7 +164,7 @@ class RegionsDataConfig:
     count_mask_quantile: float = 0.999
     count_mask_factor: float = 20.0
     enable_rc_aug: bool = True
-    preload: bool = False
+    in_memory: bool = False
     drop_missing_from_cache: bool = False
     exclude_regions: str | None = None
 
@@ -294,6 +294,8 @@ class CachedRegionDataset(Dataset):
     ``transformers.default_data_collator``, since every item has the same shapes (the
     manifest's fixed ``K``/``D`` and *region_dataset*'s fixed ``n_tracks``). ``features``
     keeps the cache's ``float16`` dtype; the model casts to float32 itself.
+
+    ``__getitems__`` serves a whole ``DataLoader`` batch with one read from the store.
     """
 
     def __init__(
@@ -305,7 +307,6 @@ class CachedRegionDataset(Dataset):
         train: bool = False,
         sample_weights: np.ndarray | None = None,
         enable_rc_aug: bool = True,
-        preload: bool = False,
         drop_missing_from_cache: bool = False,
     ) -> None:
         data = (
@@ -337,8 +338,8 @@ class CachedRegionDataset(Dataset):
             else EmbeddingStore(embeddings_dir)
         )
         region_rows = data.regions["region_row"].cast(pl.Int64).to_numpy()
-        available = set(self.store.region_rows)
-        missing = [int(row) for row in region_rows if int(row) not in available]
+        present = self.store.contains(region_rows)
+        missing = region_rows[~present].tolist()
         if missing:
             if not drop_missing_from_cache:
                 raise KeyError(
@@ -353,10 +354,9 @@ class CachedRegionDataset(Dataset):
                 RuntimeWarning,
                 stacklevel=2,
             )
-            keep = np.array([int(row) in available for row in region_rows], dtype=bool)
-            data = data.take(keep)
+            data = data.take(present)
             if sample_weights is not None:
-                sample_weights = sample_weights[keep]
+                sample_weights = sample_weights[present]
             region_rows = data.regions["region_row"].cast(pl.Int64).to_numpy()
 
         self.data = data
@@ -364,25 +364,27 @@ class CachedRegionDataset(Dataset):
         self.enable_rc_aug = enable_rc_aug
         self.sample_weights = sample_weights
         self._region_rows = region_rows
-        if preload:
-            self.store.preload(self._region_rows.tolist())
 
     def __len__(self) -> int:
         return self.data.n_regions
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        region_row = int(self._region_rows[idx])
-        rc = (
-            self.train
-            and self.enable_rc_aug
-            and self.store.has_rc
-            and bool(torch.rand(()) < 0.5)
-        )
-        features = np.ascontiguousarray(self.store.get(region_row, rc=rc))
-        item: dict[str, Any] = {
-            "features": torch.from_numpy(features),
-            "labels": torch.from_numpy(self.data.counts[idx].astype(np.float32, copy=False)),
-        }
-        if self.sample_weights is not None:
-            item["sample_weight"] = torch.tensor(float(self.sample_weights[idx]))
-        return item
+        return self.__getitems__([idx])[0]
+
+    def __getitems__(self, indices: Sequence[int]) -> list[dict[str, Any]]:
+        idx = np.asarray(indices, dtype=np.int64)
+        if self.train and self.enable_rc_aug and self.store.has_rc:
+            rc = (torch.rand(idx.size) < 0.5).numpy()
+        else:
+            rc = np.zeros(idx.size, dtype=bool)
+        features = self.store.get_many(self._region_rows[idx], rc=rc)
+        items: list[dict[str, Any]] = []
+        for offset, row in enumerate(idx):
+            item: dict[str, Any] = {
+                "features": torch.from_numpy(features[offset]),
+                "labels": torch.from_numpy(self.data.counts[row].astype(np.float32, copy=False)),
+            }
+            if self.sample_weights is not None:
+                item["sample_weight"] = torch.tensor(float(self.sample_weights[row]))
+            items.append(item)
+        return items
