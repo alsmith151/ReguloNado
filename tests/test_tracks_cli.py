@@ -119,6 +119,28 @@ def test_assemble_annotations_merges_a_group_column(tmp_path, bigwig_dir):
     assert table.loc["b", "group"] == "k562"
 
 
+def test_assemble_drops_tracks_the_annotations_do_not_list(tmp_path, bigwig_dir):
+    discovered = tmp_path / "discovered.parquet"
+    runner.invoke(tracks_app, ["discover", str(discovered), "--bigwig-dir", str(bigwig_dir)])
+
+    annotations = tmp_path / "groups.csv"
+    annotations.write_text("track_name,group\nb,k562\n")
+
+    assembled = tmp_path / "tracks.parquet"
+    result = runner.invoke(
+        tracks_app,
+        ["assemble", str(discovered), "-o", str(assembled), "--annotations", str(annotations)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "2 unannotated" in result.output
+
+    table = read_track_table(assembled).set_index("track_name")
+    assert table.loc["a", "status"] == table.loc["flat", "status"] == "unannotated"
+    assert pd.isna(table.loc["a", "track_index"])
+    assert table.loc["b", "status"] == "included"
+    assert table.loc["b", "track_index"] == 0
+
+
 def test_assemble_annotations_rejects_an_unknown_track_name(tmp_path, bigwig_dir):
     discovered = tmp_path / "discovered.parquet"
     runner.invoke(tracks_app, ["discover", str(discovered), "--bigwig-dir", str(bigwig_dir)])

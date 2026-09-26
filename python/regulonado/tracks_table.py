@@ -38,7 +38,7 @@ from pandera.typing import Series
 
 SCHEMA_VERSION = "1"
 
-STATUSES = ("included", "dropped_duplicate", "missing", "qc_failed", "excluded")
+STATUSES = ("included", "dropped_duplicate", "missing", "qc_failed", "excluded", "unannotated")
 
 # What a table's ``path``/``resolved_path`` point at, stamped by discovery into the run-level
 # attrs. bigWig tables feed the coverage stages (interval means, scaling, QC, dataset build);

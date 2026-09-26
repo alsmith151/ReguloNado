@@ -99,7 +99,8 @@ class InputsConfig(BaseModel):
         description=(
             "CSV/parquet of track_name + extra columns (e.g. 'group') merged in at 'tracks "
             "assemble' — a separate DAG input from track_sheet/bigwig_dir, so editing it "
-            "re-runs only assembly, not discovery."
+            "re-runs only assembly, not discovery. Discovered tracks it has no row for are "
+            "dropped (status 'unannotated'), so it also lists the tracks to keep."
         ),
     )
     drop_missing: bool = True

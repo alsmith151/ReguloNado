@@ -483,7 +483,8 @@ def assemble(
             "--annotations",
             help="CSV/parquet with a 'track_name' column plus arbitrary extra columns (e.g. "
             "'group') to merge in — the way to attach grouping metadata after 'tracks discover' "
-            "without redoing discovery from a hand-crafted --track-sheet.",
+            "without redoing discovery from a hand-crafted --track-sheet. Tracks it has no row "
+            "for become 'unannotated', so it doubles as the list of tracks to keep.",
         ),
     ] = None,
     drop_degenerate: Annotated[
@@ -540,6 +541,7 @@ def assemble(
             )
             raise typer.Exit(1)
         merged = merged.merge(ann_df, on="track_name", how="left", validate="one_to_one")
+        unannotated = ~merged["track_name"].isin(ann_df["track_name"])
 
     for column in (*_CANONICAL_SCALE_COLUMNS, *_CANONICAL_QC_COLUMNS):
         if column not in merged.columns:
@@ -553,6 +555,8 @@ def assemble(
 
     status = merged["status"].copy()
     status = status.where(~merged["track_name"].isin(exclude), "excluded")
+    if annotations is not None:
+        status = status.where(~((status == "included") & unannotated), "unannotated")
     if drop_degenerate and "qc_verdict" in merged.columns:
         failed_qc = (status == "included") & (merged["qc_verdict"] == "failed")
         status = status.where(~failed_qc, "qc_failed")
@@ -565,8 +569,11 @@ def assemble(
     write_track_table(
         merged, output, scaling_method=scaling_method, track_format=discovered_format
     )
+    n_unannotated = int((merged["status"] == "unannotated").sum())
     typer.echo(
-        f"Assembled {len(merged)} track(s): {int(included_mask.sum())} included -> {output}"
+        f"Assembled {len(merged)} track(s): {int(included_mask.sum())} included"
+        + (f", {n_unannotated} unannotated" if n_unannotated else "")
+        + f" -> {output}"
     )
 
 

@@ -16,7 +16,7 @@ Now: `regulonado tracks discover` resolves raw BigWig sources into one row per t
 `regulonado tracks assemble` is the only place a track's final status is decided, and
 `regulonado dataset --track-table` is the only way to name a track list.
 
-## The five statuses
+## The six statuses
 
 | `status` | Meaning |
 |---|---|
@@ -25,6 +25,7 @@ Now: `regulonado tracks discover` resolves raw BigWig sources into one row per t
 | `missing` | The BigWig path didn't exist at discovery time. |
 | `qc_failed` | `qc_verdict == "failed"` and `qc.drop_degenerate` was set at assembly. |
 | `excluded` | Named in `inputs.exclude_tracks` / `--exclude-track`, honoured whether or not QC ran. |
+| `unannotated` | `inputs.track_annotations` / `--annotations` was given and has no row for this track. |
 
 Only `included` rows have a non-null `track_index`, contiguous `0..n-1` in that order — this is the
 schema's load-bearing invariant (`TrackTableSchema.track_index_is_contiguous` in
