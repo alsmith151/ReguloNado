@@ -34,6 +34,7 @@ def _region_chroms():
 
 
 EMBED_CHROMS = _region_chroms()
+EMBED_REGION_COUNT = len(read_regions(Path(REGION_COUNTS["regions"])))
 
 
 def _embed_flags(cache_name):
@@ -65,6 +66,7 @@ rule embed_chrom:
     output:
         str(EMBEDDINGS_DIR / "{cache}" / "{chrom}.arrow"),
     resources:
+        mem_mb=scaled_mem_mb(32000),
         gpu=1,
     wildcard_constraints:
         cache="|".join(re.escape(name) for name in EMBEDDING_CACHES),
@@ -98,6 +100,8 @@ rule embed_done:
         touch(str(EMBEDDINGS_DIR / "{cache}" / ".done")),
     params:
         manifest=lambda w: str(EMBEDDINGS_DIR / w.cache / "manifest.parquet"),
+    resources:
+        mem_mb=scaled_mem_mb(2000),
     wildcard_constraints:
         cache="|".join(re.escape(name) for name in EMBEDDING_CACHES),
     run:

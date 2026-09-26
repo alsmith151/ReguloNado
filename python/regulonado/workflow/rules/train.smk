@@ -7,6 +7,7 @@ from their trunk's embedding cache (``trunk: cached``) or from sequence with the
 running every step (``trunk: live``).
 """
 
+import math
 import re
 import shlex
 
@@ -48,6 +49,43 @@ def _override_flags(wildcards):
     for item in hydra_override_items(merged):
         flags.extend(("--set", shlex.quote(item)))
     return " ".join(flags)
+
+
+# (feature dim, native bin bp) of each cacheable trunk, to size an in-memory cache.
+_CACHE_FEATURES = {
+    ("alphagenome", "trunk"): (3072, 128),
+    ("alphagenome", "encoder"): (1536, 128),
+    ("borzoi", "trunk"): (1920, 32),
+    ("enformer", "trunk"): (3072, 128),
+}
+_TRAIN_BASE_MEM_MB = 32_000
+
+
+def _train_mem_mb(wildcards, attempt):
+    """Memory to request for a phase: a base for the model, data-loader workers and
+    Python, plus -- for a cached run loading its embeddings into RAM (data.in_memory) --
+    the cache's size with 25% headroom; doubled on each retry, like
+    :func:`scaled_mem_mb`."""
+    return _train_mem_mb_first_attempt(wildcards) * 2 ** (attempt - 1)
+
+
+def _train_mem_mb_first_attempt(wildcards):
+    run = _VALIDATED.train.run(wildcards.run)
+    if run.trunk != "cached":
+        return _TRAIN_BASE_MEM_MB
+    phase = run_phase(wildcards.run, wildcards.phase)
+    merged = merge_training_settings(
+        [TRAIN.get("common", {}), phase.get("settings", {}), run.settings]
+    )
+    if not merged.get("data.in_memory"):
+        return _TRAIN_BASE_MEM_MB
+    d, bin_size = _CACHE_FEATURES[(run.backbone.type, run.backbone.features)]
+    cache = run.cache
+    width = (cache.pool_to if cache and cache.pool_to else None) or bin_size
+    k = math.ceil(int(REGION_COUNTS.get("target_width", 1000)) / width) + 1
+    copies = 2 if cache and cache.rc else 1
+    cache_mb = EMBED_REGION_COUNT * k * d * 2 * copies / 1e6
+    return _TRAIN_BASE_MEM_MB + math.ceil(cache_mb * 1.25)
 
 
 def _dataset_dir(wildcards):
@@ -106,7 +144,7 @@ if PROFILE_RUN_NAMES:
         threads: 1
         resources:
             gpu=0,
-            mem_mb=4000,
+            mem_mb=scaled_mem_mb(4000),
             runtime=10,
         wildcard_constraints:
             run="|".join(re.escape(name) for name in PROFILE_RUN_NAMES),
@@ -147,6 +185,7 @@ rule train_phase:
         # One GPU per launched process, so the request always matches
         # --nproc-per-node instead of drifting from a hardcoded count.
         gpu=TRAIN["nproc_per_node"],
+        mem_mb=_train_mem_mb,
     wildcard_constraints:
         run="|".join(re.escape(name) for name in RUN_NAMES),
         phase="|".join(re.escape(name) for name in PHASE_NAMES),

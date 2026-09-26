@@ -47,6 +47,7 @@ rule region_set:
     output:
         str(REGION_SET),
     resources:
+        mem_mb=scaled_mem_mb(8000),
         gpu=0,
     log:
         str(RESULTS / "logs" / "region_set.log"),
@@ -73,6 +74,8 @@ checkpoint region_count_track_names:
         table=str(TRACKS_DIR / "tracks.parquet"),
     output:
         directory(str(REGION_COUNTS_DIR / "counts" / "_track_names")),
+    resources:
+        mem_mb=scaled_mem_mb(4000),
     run:
         from regulonado.counts.bam import read_count_tracks
 
@@ -105,6 +108,7 @@ rule region_count_track:
         str(REGION_TRACK_COUNTS_DIR / "{track}.parquet"),
     threads: REGION_COUNTS["threads"]
     resources:
+        mem_mb=scaled_mem_mb(16000),
         gpu=0,
     log:
         str(RESULTS / "logs" / "region_count_track_{track}.log"),
@@ -140,6 +144,8 @@ rule region_counts_gather:
         regions=str(REGION_DATASET_DIR / "regions.parquet"),
         counts=str(REGION_DATASET_DIR / "counts.parquet"),
         tracks=str(REGION_DATASET_DIR / "tracks.parquet"),
+    resources:
+        mem_mb=scaled_mem_mb(32000),
     log:
         str(RESULTS / "logs" / "region_counts_gather.log"),
     shell:

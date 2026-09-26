@@ -95,6 +95,13 @@ def final_phase(run):
     return run_phases(run)[-1]["name"]
 
 
+def scaled_mem_mb(base_mb):
+    """A rule's ``mem_mb``: *base_mb*, doubled on each retry (the SLURM profiles resubmit
+    failed jobs), so a job killed for running out of memory comes back with more. Memory is
+    set here in the rules; profiles only place jobs (partition, account, CPUs, runtime)."""
+    return lambda wildcards, attempt: base_mb * 2 ** (attempt - 1)
+
+
 def phase_run_dir(run, phase):
     return TRAIN_DIR / run / phase
 

@@ -40,6 +40,8 @@ rule build_dataset:
         table=str(DATASET_DIR / "tracks.parquet"),
         data=directory(str(DATASET_DIR / "data")),
     threads: PROFILE["extract_threads"]
+    resources:
+        mem_mb=scaled_mem_mb(256000),
     log:
         str(RESULTS / "logs" / "build_dataset.log"),
     shell:

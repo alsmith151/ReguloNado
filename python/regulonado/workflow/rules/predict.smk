@@ -45,6 +45,7 @@ if PREDICTION:
             rtol=PREDICTION["rtol"],
             batch_size=PREDICTION["batch_size"],
         resources:
+            mem_mb=scaled_mem_mb(64000),
             gpu=1,
         log:
             str(RESULTS / "logs" / f"predict_{PREDICTION_RUN}.log"),

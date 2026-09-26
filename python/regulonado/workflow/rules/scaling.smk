@@ -62,6 +62,8 @@ rule scale_factors:
         ),
     output:
         parquet=str(TRACKS_STAGE_DIR / "scale_factors.parquet"),
+    resources:
+        mem_mb=scaled_mem_mb(16000),
     log:
         str(RESULTS / "logs" / "scale_factors.log"),
     shell:

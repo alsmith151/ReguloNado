@@ -60,6 +60,8 @@ rule track_discovery:
         dedupe=config["inputs"]["dedupe_tracks"],
     output:
         table=str(TRACKS_STAGE_DIR / "discovered.parquet"),
+    resources:
+        mem_mb=scaled_mem_mb(8000),
     log:
         str(RESULTS / "logs" / "track_discovery.log"),
     shell:
@@ -90,6 +92,8 @@ if _NEEDS_INTERVAL_MEANS:
             max_workers=QC.get("max_workers", 16),
         output:
             table=str(TRACKS_STAGE_DIR / "interval_means.parquet"),
+        resources:
+            mem_mb=scaled_mem_mb(16000),
         log:
             str(RESULTS / "logs" / "track_interval_means.log"),
         shell:
@@ -136,6 +140,8 @@ rule track_qc:
         max_workers=QC.get("max_workers", 16),
     output:
         report=str(TRACKS_STAGE_DIR / "qc_report.parquet"),
+    resources:
+        mem_mb=scaled_mem_mb(8000),
     log:
         str(RESULTS / "logs" / "track_qc.log"),
     shell:
@@ -183,6 +189,8 @@ rule track_assemble:
         ),
     output:
         table=str(TRACKS_DIR / "tracks.parquet"),
+    resources:
+        mem_mb=scaled_mem_mb(4000),
     log:
         str(RESULTS / "logs" / "track_assemble.log"),
     shell:

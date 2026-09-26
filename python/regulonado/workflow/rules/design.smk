@@ -185,6 +185,8 @@ if DESIGN:
             DESIGN_CANDIDATES,
         output:
             directory(str(DESIGN_DIR / "shards")),
+        resources:
+            mem_mb=scaled_mem_mb(8000),
         run:
             # Round-robin, not contiguous blocks, so chromosome clustering in the BED
             # doesn't make one shard dominate the runtime.
@@ -307,6 +309,8 @@ if DESIGN:
             bed=str(DESIGN_DIR / "{target}" / "designs.bed"),
             trajectory=str(DESIGN_DIR / "{target}" / "trajectory.tsv"),
             edits=str(DESIGN_DIR / "{target}" / "edits.tsv"),
+        resources:
+            mem_mb=scaled_mem_mb(16000),
         wildcard_constraints:
             target="|".join(re.escape(name) for name in DESIGN_TARGET_NAMES),
         run:

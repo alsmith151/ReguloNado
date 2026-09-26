@@ -1397,3 +1397,25 @@ def test_encoder_cache_and_live_trunk_region_runs(tmp_path):
 
     result = _pipeline_dry_run(tmp_path, config)
     assert result.returncode == 0, result.stderr
+
+
+def test_in_memory_cached_runs_request_memory_for_their_cache(tmp_path):
+    """A cached run loading its embeddings into RAM asks SLURM for the cache's size on top
+    of the base request; a memory-mapped one asks for the base only."""
+    pytest.importorskip("hydra")
+    settings = "      settings:\n        data: {in_memory: true}\n"
+    config = _count_only_config(
+        tmp_path,
+        runs=[
+            _cached_run("mapped"),
+            _cached_run("loaded", cache=settings),
+        ],
+    )
+    output, code = _snakemake_dry_run(tmp_path, config)
+    assert code == 0, output
+    requests = dict(
+        re.findall(r"wildcards: run=(\w+), phase=pretrain\n\s+resources: .*?mem_mb=(\d+)", output)
+    )
+    # Two regions x K=9 x D=3072 x 2 bytes is tiny, so "loaded" is the base plus ~1 MB.
+    assert int(requests["mapped"]) == 32_000
+    assert 32_000 < int(requests["loaded"]) <= 32_001

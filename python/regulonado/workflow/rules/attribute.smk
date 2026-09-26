@@ -230,6 +230,8 @@ if ATTRIBUTION:
             summary=str(ATTRIBUTION_DIR / "{target}" / "summary.tsv"),
             attributions=str(ATTRIBUTION_DIR / "{target}" / "attributions.tsv"),
             bigwig=str(ATTRIBUTION_DIR / "{target}" / "attributions.bw"),
+        resources:
+            mem_mb=scaled_mem_mb(16000),
         wildcard_constraints:
             target="|".join(re.escape(name) for name in ATTRIBUTION_TARGET_NAMES),
         run:
