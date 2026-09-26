@@ -25,5 +25,6 @@
 │ normalization  Infer, correct, and apply per-track signal normalisation factors.                 │
 │ tracks         Discover, QC, and assemble tracks.parquet before the dataset build.               │
 │ attribute      Score attribution profiles and/or call cores from in-silico mutagenesis.          │
+│ counts         Count BAM events over regions and gather them into a RegionCountData run.         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 

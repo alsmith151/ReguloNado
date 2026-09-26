@@ -22,34 +22,9 @@ import numpy as np
 import torch
 from torchmetrics.regression import PearsonCorrCoef, SpearmanCorrCoef
 
+from regulonado.counts.dataset import group_count_rates
+
 __all__ = ["GroupedCountMetrics", "PerTaskCorrelationMetrics", "group_count_rates"]
-
-
-def group_count_rates(
-    counts: np.ndarray, track_groups: np.ndarray, log_size_factors: np.ndarray, n_groups: int
-) -> np.ndarray:
-    """Pool per-track counts into per-group normalised rates, ``[n_regions, n_groups]``.
-
-    ``rate_g = sum_{t in g} y_t / sum_{t in g} exp(o_t)``: the maximum-likelihood shared
-    rate of a group's replicates under a Poisson model with per-track size factors
-    ``exp(o_t)``. :class:`~regulonado.regions.model.CountHead` predicts exactly this
-    quantity, so metrics compare like with like.
-
-    ``NaN`` counts (masked) are left out of both sums, so a group's rate comes from its
-    remaining replicates; it is ``NaN`` only where every replicate of the group is
-    masked. Ported from ``unique_enhancer_finding.modelling.dataset.group_count_rates``.
-    """
-    counts = np.asarray(counts, dtype=np.float64)
-    groups = np.asarray(track_groups, dtype=np.int64)
-    size = np.exp(np.asarray(log_size_factors, dtype=np.float64))
-    observed = np.isfinite(counts)
-    pooled = np.zeros((counts.shape[0], n_groups))
-    np.add.at(pooled.T, groups, np.where(observed, counts, 0.0).T)
-    denominator = np.zeros((counts.shape[0], n_groups))
-    np.add.at(denominator.T, groups, (observed * size).T)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        rates = np.where(denominator > 0, pooled / denominator, np.nan)
-    return rates.astype(np.float32)
 
 
 class PerTaskCorrelationMetrics:

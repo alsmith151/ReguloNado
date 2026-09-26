@@ -1,0 +1,29 @@
+                                                                                                    
+ Usage: root counts bam [OPTIONS] REGIONS                                                           
+                                                                                                    
+ Count BAM events over ``regions`` for every track (or one, with ``--track``).                      
+                                                                                                    
+ Resumable: each track's result is cached at ``<out-dir>/<track_name>.parquet``                     
+ and skipped on a re-run. Run ``regulonado counts gather`` afterwards to                            
+ assemble the per-track cache into one ``RegionCountData`` run.                                     
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    regions      PATH  Region set: BED or parquet with chrom/start/end, optionally split        │
+│                         [required]                                                               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --tracks                      PATH     tracks.parquet from 'regulonado tracks assemble'       │
+│                                           [required]                                             │
+│ *  --anchor-regions              PATH     High-anchor BED/parquet [required]                     │
+│ *  --background-regions          PATH     Background BED/parquet [required]                      │
+│ *  --out-dir             -o      PATH     Per-track parquet cache directory [required]           │
+│    --track                       TEXT     Count only this track (for per-track cluster array     │
+│                                           jobs)                                                  │
+│    --chrom-sizes                 PATH     chrom.sizes/.fai for the region bounds check           │
+│    --target-width                INTEGER  Width of the counted window, centred on each region    │
+│                                           [default: 1000]                                        │
+│    --threads                     INTEGER  htslib decompression threads per BAM [default: 1]      │
+│    --workers             -w      INTEGER  Parallel BAMs when --track is not given [default: 1]   │
+│    --help                                 Show this message and exit.                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

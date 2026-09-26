@@ -7,6 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 import typer
 from regulonado.cli.attribute import attribute_app
 from regulonado.cli.config import config, init
+from regulonado.cli.counts import counts_app
 from regulonado.cli.dataset import dataset
 from regulonado.cli.design import design
 from regulonado.cli.normalization import normalization_app
@@ -116,6 +117,7 @@ app.command("pipeline")(_pipeline)
 app.add_typer(normalization_app, name="normalization")
 app.add_typer(tracks_app, name="tracks")
 app.add_typer(attribute_app, name="attribute")
+app.add_typer(counts_app, name="counts")
 
 
 if __name__ == "__main__":

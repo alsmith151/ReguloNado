@@ -1,0 +1,13 @@
+                                                                                                    
+ Usage: root counts [OPTIONS] COMMAND [ARGS]...                                                     
+                                                                                                    
+ Count BAM events over regions and gather them into a RegionCountData run.                          
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --help          Show this message and exit.                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────────────────────────╮
+│ bam     Count BAM events over ``regions`` for every track (or one, with ``--track``).            │
+│ gather  Gather ``counts bam``'s per-track cache into one ``RegionCountData`` run.                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
