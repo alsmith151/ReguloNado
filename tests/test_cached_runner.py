@@ -1,5 +1,5 @@
-"""``regulonado.regions.runner``: optimizer weight-decay exclusion, warm start, and a CPU
-end-to-end ``train-regions`` run on a tiny synthetic cache."""
+"""``regulonado.training.cached.runner``: optimizer weight-decay exclusion, warm start, and a CPU
+end-to-end cached-trunk training run on a tiny synthetic cache."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import pyarrow.parquet as pq
 import torch
 from regulonado.counts.dataset import RegionCountData
 from regulonado.embeddings.cache import region_table_hash
-from regulonado.regions.model import RegionCountConfig, RegionCountModel
-from regulonado.regions.runner import _build_optimizer, _load_warm_start, run_training
+from regulonado.training.cached.model import RegionCountConfig, RegionCountModel
+from regulonado.training.cached.runner import _build_optimizer, _load_warm_start, run_training
 from regulonado.training.config import TrainerConfig
 
 

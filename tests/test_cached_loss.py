@@ -1,4 +1,4 @@
-"""Unit tests for regulonado.regions.loss.
+"""Unit tests for regulonado.training.cached.loss.
 
 Expected numeric values were computed by running the same toy inputs through UEF's
 ``unique_enhancer_finding.modelling.loss.CountLikelihoodLoss`` directly (via its own
@@ -12,7 +12,7 @@ import math
 
 import pytest
 import torch
-from regulonado.regions.loss import COUNT_NOISE_MODELS, CountLikelihoodLoss
+from regulonado.training.cached.loss import COUNT_NOISE_MODELS, CountLikelihoodLoss
 
 # ---------------------------------------------------------------------------
 # Shared toy inputs (3 regions, 3 tracks, 2 groups: tracks 0/1 -> group 0, track 2 -> group 1)

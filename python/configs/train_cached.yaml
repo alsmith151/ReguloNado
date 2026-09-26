@@ -3,8 +3,8 @@
 # no backbone/head config group here: the backbone is frozen and its features are already
 # cached (`regulonado embed regions`), so this trains only the small pooling head.
 #
-# Override these values directly or start from a `regions_experiment/*` preset with
-# `+regions_experiment=<name>`, mirroring `+experiment=<name>` for `regulonado train`.
+# Override these values directly or start from a `cached_experiment/*` preset with
+# `+cached_experiment=<name>`, mirroring `+experiment=<name>` for `regulonado train`.
 defaults:
   - _self_
 
@@ -35,6 +35,9 @@ data:
   # A region missing from the embeddings cache is an error by default; set true to drop it
   # (with a warning) instead.
   drop_missing_from_cache: false
+  # BED/parquet of held-out sequences (e.g. benchmark candidates): train regions overlapping
+  # one are dropped at every stage; val/test are untouched. null disables it.
+  exclude_regions: null
 
 model:
   hidden: 512
@@ -86,7 +89,7 @@ trainer:
   eval_on_start: true
 
   report_to: []
-  wandb_project: regulonado-regions
+  wandb_project: regulonado-training
   wandb_group: null
   wandb_job_type: training
   wandb_run_name: null
@@ -101,7 +104,7 @@ trainer:
 
 hydra:
   run:
-    dir: outputs/train-regions/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: outputs/train-cached/${now:%Y-%m-%d}/${now:%H-%M-%S}
   sweep:
     dir: multirun-regions/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra.job.num}

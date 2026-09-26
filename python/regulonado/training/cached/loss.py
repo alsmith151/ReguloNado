@@ -32,7 +32,7 @@ class CountLikelihoodLoss(nn.Module):
     """Negative log-likelihood of raw per-track counts, with learned per-track noise.
 
     Takes the per-track log mean ``log_mu`` (group log rate + fixed size-factor offset
-    + replicate offset, see :class:`~regulonado.regions.model.CountHead`) and a
+    + replicate offset, see :class:`~regulonado.training.cached.model.CountHead`) and a
     per-track noise parameter, both owned by the model so ``Trainer`` optimises them.
 
     The noise parameter is the Kendall et al. (2018) idea -- learn each task's noise

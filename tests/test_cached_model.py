@@ -1,10 +1,10 @@
-"""Unit tests for regulonado.regions.model."""
+"""Unit tests for regulonado.training.cached.model."""
 
 from __future__ import annotations
 
 import pytest
 import torch
-from regulonado.regions.model import (
+from regulonado.training.cached.model import (
     AttentionPool,
     CountHead,
     RegionCountConfig,

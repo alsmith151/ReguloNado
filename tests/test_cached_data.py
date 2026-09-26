@@ -1,4 +1,4 @@
-"""``regulonado.regions.data``: cache join, RC augmentation, and the UEF-ported stage pipeline."""
+"""``regulonado.training.cached.data``: cache join, RC augmentation, UEF-ported stage pipeline."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import pytest
 import torch
 from regulonado.counts.dataset import RegionCountData
 from regulonado.embeddings.cache import EmbeddingStore, region_table_hash
-from regulonado.regions import data as regions_data
-from regulonado.regions.data import (
+from regulonado.training.cached import data as regions_data
+from regulonado.training.cached.data import (
     CachedRegionDataset,
     RegionsDataConfig,
     attach_region_rows,
@@ -175,6 +175,37 @@ def test_prepare_region_data_masks_artefact_counts(tmp_path):
     assert prepared.count_mask_thresholds is not None
     # Untouched labels stay finite.
     assert np.isfinite(prepared.data.counts[1:, :]).all()
+
+
+def test_overlaps_any_merges_intervals_and_is_half_open():
+    regions = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1", "chr2"],
+            "start": [0, 100, 300, 0],
+            "end": [50, 200, 400, 50],
+        }
+    )
+    # [40, 60) and [55, 120) merge into [40, 120); [400, 500) only touches row 2's end.
+    mask = regions_data.overlaps_any(
+        regions, [("chr1", 40, 60), ("chr1", 55, 120), ("chr1", 400, 500)]
+    )
+    assert mask.tolist() == [True, True, False, False]
+
+
+def test_prepare_region_data_exclude_regions_drops_only_overlapping_train_regions(tmp_path):
+    data = _toy_data()
+    _write_cache(tmp_path / "emb", data.regions, k=2, d=3)
+    # Rows 0 and 1 are train; rows 4 and 5 are val (n_per_split=4, 2 kb apart).
+    exclude = tmp_path / "exclude.bed"
+    exclude.write_text("chr1\t100\t200\nchr1\t2500\t2600\nchr1\t8100\t10100\n")
+    prepared = _prepared(
+        data, embeddings_dir=tmp_path / "emb", count_mask_factor=0.0, exclude_regions=str(exclude)
+    )
+    kept = prepared.data.regions
+    assert kept.filter(pl.col("split") == "train").height == 2
+    assert 0 not in kept["start"].to_list() and 2000 not in kept["start"].to_list()
+    # val/test are the benchmark: never touched.
+    assert kept.filter(pl.col("split") == "val").height == 4
 
 
 def test_prepare_region_data_count_mask_factor_zero_disables_masking(tmp_path):

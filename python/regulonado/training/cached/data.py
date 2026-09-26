@@ -2,7 +2,7 @@
 
 :class:`CachedRegionDataset` is the training-time counterpart of
 :mod:`regulonado.embeddings.cache`: it yields ``{"features": [K, D], "labels":
-[n_tracks]}`` items for :class:`~regulonado.regions.model.RegionCountModel`, joining a
+[n_tracks]}`` items for :class:`~regulonado.training.cached.model.RegionCountModel`, joining a
 :class:`~regulonado.counts.dataset.RegionCountData` (BAM counts,
 :mod:`regulonado.counts`) to an :class:`~regulonado.embeddings.cache.EmbeddingStore`
 (cached frozen-backbone features, :mod:`regulonado.embeddings.cache`) via each region's
@@ -19,7 +19,9 @@ stage logic (count masking, ``specific_only``, ``contrast_weighting``) in one ca
 
 from __future__ import annotations
 
+import logging
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,12 +35,15 @@ from regulonado.counts.dataset import RegionCountData, group_count_rates
 from regulonado.embeddings.cache import EmbeddingManifest, EmbeddingStore, validate_manifest
 from regulonado.target_specificity import group_index_from_records
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "CachedRegionDataset",
     "PreparedRegionData",
     "RegionsDataConfig",
     "attach_region_rows",
     "group_names_and_track_groups",
+    "overlaps_any",
     "prepare_region_data",
 ]
 
@@ -117,7 +122,7 @@ class RegionsDataConfig:
         :mod:`regulonado.embeddings.cache` directory to read features from.
     target_group
         The group (cell type) name stage 2/3 knobs below are relative to (also used as
-        :class:`~regulonado.regions.metrics.GroupedCountMetrics`'s ``top_decile_task``).
+        :class:`~regulonado.training.cached.metrics.GroupedCountMetrics`'s ``top_decile_task``).
     specific_only, gini_std_threshold
         Stage 2: keep only cell type-specific regions -- Gini (at group level) above
         ``mean + gini_std_threshold * std``, computed over every region before
@@ -141,6 +146,11 @@ class RegionsDataConfig:
         A region absent from the embeddings cache is a clear error by default (a
         cache/region-table mismatch that should never be silently masked); set this to
         drop such regions instead, with a warning.
+    exclude_regions
+        BED/parquet of held-out sequences (e.g. benchmark candidate peaks): every *train*
+        region whose ``start``/``end`` overlaps one is dropped before anything else, so
+        the candidates never enter training at any stage. val/test are never touched.
+        Ported from UEF ``--exclude_bed``.
     """
 
     path: str = ""
@@ -156,6 +166,42 @@ class RegionsDataConfig:
     enable_rc_aug: bool = True
     preload: bool = False
     drop_missing_from_cache: bool = False
+    exclude_regions: str | None = None
+
+
+def overlaps_any(regions: pl.DataFrame, intervals: Sequence[tuple[str, int, int]]) -> np.ndarray:
+    """Boolean mask: which *regions* rows (``chrom``/``start``/``end``) overlap any interval."""
+    by_chrom: dict[str, list[tuple[int, int]]] = {}
+    for chrom, start, end in intervals:
+        by_chrom.setdefault(str(chrom), []).append((int(start), int(end)))
+    merged: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for chrom, spans in by_chrom.items():
+        spans.sort()
+        starts: list[int] = []
+        ends: list[int] = []
+        for start, end in spans:
+            if starts and start <= ends[-1]:
+                ends[-1] = max(ends[-1], end)
+            else:
+                starts.append(start)
+                ends.append(end)
+        merged[chrom] = (np.asarray(starts, dtype=np.int64), np.asarray(ends, dtype=np.int64))
+
+    mask = np.zeros(regions.height, dtype=bool)
+    chroms = regions["chrom"].cast(pl.Utf8).to_numpy()
+    region_starts = regions["start"].cast(pl.Int64).to_numpy()
+    region_ends = regions["end"].cast(pl.Int64).to_numpy()
+    for chrom, (starts, ends) in merged.items():
+        rows = np.flatnonzero(chroms == chrom)
+        if rows.size == 0:
+            continue
+        # Last merged interval starting before each region's end; merged intervals are
+        # disjoint and sorted, so it is the only one that can reach past the region start.
+        index = np.searchsorted(starts, region_ends[rows], side="left") - 1
+        hit = index >= 0
+        hit[hit] = ends[index[hit]] > region_starts[rows][hit]
+        mask[rows] = hit
+    return mask
 
 
 @dataclass(frozen=True)
@@ -172,8 +218,9 @@ class PreparedRegionData:
 def prepare_region_data(data: RegionCountData, cfg: RegionsDataConfig) -> PreparedRegionData:
     """Apply the UEF-ported stage pipeline to *data* (which must already carry ``region_row``).
 
-    In order (matching UEF ``build_trainer``): count masking (thresholds from the train
-    split only) -> ``specific_only`` filtering (over every region, before splitting) ->
+    In order (matching UEF ``build_trainer``): ``exclude_regions`` (train split only) ->
+    count masking (thresholds from the train split only) -> ``specific_only`` filtering
+    (over every region, before splitting) ->
     ``contrast_weighting`` sample weights (from the train split only, after filtering).
     Splitting into train/val/test itself is left to the caller/:class:`CachedRegionDataset`,
     since a single :class:`PreparedRegionData` is shared to build every split's dataset.
@@ -188,6 +235,18 @@ def prepare_region_data(data: RegionCountData, cfg: RegionsDataConfig) -> Prepar
             "prepare_region_data()"
         )
     group_names, track_groups = group_names_and_track_groups(data.tracks)
+
+    if cfg.exclude_regions:
+        from regulonado.normalization import read_regions
+
+        excluded = overlaps_any(data.regions, read_regions(Path(cfg.exclude_regions)))
+        excluded &= (data.regions["split"] == "train").to_numpy()
+        logger.info(
+            "exclude_regions: dropping %d train region(s) overlapping %s",
+            int(excluded.sum()),
+            cfg.exclude_regions,
+        )
+        data = data.take(~excluded)
 
     thresholds = None
     if cfg.count_mask_factor > 0:
@@ -230,7 +289,7 @@ class CachedRegionDataset(Dataset):
 
     Yields ``{"features": [K, D], "labels": [n_tracks]}`` (plus ``"sample_weight"``, a
     scalar, when *sample_weights* is given): both directly consumable by
-    :class:`~regulonado.regions.model.RegionCountModel` and a plain
+    :class:`~regulonado.training.cached.model.RegionCountModel` and a plain
     ``torch.utils.data.dataloader.default_collate``/
     ``transformers.default_data_collator``, since every item has the same shapes (the
     manifest's fixed ``K``/``D`` and *region_dataset*'s fixed ``n_tracks``). ``features``

@@ -1,4 +1,4 @@
-"""Unit tests for regulonado.regions.metrics.
+"""Unit tests for regulonado.training.cached.metrics.
 
 Expected numeric values were computed by running the same toy ``(predictions, labels)``
 pair through UEF's ``unique_enhancer_finding.modelling.metrics.GroupedCountMetrics``
@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-from regulonado.regions.metrics import GroupedCountMetrics, group_count_rates
+from regulonado.training.cached.metrics import GroupedCountMetrics, group_count_rates
 
 TRACK_GROUPS = [0, 0, 1]
 LOG_SIZE_FACTORS = torch.tensor([0.1, -0.1, 0.0])

@@ -23,7 +23,7 @@ from torch import Tensor, nn
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.utils import ModelOutput
 
-from regulonado.regions.loss import COUNT_NOISE_MODELS, CountLikelihoodLoss
+from regulonado.training.cached.loss import COUNT_NOISE_MODELS, CountLikelihoodLoss
 
 __all__ = [
     "AttentionPool",
@@ -72,7 +72,7 @@ class CountHead(nn.Module):
       (depth, PE vs SE, batch). A group with one track always gets ``delta = 0``.
 
     ``log_noise`` is the per-track noise parameter of
-    :class:`~regulonado.regions.loss.CountLikelihoodLoss` (log NB dispersion, or log
+    :class:`~regulonado.training.cached.loss.CountLikelihoodLoss` (log NB dispersion, or log
     sigma). Neither parameter is weight-decayed (see
     :meth:`RegionCountModel.count_head_parameter_names`): shrinking an offset or a
     noise scale toward zero is not regularisation of the sequence model.
@@ -163,16 +163,17 @@ class RegionCountConfig(PretrainedConfig):
         Soft cap on the predicted group log rate: ``eta_max - softplus(eta_max -
         eta)``, identity well below the cap, never above it. ``None`` disables it.
     count_noise
-        ``"nb"`` or ``"lognormal"`` (see :data:`~regulonado.regions.loss.COUNT_NOISE_MODELS`).
+        ``"nb"`` or ``"lognormal"``
+        (see :data:`~regulonado.training.cached.loss.COUNT_NOISE_MODELS`).
     count_replicate_offsets
         Whether :class:`CountHead` learns a centred per-track replicate offset.
     count_freeze_noise
         Freeze :class:`CountHead`'s ``log_noise`` (no gradient), for a later stage that
         keeps the noise scale from an earlier run.
     count_noise_shrinkage
-        Passed through to :class:`~regulonado.regions.loss.CountLikelihoodLoss`.
+        Passed through to :class:`~regulonado.training.cached.loss.CountLikelihoodLoss`.
     loss_contrast_weight, loss_contrast_multiplier, task_weights, contrast_task_weights
-        Passed through to :class:`~regulonado.regions.loss.CountLikelihoodLoss`; see
+        Passed through to :class:`~regulonado.training.cached.loss.CountLikelihoodLoss`; see
         its docstring.
     """
 
@@ -262,8 +263,8 @@ class RegionCountOutput(ModelOutput):
     """``RegionCountModel.forward`` output.
 
     ``logits`` are per-group expected rates ``exp(eta)``, ``[batch, n_groups]`` -- the
-    same quantity :class:`~regulonado.regions.metrics.GroupedCountMetrics` pools raw
-    per-track labels to via :func:`~regulonado.regions.metrics.group_count_rates`, so
+    same quantity :class:`~regulonado.training.cached.metrics.GroupedCountMetrics` pools raw
+    per-track labels to via :func:`~regulonado.training.cached.metrics.group_count_rates`, so
     ``eval_pred = (predictions, labels)`` from a ``transformers.Trainer`` eval loop can
     be fed to ``GroupedCountMetrics`` directly. ``loss`` is ``None`` at inference
     (``labels`` not given) or in a ``ModelOutput``/``nn.DataParallel`` context, where

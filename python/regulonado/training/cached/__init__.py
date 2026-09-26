@@ -1,16 +1,17 @@
 """Region-level count head training on cached backbone embeddings.
 
-See :mod:`regulonado.regions.model` for the model and config, :mod:`regulonado.regions.loss`
-for the count likelihood, and :mod:`regulonado.regions.metrics` for evaluation metrics.
+See :mod:`regulonado.training.cached.model` for the model and config,
+:mod:`regulonado.training.cached.loss` for the count likelihood, and
+:mod:`regulonado.training.cached.metrics` for evaluation metrics.
 """
 
-from regulonado.regions.loss import COUNT_NOISE_MODELS, CountLikelihoodLoss
-from regulonado.regions.metrics import (
+from regulonado.training.cached.loss import COUNT_NOISE_MODELS, CountLikelihoodLoss
+from regulonado.training.cached.metrics import (
     GroupedCountMetrics,
     PerTaskCorrelationMetrics,
     group_count_rates,
 )
-from regulonado.regions.model import (
+from regulonado.training.cached.model import (
     AttentionPool,
     CountHead,
     RegionCountConfig,

@@ -8,11 +8,23 @@
  several independent runs or warm-start phases should be orchestrated together.                     
                                                                                                     
 ╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
-│ *    dataset      PATH  Saved Regulonado/Hugging Face dataset directory [required]               │
+│ *    dataset      PATH  Training dataset: the profile dataset directory (trunk live), or the     │
+│                         region-count dataset from 'counts gather' (trunk cached)                 │
+│                         [required]                                                               │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --trunk                                 TEXT     live: run (and optionally fine-tune) the trunk  │
+│                                                  every step; cached: train a head on embeddings  │
+│                                                  cached by 'embed regions'                       │
+│                                                  [default: live]                                 │
+│ --embeddings                    -e      PATH     Embedding cache directory (trunk cached)        │
+│ --target-group                          TEXT     Set data.target_group (trunk cached), e.g.      │
+│                                                  HL-60                                           │
 │ --output-dir                    -o      PATH     Run directory for checkpoints and diagnostics   │
-│ --preset                        -p      TEXT     Named training preset [default: head_only]      │
+│ --preset                        -p      TEXT     Named phase preset: python/configs/experiment/  │
+│                                                  (trunk live, default head_only) or              │
+│                                                  python/configs/cached_experiment/ (trunk        │
+│                                                  cached, default pretrain)                       │
 │ --metadata                              PATH     tracks.parquet to use instead of the dataset    │
 │                                                  copy                                            │
 │ --nproc-per-node                        INTEGER  Use torchrun with this many local processes     │

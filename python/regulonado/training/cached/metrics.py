@@ -4,7 +4,7 @@ Ported from ``unique_enhancer_finding.modelling.metrics`` (UEF): ``GroupedCountM
 pools per-track counts into per-group rates and scores them with
 ``PerTaskCorrelationMetrics``, keeping the metric names (``contrast_pearson_mean``,
 ``contrast_pearson_<group>``, ``contrast_pearson_top_decile_<target>``) identical so
-runs of :class:`~regulonado.regions.model.RegionCountModel` compare directly with UEF.
+runs of :class:`~regulonado.training.cached.model.RegionCountModel` compare directly with UEF.
 
 Usable as ``transformers.Trainer(compute_metrics=...)``: ``GroupedCountMetrics.__call__``
 takes the ``(predictions, labels)`` pair ``Trainer`` hands ``compute_metrics`` (an
@@ -194,7 +194,7 @@ class GroupedCountMetrics:
         Per-track group index, ``[n_tracks]``, same order as the label columns.
     log_size_factors
         Per-track fixed log size factor, ``[n_tracks]``, same order and units as
-        :class:`~regulonado.regions.model.CountHead`.
+        :class:`~regulonado.training.cached.model.CountHead`.
     top_decile_task
         Optional group name to also report ``contrast_pearson_top_decile_<name>`` for.
     """

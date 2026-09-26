@@ -68,16 +68,40 @@ def sweep_train(
 def train(
     dataset: Annotated[
         Path,
-        typer.Argument(help="Saved Regulonado/Hugging Face dataset directory"),
+        typer.Argument(
+            help="Training dataset: the profile dataset directory (trunk live), or the "
+            "region-count dataset from 'counts gather' (trunk cached)"
+        ),
     ],
+    trunk: Annotated[
+        str,
+        typer.Option(
+            "--trunk",
+            help="live: run (and optionally fine-tune) the trunk every step; cached: train a "
+            "head on embeddings cached by 'embed regions'",
+        ),
+    ] = "live",
+    embeddings: Annotated[
+        Optional[Path],
+        typer.Option("--embeddings", "-e", help="Embedding cache directory (trunk cached)"),
+    ] = None,
+    target_group: Annotated[
+        Optional[str],
+        typer.Option("--target-group", help="Set data.target_group (trunk cached), e.g. HL-60"),
+    ] = None,
     output_dir: Annotated[
         Optional[Path],
         typer.Option("--output-dir", "-o", help="Run directory for checkpoints and diagnostics"),
     ] = None,
     preset: Annotated[
-        str,
-        typer.Option("--preset", "-p", help="Named training preset"),
-    ] = "head_only",
+        Optional[str],
+        typer.Option(
+            "--preset",
+            "-p",
+            help="Named phase preset: python/configs/experiment/ (trunk live, default "
+            "head_only) or python/configs/cached_experiment/ (trunk cached, default pretrain)",
+        ),
+    ] = None,
     metadata: Annotated[
         Optional[Path],
         typer.Option("--metadata", help="tracks.parquet to use instead of the dataset copy"),
@@ -166,11 +190,47 @@ def train(
             err=True,
         )
         raise typer.Exit(1)
+    if trunk not in ("live", "cached"):
+        raise typer.BadParameter("Expected 'live' or 'cached'", param_hint="--trunk")
+    if (trunk == "cached") != (embeddings is not None):
+        raise typer.BadParameter(
+            "--embeddings is required with --trunk cached, and only valid with it",
+            param_hint="--trunk/--embeddings",
+        )
+    live_only = {
+        "--metadata": metadata,
+        "--max-steps": max_steps,
+        "--eval-batch-size": eval_batch_size,
+        "--backbone-lr": backbone_lr,
+        "--schedule-only": schedule_only or None,
+    }
+    if trunk == "cached":
+        used = [flag for flag, value in live_only.items() if value is not None]
+        if used:
+            raise typer.BadParameter(
+                f"{', '.join(used)} only apply to --trunk live", param_hint="--trunk"
+            )
+    elif target_group is not None:
+        overrides_hint = "--set data.target_group=... is not a live-trunk setting"
+        raise typer.BadParameter(
+            f"--target-group only applies to --trunk cached ({overrides_hint})",
+            param_hint="--target-group",
+        )
+    preset = preset or ("head_only" if trunk == "live" else "pretrain")
 
-    overrides = [
-        f"+experiment={preset}",
-        f"data.path={dataset}",
-    ]
+    if trunk == "cached":
+        overrides = [
+            f"+cached_experiment={preset}",
+            f"data.path={dataset}",
+            f"data.embeddings_dir={embeddings}",
+        ]
+        if target_group is not None:
+            overrides.append(f"data.target_group={target_group}")
+    else:
+        overrides = [
+            f"+experiment={preset}",
+            f"data.path={dataset}",
+        ]
     if metadata is not None:
         overrides.append(f"data.metadata_path={metadata}")
     if output_dir is not None:
@@ -200,6 +260,23 @@ def train(
             )
         overrides.append(setting)
 
+    if print_config and trunk == "cached":
+        try:
+            from regulonado.training.cached.runner import resolved_cached_config
+        except ImportError as exc:
+            typer.echo(
+                "Hydra is required to inspect training presets. Install regulonado[train].",
+                err=True,
+            )
+            raise typer.Exit(127) from exc
+        try:
+            typer.echo(resolved_cached_config(preset, overrides[1:]))
+        except Exception as exc:
+            raise typer.BadParameter(
+                f"Could not compose preset {preset!r}: {exc}", param_hint="--preset/--set"
+            ) from exc
+        return
+
     if print_config or schedule_only:
         try:
             from regulonado.training.compose import resolved_training_config
@@ -226,6 +303,9 @@ def train(
         typer.echo(json.dumps(asdict(schedule), indent=2))
         return
 
+    module = (
+        "regulonado.training.cached.runner" if trunk == "cached" else "regulonado.training.runner"
+    )
     if nproc_per_node > 1:
         import random
 
@@ -237,11 +317,11 @@ def train(
             f"--nproc_per_node={nproc_per_node}",
             f"--master_port={master_port}",
             "-m",
-            "regulonado.training.runner",
+            module,
             *overrides,
         ]
     else:
-        command = [sys.executable, "-m", "regulonado.training.runner", *overrides]
+        command = [sys.executable, "-m", module, *overrides]
 
     env = os.environ.copy()
     if nproc_per_node <= 1:

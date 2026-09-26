@@ -16,7 +16,6 @@ from regulonado.cli.pipeline import pipeline as _pipeline
 from regulonado.cli.predict import predict
 from regulonado.cli.tracks import tracks_app
 from regulonado.cli.train import sweep_train, train
-from regulonado.cli.train_regions import train_regions
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -111,7 +110,6 @@ def main() -> None:
 app.command()(config)
 app.command()(init)
 app.command()(train)
-app.command("train-regions")(train_regions)
 app.command("sweep-train", hidden=True)(sweep_train)
 app.command()(dataset)
 app.command()(predict)
