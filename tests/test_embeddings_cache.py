@@ -19,6 +19,7 @@ mismatch detection.
 
 from __future__ import annotations
 
+import numpy as np
 import polars as pl
 import pytest
 import torch
@@ -485,3 +486,34 @@ def test_in_memory_falls_back_to_memory_mapping_when_the_cache_does_not_fit(
 
     monkeypatch.setattr(cache, "available_memory_bytes", lambda: 64 * 2**30)
     assert EmbeddingStore(out_dir, in_memory=True).in_memory
+
+
+def test_in_memory_store_never_fingerprints_its_contents(tmp_path, monkeypatch):
+    """``datasets`` fingerprints an in-memory table by pickling it whole, which copies the
+    cache and overflows Arrow's 32-bit list offsets on a full-size one; the store must
+    supply its own fingerprint instead."""
+    import datasets.arrow_dataset as arrow_dataset
+    from datasets.table import InMemoryTable
+    from regulonado.embeddings import cache
+
+    regions = _regions_frame([_tile_row("chrTile", 1000), _tile_row("chrTile", 4077)])
+    out_dir = tmp_path / "emb"
+    genome_path = tmp_path / "genome.fa"
+    _write_fasta(genome_path, {"chrTile": _position_encoded_sequence(625 * BIN_SIZE, BIN_SIZE)})
+    embed_regions(
+        regions, open_genome(genome_path), _FlexiblePositionAdapter(BIN_SIZE), out_dir,
+        backbone="stub", context=4096, stride=2048,
+    )
+    mapped = EmbeddingStore(out_dir)
+
+    original = arrow_dataset.generate_fingerprint
+
+    def refuse_in_memory(dataset):
+        assert not isinstance(dataset._data, InMemoryTable), "hashed an in-memory table"
+        return original(dataset)
+
+    monkeypatch.setattr(arrow_dataset, "generate_fingerprint", refuse_in_memory)
+    monkeypatch.setattr(cache, "available_memory_bytes", lambda: 64 * 2**30)
+    store = EmbeddingStore(out_dir, in_memory=True)
+    assert store.in_memory
+    np.testing.assert_array_equal(store.get_many([0, 1]), mapped.get_many([0, 1]))

@@ -634,6 +634,25 @@ def embed_regions(
         )
 
 
+def _open_chrom_file(path: Path, in_memory: bool) -> Dataset:
+    """One ``<chrom>.arrow`` as a ``datasets.Dataset``, memory-mapped or read into RAM.
+
+    In RAM, the dataset gets a fingerprint from the file's path, size and modification
+    time. Left to itself, ``datasets`` fingerprints an in-memory table by pickling its
+    contents, which merges every record batch into one array: a full copy of the cache,
+    and past ~2^31 values (a 1M-region AlphaGenome cache holds ~3e10) an Arrow
+    "offset overflow" error.
+    """
+    if not in_memory:
+        return Dataset.from_file(str(path))
+    from datasets.table import InMemoryTable
+
+    stat = path.stat()
+    key = f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
+    fingerprint = hashlib.sha256(key.encode()).hexdigest()[:16]
+    return Dataset(InMemoryTable.from_file(str(path)), fingerprint=fingerprint)
+
+
 def available_memory_bytes() -> int | None:
     """Memory this process can still allocate: the tightest cgroup limit it runs under
     (a SLURM job's allocation) less the anonymous memory already charged to it, or the
@@ -740,9 +759,7 @@ class EmbeddingStore:
         if in_memory:
             in_memory = _fits_in_memory(sum(path.stat().st_size for path in paths), self.dir)
         self.in_memory = in_memory
-        dataset = concatenate_datasets(
-            [Dataset.from_file(str(path), in_memory=in_memory) for path in paths]
-        )
+        dataset = concatenate_datasets([_open_chrom_file(path, in_memory) for path in paths])
         rows = dataset.data.column("region_row").to_numpy()
         self._position[rows] = np.arange(len(rows), dtype=np.int64)
         for column in ("features", "features_rc") if self.has_rc else ("features",):
