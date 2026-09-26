@@ -434,3 +434,54 @@ def test_embed_cli_with_monkeypatched_stub_adapter(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert (out_dir / "manifest.parquet").exists()
     assert (out_dir / "chrTile.arrow").exists()
+
+
+def _fake_slurm_cgroup(tmp_path, *, limit: int, anon: int, mem_available_kb: int):
+    """A cgroup v2 tree for a SLURM step under a job with a memory limit."""
+    proc, root = tmp_path / "proc", tmp_path / "cgroup"
+    (proc / "self").mkdir(parents=True)
+    (proc / "self" / "cgroup").write_text("0::/slurm/job_1/step_0\n")
+    (proc / "meminfo").write_text(f"MemTotal: 999999999 kB\nMemAvailable: {mem_available_kb} kB\n")
+    step, job = root / "slurm" / "job_1" / "step_0", root / "slurm" / "job_1"
+    step.mkdir(parents=True)
+    (step / "memory.max").write_text("max\n")
+    (job / "memory.max").write_text(f"{limit}\n")
+    (job / "memory.stat").write_text(f"anon {anon}\nfile 123456789\n")
+    return proc, root
+
+
+def test_available_memory_is_the_job_limit_less_its_anonymous_use(tmp_path, monkeypatch):
+    from regulonado.embeddings import cache
+
+    proc, root = _fake_slurm_cgroup(
+        tmp_path, limit=64 * 2**30, anon=4 * 2**30, mem_available_kb=1 << 30
+    )
+    monkeypatch.setattr(cache, "_PROC", proc)
+    monkeypatch.setattr(cache, "_CGROUP_ROOT", root)
+    # Page cache ("file") does not count as used; the node's MemAvailable is larger.
+    assert cache.available_memory_bytes() == 60 * 2**30
+
+
+def test_in_memory_falls_back_to_memory_mapping_when_the_cache_does_not_fit(
+    tmp_path, monkeypatch, caplog
+):
+    from regulonado.embeddings import cache
+
+    regions = _regions_frame([_tile_row("chrTile", 1000), _tile_row("chrTile", 4077)])
+    out_dir = tmp_path / "emb"
+    genome_path = tmp_path / "genome.fa"
+    _write_fasta(genome_path, {"chrTile": _position_encoded_sequence(625 * BIN_SIZE, BIN_SIZE)})
+    embed_regions(
+        regions, open_genome(genome_path), _FlexiblePositionAdapter(BIN_SIZE), out_dir,
+        backbone="stub", context=4096, stride=2048,
+    )
+
+    monkeypatch.setattr(cache, "available_memory_bytes", lambda: 1024)
+    with caplog.at_level("WARNING", logger="regulonado.embeddings.cache"):
+        store = EmbeddingStore(out_dir, in_memory=True)
+    assert not store.in_memory
+    assert "memory-mapping instead" in caplog.text
+    assert store.get(0).shape == (store.k, store.d)
+
+    monkeypatch.setattr(cache, "available_memory_bytes", lambda: 64 * 2**30)
+    assert EmbeddingStore(out_dir, in_memory=True).in_memory

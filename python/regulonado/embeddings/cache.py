@@ -45,6 +45,7 @@ as the forward pass. See :func:`regulonado.sequence.reverse_complement_onehot` a
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 from collections.abc import Sequence
@@ -73,7 +74,16 @@ __all__ = [
     "write_chrom_embeddings",
 ]
 
+logger = logging.getLogger(__name__)
+
 MANIFEST_FILENAME = "manifest.parquet"
+#: Share of the job's free memory an in-memory cache may take; the rest is left for the
+#: model, data-loader workers and Python.
+_IN_MEMORY_BUDGET = 0.8
+#: Where this process's cgroups and system memory are read from (tests point these at a
+#: fake tree).
+_PROC = Path("/proc")
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
 #: Extension of each per-chromosome embeddings file.
 CHROM_SUFFIX = ".arrow"
 #: Regions buffered before each write while embedding, to bound memory.
@@ -624,13 +634,92 @@ def embed_regions(
         )
 
 
+def available_memory_bytes() -> int | None:
+    """Memory this process can still allocate: the tightest cgroup limit it runs under
+    (a SLURM job's allocation) less the anonymous memory already charged to it, or the
+    system's ``MemAvailable`` outside any limit. ``None`` if neither can be read.
+
+    Page cache is left out of "used": the kernel reclaims it under pressure, and on a
+    network filesystem it can fill most of a job's limit on its own.
+    """
+    candidates: list[int] = []
+    for limit, used in _cgroup_limits():
+        candidates.append(max(limit - used, 0))
+    try:
+        for line in (_PROC / "meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                candidates.append(int(line.split()[1]) * 1024)
+                break
+    except OSError:
+        pass
+    return min(candidates) if candidates else None
+
+
+def _cgroup_limits() -> list[tuple[int, int]]:
+    """``(limit, anonymous usage)`` in bytes for each memory-limited cgroup this process
+    is in, from its own cgroup up to the root (cgroup v2, or v1's memory controller)."""
+    try:
+        lines = (_PROC / "self" / "cgroup").read_text().splitlines()
+    except OSError:
+        return []
+    found: list[tuple[int, int]] = []
+    for line in lines:
+        _, controllers, path = line.split(":", 2)
+        if controllers == "":  # v2
+            root, limit_file, stat_key = _CGROUP_ROOT, "memory.max", "anon"
+        elif "memory" in controllers.split(","):  # v1
+            root = _CGROUP_ROOT / "memory"
+            limit_file, stat_key = "memory.limit_in_bytes", "total_rss"
+        else:
+            continue
+        directory = root / path.lstrip("/")
+        while True:
+            try:
+                raw = (directory / limit_file).read_text().strip()
+                if raw != "max" and int(raw) < 2**60:
+                    stat = (directory / "memory.stat").read_text().split()
+                    used = int(stat[stat.index(stat_key) + 1])
+                    found.append((int(raw), used))
+            except (OSError, ValueError):
+                pass
+            if directory == root:
+                break
+            directory = directory.parent
+    return found
+
+
+def _fits_in_memory(size_bytes: int, where: Path) -> bool:
+    """Whether a *size_bytes* cache fits in this job's memory; warns and says no if not."""
+    available = available_memory_bytes()
+    if available is None or size_bytes <= _IN_MEMORY_BUDGET * available:
+        logger.info(
+            "loading %.1f GiB of embeddings from %s into RAM (%s GiB available)",
+            size_bytes / 2**30,
+            where,
+            "?" if available is None else f"{available / 2**30:.1f}",
+        )
+        return True
+    logger.warning(
+        "in_memory requested, but %s holds %.1f GiB and this job has %.1f GiB free: "
+        "memory-mapping instead (slower on a network filesystem). Request at least "
+        "%.0f GB for this job to load it into RAM.",
+        where,
+        size_bytes / 2**30,
+        available / 2**30,
+        size_bytes / _IN_MEMORY_BUDGET / 1e9 + 16,
+    )
+    return False
+
+
 class EmbeddingStore:
     """Random access, by ``region_row``, over one embeddings directory.
 
     Every ``<chrom>.arrow`` is opened with ``datasets`` and concatenated -- memory-mapped by
     default, so opening is cheap, a lookup reads only that region's bytes, and forked
     ``DataLoader`` workers share the mapping; with ``in_memory=True`` the files are read
-    into RAM once, sequentially, instead. ``region_row`` -> position is a dense numpy
+    into RAM once, sequentially, instead -- provided they fit in the job's memory
+    (:func:`available_memory_bytes`); otherwise it warns and memory-maps. ``in_memory``
+    on the store records which happened. ``region_row`` -> position is a dense numpy
     array, since a directory built one chromosome at a time may not yet cover every region.
     Features come back as stored, ``float16``.
     """
@@ -645,8 +734,12 @@ class EmbeddingStore:
         paths = sorted(self.dir.glob(f"*{CHROM_SUFFIX}"))
         self._position = np.full(self.manifest.n_regions, -1, dtype=np.int64)
         self._columns: dict[str, Dataset] = {}
+        self.in_memory = False
         if not paths:
             return
+        if in_memory:
+            in_memory = _fits_in_memory(sum(path.stat().st_size for path in paths), self.dir)
+        self.in_memory = in_memory
         dataset = concatenate_datasets(
             [Dataset.from_file(str(path), in_memory=in_memory) for path in paths]
         )
