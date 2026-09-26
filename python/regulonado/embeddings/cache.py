@@ -202,7 +202,8 @@ def validate_manifest(embeddings_dir: str | Path, regions_df: pl.DataFrame) -> E
 
 def _write_manifest(embeddings_dir: Path, manifest: EmbeddingManifest) -> None:
     path = embeddings_dir / MANIFEST_FILENAME
-    partial = path.with_name(f".{path.name}.partial")
+    # Per-process temp name: concurrent per-chromosome jobs may all write the manifest.
+    partial = path.with_name(f".{path.name}.{os.getpid()}.partial")
     _manifest_frame(manifest).write_parquet(partial)
     os.replace(partial, path)
 
