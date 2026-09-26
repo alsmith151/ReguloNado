@@ -152,6 +152,24 @@ def test_alphagenome_iter_named_blocks_yields_top_level_modules():
     assert "tower" in names
 
 
+def test_alphagenome_encoder_features_keep_only_the_encoder():
+    pytest.importorskip("alphagenome_pytorch")
+    from alphagenome_pytorch import AlphaGenome
+
+    torch.manual_seed(0)
+    adapter = AlphaGenomeBackboneAdapter(AlphaGenome(), features="encoder")
+    assert adapter.feature_dim == 1536
+    assert not hasattr(adapter.model, "tower")
+    # The encoder has no pairwise attention, so inputs shorter than 2048 bp work.
+    assert adapter.output_span(1024) == (0, 8)
+    features = adapter.forward_features(torch.randn(2, 4, 1024))
+    assert features.shape == (2, 1536, 8)
+    names = [name for name, _ in adapter.iter_named_blocks()]
+    assert names == ["dna_embedder", *(f"down_blocks.{i}" for i in range(6))]
+    with pytest.raises(ValueError, match="'trunk' or 'encoder'"):
+        AlphaGenomeBackboneAdapter(AlphaGenome(), features="tower")
+
+
 def _accelerator_available() -> bool:
     if torch.cuda.is_available():
         return True

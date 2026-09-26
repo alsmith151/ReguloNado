@@ -26,9 +26,10 @@ CACHED_PRESETS = ("pretrain", "specific", "target")
 PRESETS_BY_TRUNK = {"live": LIVE_PRESETS, "cached": CACHED_PRESETS}
 # (trunk, target) pairs with a training implementation.
 SUPPORTED_RUN_KINDS = {("live", "profile"), ("cached", "region_counts")}
-# AlphaGenome takes flexible-length input; these are embed_regions' defaults.
-ALPHAGENOME_CONTEXT = 1_048_576
-ALPHAGENOME_STRIDE = 524_288
+# AlphaGenome takes flexible-length input; embed_regions' default tiling per feature layer:
+# the full trunk at 1 Mb keeping the central 512 kb, the CNN encoder (receptive field
+# ~1.5 kb) at 4 kb keeping the central 2 kb.
+ALPHAGENOME_TILING = {"trunk": (1_048_576, 524_288), "encoder": (4_096, 2_048)}
 SCALING_METHODS = ("tmm", "original", "bamnado", "seqnado", "anchor")
 BAMNADO_METHODS = ("tmm", "csaw-background", "cpm", "median-of-ratios", "spike-in")
 QC_CHECKS = ("sparsity", "interval_signal", "replicate_concordance", "anchor")
@@ -266,6 +267,20 @@ class BackboneConfig(BaseModel):
     pretrained: str = Field(
         min_length=1, description="Checkpoint name or path (see python/configs/backbone/)."
     )
+    features: Literal["trunk", "encoder"] = Field(
+        default="trunk",
+        description=(
+            "Which features the trunk hands the head: 'trunk' (its final embeddings) or "
+            "'encoder' (AlphaGenome only: the CNN encoder's 1536-d 128 bp output, before the "
+            "transformer -- local sequence features over short inputs)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _encoder_is_alphagenome(self) -> "BackboneConfig":
+        if self.features == "encoder" and self.type != "alphagenome":
+            raise ValueError("backbone.features: encoder is only available for alphagenome")
+        return self
 
 
 class TrunkCacheConfig(BaseModel):
@@ -331,6 +346,11 @@ class TrainRun(BaseModel):
             )
         if self.cache is not None and self.trunk != "cached":
             raise ValueError(f"run {self.name!r}: 'cache' only applies to trunk: cached")
+        if self.backbone.features != "trunk" and self.target != "region_counts":
+            raise ValueError(
+                f"run {self.name!r}: backbone.features: {self.backbone.features} is only "
+                "implemented for target: region_counts"
+            )
         if (
             self.cache is not None
             and self.backbone.type != "alphagenome"
@@ -342,6 +362,12 @@ class TrainRun(BaseModel):
             )
         return self
 
+    def tiling(self) -> tuple[int, int]:
+        """``(context, stride)`` an AlphaGenome embedding cache is built with."""
+        cache = self.cache or TrunkCacheConfig()
+        default_context, default_stride = ALPHAGENOME_TILING[self.backbone.features]
+        return cache.context or default_context, cache.stride or default_stride
+
     def cache_name(self) -> str:
         """Directory name of this run's embedding cache: runs that would compute the same
         embeddings share one."""
@@ -349,10 +375,10 @@ class TrainRun(BaseModel):
         pretrained = re.sub(r"[^A-Za-z0-9._-]+", "_", self.backbone.pretrained).strip("_.")
         parts = [self.backbone.type, pretrained]
         if self.backbone.type == "alphagenome":
-            parts += [
-                f"ctx{cache.context or ALPHAGENOME_CONTEXT}",
-                f"stride{cache.stride or ALPHAGENOME_STRIDE}",
-            ]
+            context, stride = self.tiling()
+            if self.backbone.features != "trunk":
+                parts.append(self.backbone.features)
+            parts += [f"ctx{context}", f"stride{stride}"]
         if cache.pool_to:
             parts.append(f"pool{cache.pool_to}")
         if cache.rc:

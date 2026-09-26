@@ -24,10 +24,13 @@
 │                                          chromosome)                                             │
 │    --rc                                  Also cache a reverse-complement pass (features_rc)      │
 │    --pool-to                    INTEGER  Average adjacent bins up to this bp width               │
-│    --context                    INTEGER  Input length (bp) for flexible backbones (AlphaGenome)  │
-│                                          [default: 1048576]                                      │
-│    --stride                     INTEGER  Central bp kept per window for flexible backbones       │
-│                                          [default: 524288]                                       │
+│    --features                   TEXT     trunk (final embeddings) or encoder (AlphaGenome's CNN  │
+│                                          encoder output)                                         │
+│                                          [default: trunk]                                        │
+│    --context                    INTEGER  Input length (bp) for flexible backbones (AlphaGenome); │
+│                                          default per --features                                  │
+│    --stride                     INTEGER  Central bp kept per window for flexible backbones;      │
+│                                          default per --features                                  │
 │    --batch-size                 INTEGER  Windows per forward pass [default: 1]                   │
 │    --device                     TEXT     auto (cuda > mps > cpu), cpu, cuda or mps               │
 │                                          [default: auto]                                         │

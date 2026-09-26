@@ -48,7 +48,12 @@ def _run(name: str = "run_a", *, seed: int = 0, pretrained: str = "model/a", **k
         name=name,
         seed=seed,
         recipe=kwargs.pop("recipe", "finetune"),
-        backbone=BackboneConfig(type=kwargs.pop("type", "borzoi"), pretrained=pretrained),
+        backbone=kwargs.pop("backbone", None)
+        or BackboneConfig(
+            type=kwargs.pop("type", "borzoi"),
+            pretrained=pretrained,
+            features=kwargs.pop("features", "trunk"),
+        ),
         **kwargs,
     )
 
@@ -443,6 +448,17 @@ def test_unimplemented_trunk_target_pairs_are_rejected():
         _run(trunk="cached", target="profile")
     with pytest.raises(ValueError, match="trunk 'live' with target 'region_counts'"):
         _run(target="region_counts")
+
+
+def test_encoder_features_are_alphagenome_region_count_only():
+    encoder = {"type": "alphagenome", "pretrained": "all_folds", "features": "encoder"}
+    with pytest.raises(ValueError, match="only available for alphagenome"):
+        BackboneConfig(type="borzoi", pretrained="model/a", features="encoder")
+    with pytest.raises(ValueError, match="only implemented for target: region_counts"):
+        _run(backbone=encoder)
+    run = _cached(features="encoder")
+    assert run.cache_name() == "alphagenome-all_folds-encoder-ctx4096-stride2048"
+    assert run.tiling() == (4096, 2048)
 
 
 def test_cache_settings_apply_to_cached_alphagenome_runs_only():

@@ -57,14 +57,27 @@ def regions(
         Optional[int],
         typer.Option("--pool-to", help="Average adjacent bins up to this bp width"),
     ] = None,
+    features: Annotated[
+        str,
+        typer.Option(
+            "--features",
+            help="trunk (final embeddings) or encoder (AlphaGenome's CNN encoder output)",
+        ),
+    ] = "trunk",
     context: Annotated[
-        int,
-        typer.Option("--context", help="Input length (bp) for flexible backbones (AlphaGenome)"),
-    ] = 1_048_576,
+        Optional[int],
+        typer.Option(
+            "--context",
+            help="Input length (bp) for flexible backbones (AlphaGenome); default per --features",
+        ),
+    ] = None,
     stride: Annotated[
-        int,
-        typer.Option("--stride", help="Central bp kept per window for flexible backbones"),
-    ] = 524_288,
+        Optional[int],
+        typer.Option(
+            "--stride",
+            help="Central bp kept per window for flexible backbones; default per --features",
+        ),
+    ] = None,
     batch_size: Annotated[
         int, typer.Option("--batch-size", help="Windows per forward pass")
     ] = 1,
@@ -87,6 +100,7 @@ def regions(
     ``<out>/manifest.parquet``, checked for consistency on every rerun.
     """
     import polars as pl
+    from regulonado.config.models import ALPHAGENOME_TILING
     from regulonado.embeddings.cache import embed_regions as _embed_regions
     from regulonado.model.adapters import BackboneSpec, build_backbone_adapter
     from regulonado.sequence import open_genome
@@ -95,9 +109,15 @@ def regions(
         region_dataset / "regions.parquet" if region_dataset.is_dir() else region_dataset
     )
     region_table = pl.read_parquet(regions_path)
+    if features not in ALPHAGENOME_TILING:
+        raise typer.BadParameter(
+            f"Expected one of {sorted(ALPHAGENOME_TILING)}", param_hint="--features"
+        )
+    default_context, default_stride = ALPHAGENOME_TILING[features]
     spec = BackboneSpec(
         backbone_type=backbone,  # type: ignore[arg-type]
         pretrained_name=pretrained,
+        features=features,  # type: ignore[arg-type]
         allow_random_init=allow_random_init,
     )
     adapter = build_backbone_adapter(spec)
@@ -109,13 +129,13 @@ def regions(
         genome,
         adapter,
         out,
-        backbone=backbone,
+        backbone=backbone if features == "trunk" else f"{backbone}:{features}",
         checkpoint=pretrained or "",
         chroms=chroms,
         rc=rc,
         pool_to=pool_to,
-        context=context,
-        stride=stride,
+        context=context or default_context,
+        stride=stride or default_stride,
         batch_size=batch_size,
         device=resolved_device,
     )

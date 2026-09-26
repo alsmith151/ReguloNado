@@ -40,15 +40,16 @@ def _embed_flags(cache_name):
     run = EMBEDDING_CACHES[cache_name]
     cache = run.cache
     flags = ["--backbone", run.backbone.type, "--pretrained", shlex.quote(run.backbone.pretrained)]
+    if run.backbone.features != "trunk":
+        flags += ["--features", run.backbone.features]
+    if run.backbone.type == "alphagenome":
+        context, stride = run.tiling()
+        flags += ["--context", str(context), "--stride", str(stride)]
     if cache is not None:
         if cache.rc:
             flags.append("--rc")
         if cache.pool_to:
             flags += ["--pool-to", str(cache.pool_to)]
-        if cache.context:
-            flags += ["--context", str(cache.context)]
-        if cache.stride:
-            flags += ["--stride", str(cache.stride)]
         flags += ["--batch-size", str(cache.batch_size)]
     return " ".join(flags)
 

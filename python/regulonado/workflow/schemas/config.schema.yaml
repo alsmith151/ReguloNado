@@ -277,6 +277,17 @@ $defs:
         minLength: 1
         title: Pretrained
         type: string
+      features:
+        default: trunk
+        description: 'Which features the trunk hands the head: ''trunk'' (its final
+          embeddings) or ''encoder'' (AlphaGenome only: the CNN encoder''s 1536-d
+          128 bp output, before the transformer -- local sequence features over short
+          inputs).'
+        enum:
+        - trunk
+        - encoder
+        title: Features
+        type: string
     required:
     - pretrained
     title: BackboneConfig

@@ -6,6 +6,9 @@ name: alphagenome
 # a .pth/.safetensors weights file. Weights are distributed under a non-commercial
 # licence -- see that repo's LICENSE before using them outside research.
 pretrained_name: all_folds
+# Features handed to the head: "trunk" (3072-d 128 bp embeddings after the transformer) or
+# "encoder" (the CNN encoder's 1536-d 128 bp output: local features, short inputs).
+features: trunk
 # AlphaGenome has no centre-crop/target-length concept: it is fully convolutional at
 # 128 bp bins over the whole input. Unused; kept for parity with the other backbone configs.
 target_length: null

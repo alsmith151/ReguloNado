@@ -168,6 +168,11 @@ regulonado embed regions region_set.parquet genome.fa --backbone alphagenome \
   and uses the `[B, 3072, L/128]` 128 bp embedding. It uses bf16 autocast on CUDA and
   float32 elsewhere.
 - Input must be a multiple of 128 bp and at least 2,048 bp.
+- **`backbone.features: encoder`** uses only the CNN encoder: its 1536-d 128 bp output
+  before the transformer, from a ~1.5 kb receptive field. Local sequence features, no
+  long-range context. The adapter keeps only the encoder module (about 90M of the 450M
+  parameters), and caches tile 4 kb windows keeping the central 2 kb by default. It is
+  the ablation for "how much of specificity is local", and cheap enough to fine-tune.
 - **MPS** needs `PYTORCH_ENABLE_MPS_FALLBACK=1` in the environment *before* Python starts,
   because the rotary embedding uses `aten::logspace`. At 131 kb, one pass takes about
   1 s on an M-series laptop.

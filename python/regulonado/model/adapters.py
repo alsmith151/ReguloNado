@@ -45,6 +45,9 @@ class BackboneSpec:
         Prediction length for Enformer-style models (default from dataset).
     config_overrides : dict[str, Any] | None, optional
         Config parameters to override when building from scratch.
+    features : {"trunk", "encoder"}, optional
+        Which features the adapter returns: the backbone's final embeddings (default), or,
+        for AlphaGenome only, its CNN encoder's output before the transformer.
     allow_random_init : bool, optional
         If False (default), raises ValueError when pretrained_name is None.
         Set True to deliberately train from scratch.
@@ -55,6 +58,7 @@ class BackboneSpec:
     feature_dim: int | None = None
     target_length: int | None = None
     config_overrides: dict[str, Any] | None = None
+    features: Literal["trunk", "encoder"] = "trunk"
     # Opt-in guard: building a backbone without pretrained weights yields a randomly
     # initialised network. That is almost never intended for transfer learning, so it
     # must be requested explicitly rather than happening as a silent fallback.
@@ -437,18 +441,37 @@ class AlphaGenomeBackboneAdapter(BaseBackboneAdapter):
     resolution with no fixed context length or centre-crop, so ``forward_features``
     accepts any input length that is a multiple of 128 and returns a feature map
     covering the whole input (``output_span`` offset is always 0).
+
+    ``features="trunk"`` returns the 3072-d 128 bp embeddings after the transformer tower
+    (long-range context). ``features="encoder"`` returns the CNN encoder's 1536-d 128 bp
+    output instead -- local sequence features from a ~1.5 kb receptive field -- and keeps
+    only the encoder module, so the tower/decoder/heads' ~360M unused parameters are
+    never held in memory.
     """
 
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, features: str = "trunk"):
         super().__init__()
-        self.model = model
-        self.feature_dim = 3072
+        if features not in ("trunk", "encoder"):
+            raise ValueError(f"features must be 'trunk' or 'encoder'; got {features!r}")
+        self.features = features
+        self.feature_dim = 1536 if features == "encoder" else 3072
         self.output_bin_size = 128
         self.input_multiple = self.output_bin_size
         self.fixed_input_length = None
+        if features == "encoder":
+            model = model.encoder
         # See BorzoiBackboneAdapter: keep float32 master weights, bf16 compute only
         # under autocast (forward_features), so AdamW updates aren't quantised by bf16.
-        self.model = self.model.float()
+        self.model = model.float()
+
+    def set_gradient_checkpointing(self, enabled: bool) -> None:
+        """Recompute the encoder's/tower's blocks in backward instead of storing their
+        activations (``alphagenome-pytorch``'s own checkpointing; no effect without grad)."""
+        modules = [self.model] if self.features == "encoder" else [
+            self.model.encoder, self.model.tower, self.model.decoder
+        ]
+        for module in modules:
+            module.gradient_checkpointing = enabled
 
     def forward_features(self, input_ids: torch.Tensor) -> torch.Tensor:
         """[B, 4, L] one-hot -> [B, 3072, L/128] AlphaGenome 128 bp embeddings.
@@ -468,24 +491,27 @@ class AlphaGenomeBackboneAdapter(BaseBackboneAdapter):
             )
         param_dtype = next(self.model.parameters()).dtype
         sequence_major = input_ids.transpose(1, 2).to(param_dtype)  # NCL -> NLC (B, L, 4)
-        organism_index = torch.zeros(
-            sequence_major.shape[0], dtype=torch.long, device=sequence_major.device
-        )
         if input_ids.is_cuda:
             # Always bf16, as Borzoi's forward_features does -- see there for why not
             # torch.get_autocast_dtype("cuda").
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                outputs = self.model.encode(
-                    sequence_major, organism_index, resolutions=(128,), channels_last=False
-                )
-        else:
-            # CPU/MPS: float32. MPS has no kernel for one op AlphaGenome's rotary
-            # embeddings use (`aten::logspace`), so running on MPS needs the process
-            # started with PYTORCH_ENABLE_MPS_FALLBACK=1 (checked once at process
-            # start, so it can't be set here) to route just that op to CPU.
-            outputs = self.model.encode(
-                sequence_major, organism_index, resolutions=(128,), channels_last=False
-            )
+                return self._features(sequence_major)
+        # CPU/MPS: float32. MPS has no kernel for one op AlphaGenome's rotary
+        # embeddings use (`aten::logspace`), so running on MPS needs the process
+        # started with PYTORCH_ENABLE_MPS_FALLBACK=1 (checked once at process
+        # start, so it can't be set here) to route just that op to CPU.
+        return self._features(sequence_major)
+
+    def _features(self, sequence_major: torch.Tensor) -> torch.Tensor:
+        if self.features == "encoder":
+            encoded, _intermediates = self.model(sequence_major)  # [B, 1536, L/128]
+            return encoded
+        organism_index = torch.zeros(
+            sequence_major.shape[0], dtype=torch.long, device=sequence_major.device
+        )
+        outputs = self.model.encode(
+            sequence_major, organism_index, resolutions=(128,), channels_last=False
+        )
         return outputs["embeddings_128bp"]
 
     def output_span(self, input_length: int) -> tuple[int, int]:
@@ -497,15 +523,23 @@ class AlphaGenomeBackboneAdapter(BaseBackboneAdapter):
         return 0, input_length // self.output_bin_size
 
     def iter_named_blocks(self) -> Iterable[tuple[str, nn.Module]]:
-        """Top-level trunk modules in data-flow order.
+        """Trunk modules in data-flow order.
 
-        AlphaGenome's block structure (encoder down-blocks, transformer tower,
-        decoder up-blocks, output embedders) doesn't map onto Borzoi/Enformer's
-        "transformer blocks then a short output tail" shape, so unlike those
-        adapters this yields whole top-level submodules rather than individual
-        transformer layers. FreezePolicy's "unfreeze last N" still works against
-        this ordering; it just unfreezes whole stages rather than single blocks.
+        ``features="trunk"``: AlphaGenome's block structure (encoder down-blocks,
+        transformer tower, decoder up-blocks, output embedders) doesn't map onto
+        Borzoi/Enformer's "transformer blocks then a short output tail" shape, so unlike
+        those adapters this yields whole top-level submodules rather than individual
+        transformer layers. FreezePolicy's "unfreeze last N" still works against this
+        ordering; it just unfreezes whole stages rather than single blocks.
+
+        ``features="encoder"``: the DNA embedder, then each of the six down-blocks, so
+        "unfreeze last N" unfreezes the N coarsest-resolution conv blocks.
         """
+        if self.features == "encoder":
+            yield "dna_embedder", self.model.dna_embedder
+            for index, block in enumerate(self.model.down_blocks):
+                yield f"down_blocks.{index}", block
+            return
         for name, module in self.model.named_children():
             yield name, module
 
@@ -520,11 +554,11 @@ class AlphaGenomeBackboneAdapter(BaseBackboneAdapter):
         if spec.pretrained_name:
             weights_path = _resolve_alphagenome_weights_path(spec.pretrained_name)
             model = AlphaGenome.from_pretrained(weights_path)
-            return cls(model)
+            return cls(model, features=spec.features)
 
         _require_pretrained_or_explicit_random(spec, example="all_folds")
         overrides = dict(spec.config_overrides or {})
-        return cls(AlphaGenome(**overrides))
+        return cls(AlphaGenome(**overrides), features=spec.features)
 
 
 def build_backbone_adapter(spec: BackboneSpec) -> BaseBackboneAdapter:
