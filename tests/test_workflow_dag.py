@@ -1059,3 +1059,216 @@ design:
     again = dry_run()
     assert re.search(r"design_shard\s+2", again.stdout)
     assert sorted(p.name for p in shards_dir.glob("*.bed")) == ["0.bed", "1.bed"]
+
+
+def _regions_config_yaml(tmp_path: Path) -> Path:
+    """A small synthetic 'regions:' config: 2 chromosomes, 1 embedding, 3 phases.
+
+    Region-count modelling on cached, frozen backbone embeddings
+    (``workflow/rules/regions.smk``). Mirrors the two-chromosome/one-embedding shape
+    of ``examples/2026-09-26-hl60-region-counts-alphagenome.yaml`` without needing
+    real BAMs/bigwigs/genome content -- a dry run never executes the shell commands
+    it plans, only the config models' own validation and the DAG's structure.
+    """
+    intervals = tmp_path / "intervals.bed"
+    fasta = tmp_path / "genome.fa"
+    regions = tmp_path / "regions.bed"
+    anchor = tmp_path / "anchor.bed"
+    background = tmp_path / "background.bed"
+    intervals.touch()
+    fasta.touch()
+    regions.write_text("chr1\t0\t1000\nchr2\t0\t1000\n")
+    anchor.touch()
+    background.touch()
+
+    config = tmp_path / "regions-config.yaml"
+    config.write_text(
+        f"""
+results_dir: {tmp_path / "results"}
+inputs:
+  intervals: {intervals}
+  fasta: {fasta}
+  bigwig_dir: {tmp_path / "bigwigs"}
+dataset:
+  context_length: 100
+  bin_size: 10
+  n_pred_bins: 4
+  shift_max_bp: 0
+scaling:
+  method: tmm
+regions:
+  inputs:
+    regions: {regions}
+    anchor_regions: {anchor}
+    background_regions: {background}
+  counts:
+    target_width: 200
+    threads: 2
+    val_chroms: [chr2]
+  embeddings:
+    - name: alphagenome
+      backbone: alphagenome
+      pretrained: all_folds
+      context: 1048576
+      stride: 524288
+  train:
+    nproc_per_node: 1
+    common:
+      trainer:
+        report_to: [wandb]
+    phases:
+      - name: pretrain
+        preset: pretrain
+      - name: specific
+        preset: specific
+        settings:
+          data:
+            specific_only: true
+      - name: target
+        preset: target
+    runs:
+      - name: run_a
+        seed: 7
+        embedding: alphagenome
+        target_group: HL-60
+"""
+    )
+    return config
+
+
+def test_regions_stage_plans_counts_embeddings_and_chained_train_phases(tmp_path):
+    """A 'regions:' config plans the full counts -> embed -> train-regions DAG."""
+    snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
+    if snakemake is None:
+        pytest.skip("Snakemake is an optional workflow dependency")
+
+    config = _regions_config_yaml(tmp_path)
+    results = tmp_path / "results"
+
+    result = subprocess.run(
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            "--dry-run",
+            "--printshellcmds",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+
+    # Counting: a checkpoint fans out per-track jobs from track_assemble's real
+    # (not-yet-known) track list, so the per-track rule and its downstream gather
+    # show up as pending/"<TBD>" rather than a resolved job count (see
+    # test_design_shard_count_is_stable_across_runs_once_candidates_exist for the
+    # same pattern with 'design:'s shard_candidates checkpoint).
+    assert "checkpoint region_count_track_names:" in output
+    assert re.search(r"rule region_counts_gather:\n\s+input: .*<TBD>", output)
+    assert "regulonado counts gather" in output
+    assert str(results / "regions" / "dataset" / "regions.parquet") in output
+    assert "will result in alteration of the DAG of jobs" in output
+
+    # Embedding: one job per (embedding, chrom) -- 1 embedding x 2 chromosomes here.
+    assert re.search(r"region_embed_chrom\s+2", output)
+    assert "regulonado embed regions" in output
+    assert "--backbone alphagenome" in output
+    assert "--context 1048576" in output
+    assert "--stride 524288" in output
+    assert str(results / "regions" / "embeddings" / "alphagenome" / "chr1.parquet") in output
+    assert str(results / "regions" / "embeddings" / "alphagenome" / "chr2.parquet") in output
+    assert re.search(r"region_embed_done\s+1", output)
+
+    # Training: 1 run x 3 phases, chained like train_phase's warm starts.
+    assert re.search(r"region_train_phase\s+3", output)
+    assert "regulonado train-regions" in output
+    assert "--embeddings" in output
+    assert str(results / "regions" / "embeddings" / "alphagenome") in output
+    assert "--preset pretrain" in output
+    assert "--preset specific" in output
+    assert "--preset target" in output
+    assert "--target-group HL-60" in output
+    assert "--set seed=7" in output
+    assert "++data.specific_only=true" in output
+    # Phase 2/3 warm-start from the previous phase's resolved checkpoint, using
+    # train-regions' real --init-weights-from-checkpoint flag (not a --set override).
+    assert "Warm-starting regions/run_a/specific from" in output
+    assert "Warm-starting regions/run_a/target from" in output
+    assert "--init-weights-from-checkpoint" in output
+    assert "trainer.init_weights_from_checkpoint" not in output
+    assert str(results / "regions" / "train" / "run_a" / "target" / "trainer_state.json") in output
+
+    # rule all's regions target is the final phase of every configured run.
+    assert re.search(
+        r"rule all:\n\s+input: .*run_a/target/trainer_state\.json",
+        output,
+    )
+
+    cli_result = subprocess.run(
+        [sys.executable, "-m", "regulonado", "pipeline", str(config), "--dry-run"],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    cli_output = cli_result.stdout + cli_result.stderr
+    assert cli_result.returncode == 0, cli_output
+    assert re.search(r"region_train_phase\s+3", cli_output)
+
+
+def test_regions_stage_is_absent_unless_configured(tmp_path):
+    """No 'regions:' key means the region rules are never defined and rule all is unaffected."""
+    snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
+    if snakemake is None:
+        pytest.skip("Snakemake is an optional workflow dependency")
+
+    intervals = tmp_path / "intervals.bed"
+    fasta = tmp_path / "genome.fa"
+    intervals.touch()
+    fasta.touch()
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"""
+results_dir: {tmp_path / "results"}
+inputs:
+  intervals: {intervals}
+  fasta: {fasta}
+  bigwig_dir: {tmp_path / "bigwigs"}
+dataset:
+  context_length: 100
+  bin_size: 10
+  n_pred_bins: 4
+  shift_max_bp: 0
+scaling:
+  method: tmm
+"""
+    )
+    result = subprocess.run(
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            "--dry-run",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "region_embed_chrom" not in result.stdout
+    assert "region_train_phase" not in result.stdout
+    assert "region_count_track_names" not in result.stdout
+    assert "regulonado train-regions" not in result.stdout

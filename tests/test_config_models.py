@@ -10,6 +10,12 @@ import pytest
 from regulonado.config.models import (
     DatasetConfig,
     InputsConfig,
+    RegionsConfig,
+    RegionsEmbeddingConfig,
+    RegionsInputsConfig,
+    RegionsTrainConfig,
+    RegionsTrainPhase,
+    RegionsTrainRun,
     RegulonadoConfig,
     SeqNadoProjectRef,
     TrainConfig,
@@ -318,3 +324,104 @@ def test_bamnado_scaling_with_a_bam_dir_is_accepted():
     )
 
     _validate_against_schema(config.to_dict())
+
+
+# ---------------------------------------------------------------------- #
+#  RegionsConfig                                                           #
+# ---------------------------------------------------------------------- #
+
+
+def _regions_inputs() -> RegionsInputsConfig:
+    return RegionsInputsConfig(
+        regions="regions.parquet",
+        anchor_regions="anchor.bed",
+        background_regions="background.bed",
+    )
+
+
+def test_regions_config_validates_against_the_schema():
+    config = RegulonadoConfig(
+        results_dir="results",
+        inputs=InputsConfig(intervals="intervals.bed", fasta="genome.fa", bigwig_dir="bigwigs"),
+        regions=RegionsConfig(
+            inputs=_regions_inputs(),
+            embeddings=[
+                RegionsEmbeddingConfig(
+                    name="alphagenome",
+                    backbone="alphagenome",
+                    pretrained="all_folds",
+                    context=1_048_576,
+                    stride=524_288,
+                )
+            ],
+            train=RegionsTrainConfig(
+                phases=[
+                    RegionsTrainPhase(name="pretrain", preset="pretrain"),
+                    RegionsTrainPhase(name="specific", preset="specific"),
+                    RegionsTrainPhase(name="target", preset="target"),
+                ],
+                runs=[RegionsTrainRun(name="hl60", seed=0, embedding="alphagenome")],
+            ),
+        ),
+    )
+
+    assert config.regions is not None
+    _validate_against_schema(config.model_dump(mode="json", exclude_none=True))
+
+
+def test_regions_config_is_optional():
+    config = RegulonadoConfig(
+        results_dir="results",
+        inputs=InputsConfig(intervals="intervals.bed", fasta="genome.fa", bigwig_dir="bigwigs"),
+    )
+    assert config.regions is None
+    _validate_against_schema(config.to_dict())
+
+
+def test_regions_embedding_names_must_be_unique():
+    with pytest.raises(ValueError, match="regions.embeddings names must be unique"):
+        RegionsConfig(
+            inputs=_regions_inputs(),
+            embeddings=[
+                RegionsEmbeddingConfig(name="dup", backbone="borzoi"),
+                RegionsEmbeddingConfig(name="dup", backbone="enformer"),
+            ],
+        )
+
+
+def test_regions_train_run_must_name_a_known_embedding():
+    with pytest.raises(ValueError, match="not in regions.embeddings"):
+        RegionsConfig(
+            inputs=_regions_inputs(),
+            embeddings=[RegionsEmbeddingConfig(name="alphagenome", backbone="alphagenome")],
+            train=RegionsTrainConfig(
+                phases=[RegionsTrainPhase(name="pretrain", preset="pretrain")],
+                runs=[RegionsTrainRun(name="hl60", seed=0, embedding="does_not_exist")],
+            ),
+        )
+
+
+def test_regions_embedding_context_stride_require_alphagenome():
+    with pytest.raises(ValueError, match="only apply to backbone 'alphagenome'"):
+        RegionsEmbeddingConfig(name="borzoi", backbone="borzoi", context=524_288)
+
+
+def test_regions_train_run_target_group_is_optional():
+    run = RegionsTrainRun(name="hl60", seed=0, embedding="alphagenome")
+    assert run.target_group is None
+
+    run_with_group = RegionsTrainRun(
+        name="hl60", seed=0, embedding="alphagenome", target_group="HL-60"
+    )
+    assert run_with_group.target_group == "HL-60"
+
+
+def test_regions_train_duplicate_phase_names_raise():
+    with pytest.raises(ValueError, match="regions.train.phases names must be unique"):
+        RegionsTrainConfig(
+            phases=[
+                RegionsTrainPhase(name="pretrain", preset="pretrain"),
+                RegionsTrainPhase(name="pretrain", preset="specific"),
+            ],
+            runs=[RegionsTrainRun(name="hl60", seed=0, embedding="alphagenome")],
+        )

@@ -871,6 +871,256 @@ $defs:
         type: integer
     title: QCConfig
     type: object
+  RegionsConfig:
+    additionalProperties: false
+    description: 'Region-count modelling on cached, frozen backbone embeddings.
+
+
+      Counting (``counts bam``/``counts gather``) reuses the top-level ``inputs.fasta``
+
+      and the track table ``track_assemble`` already produces; embedding caches
+
+      (:class:`RegionsEmbeddingConfig`) can name several backbones over the same
+
+      region set, and each :class:`RegionsTrainRun` names which one it trains on.'
+    properties:
+      inputs:
+        $ref: '#/$defs/RegionsInputsConfig'
+      counts:
+        $ref: '#/$defs/RegionsCountsConfig'
+      embeddings:
+        items:
+          $ref: '#/$defs/RegionsEmbeddingConfig'
+        minItems: 1
+        title: Embeddings
+        type: array
+      train:
+        anyOf:
+        - $ref: '#/$defs/RegionsTrainConfig'
+        - type: 'null'
+    required:
+    - inputs
+    - embeddings
+    title: RegionsConfig
+    type: object
+  RegionsCountsConfig:
+    additionalProperties: false
+    description: '``counts bam``/``counts gather`` overrides.'
+    properties:
+      target_width:
+        default: 1000
+        minimum: 1
+        title: Target Width
+        type: integer
+      threads:
+        default: 1
+        description: htslib decompression threads per BAM.
+        minimum: 1
+        title: Threads
+        type: integer
+      workers:
+        default: 1
+        description: Parallel BAMs per counting job.
+        minimum: 1
+        title: Workers
+        type: integer
+      chrom_sizes:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Chrom Sizes
+      val_chroms:
+        description: Chromosomes assigned split=val when 'regions' has no 'split'
+          column.
+        items:
+          type: string
+        title: Val Chroms
+        type: array
+      test_chroms:
+        description: Chromosomes assigned split=test when 'regions' has no 'split'
+          column.
+        items:
+          type: string
+        title: Test Chroms
+        type: array
+    title: RegionsCountsConfig
+    type: object
+  RegionsEmbeddingConfig:
+    additionalProperties: false
+    description: One ``embed regions`` cache; several can run side by side over the
+      same regions.
+    properties:
+      name:
+        title: Name
+        type: string
+      backbone:
+        enum:
+        - borzoi
+        - enformer
+        - alphagenome
+        title: Backbone
+        type: string
+      pretrained:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        description: Pretrained checkpoint name/path passed to --pretrained.
+        title: Pretrained
+      context:
+        anyOf:
+        - minimum: 1
+          type: integer
+        - type: 'null'
+        default: null
+        description: Flexible-backbone input length (bp); AlphaGenome only.
+        title: Context
+      stride:
+        anyOf:
+        - minimum: 1
+          type: integer
+        - type: 'null'
+        default: null
+        description: Flexible-backbone central kept span (bp); AlphaGenome only.
+        title: Stride
+      pool_to:
+        anyOf:
+        - minimum: 1
+          type: integer
+        - type: 'null'
+        default: null
+        description: Average adjacent bins to this bp width.
+        title: Pool To
+      rc:
+        default: false
+        description: Also cache a reverse-complement pass.
+        title: Rc
+        type: boolean
+      batch_size:
+        default: 1
+        minimum: 1
+        title: Batch Size
+        type: integer
+    required:
+    - name
+    - backbone
+    title: RegionsEmbeddingConfig
+    type: object
+  RegionsInputsConfig:
+    additionalProperties: false
+    description: 'Region-count-specific inputs; ``inputs.fasta`` and ``track_assemble``''s
+
+      ``tracks.parquet`` are reused from the top-level ``inputs:`` section.'
+    properties:
+      regions:
+        description: BED/parquet region set; a 'split' column, if present, is used
+          as-is.
+        minLength: 1
+        title: Regions
+        type: string
+      anchor_regions:
+        description: High-anchor BED/parquet.
+        minLength: 1
+        title: Anchor Regions
+        type: string
+      background_regions:
+        description: Background BED/parquet.
+        minLength: 1
+        title: Background Regions
+        type: string
+    required:
+    - regions
+    - anchor_regions
+    - background_regions
+    title: RegionsInputsConfig
+    type: object
+  RegionsTrainConfig:
+    additionalProperties: false
+    properties:
+      nproc_per_node:
+        default: 1
+        minimum: 1
+        title: Nproc Per Node
+        type: integer
+      common:
+        additionalProperties: true
+        title: Common
+        type: object
+      phases:
+        items:
+          $ref: '#/$defs/RegionsTrainPhase'
+        minItems: 1
+        title: Phases
+        type: array
+      runs:
+        items:
+          $ref: '#/$defs/RegionsTrainRun'
+        minItems: 1
+        title: Runs
+        type: array
+    required:
+    - phases
+    - runs
+    title: RegionsTrainConfig
+    type: object
+  RegionsTrainPhase:
+    additionalProperties: false
+    description: 'Like ``TrainPhase``, but ``preset`` names a ``python/configs/regions_experiment/*.yaml``
+
+      preset (e.g. ``pretrain``/``specific``/``target``) instead of a backbone fine-tuning
+      preset.'
+    properties:
+      name:
+        title: Name
+        type: string
+      preset:
+        minLength: 1
+        title: Preset
+        type: string
+      settings:
+        additionalProperties: true
+        title: Settings
+        type: object
+    required:
+    - name
+    - preset
+    title: RegionsTrainPhase
+    type: object
+  RegionsTrainRun:
+    additionalProperties: false
+    properties:
+      name:
+        title: Name
+        type: string
+      seed:
+        minimum: 0
+        title: Seed
+        type: integer
+      embedding:
+        description: Name of one of regions.embeddings.
+        minLength: 1
+        title: Embedding
+        type: string
+      target_group:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        description: Cell-type target group this run trains for (e.g. 'HL-60'), passed
+          to 'train-regions' as --target-group; required by the 'target' preset's
+          contrast objective.
+        title: Target Group
+      settings:
+        additionalProperties: true
+        title: Settings
+        type: object
+    required:
+    - name
+    - seed
+    - embedding
+    title: RegionsTrainRun
+    type: object
   ScalingConfig:
     additionalProperties: false
     properties:
@@ -1098,6 +1348,10 @@ properties:
   attribution:
     anyOf:
     - $ref: '#/$defs/AttributionConfig'
+    - type: 'null'
+  regions:
+    anyOf:
+    - $ref: '#/$defs/RegionsConfig'
     - type: 'null'
 required:
 - results_dir

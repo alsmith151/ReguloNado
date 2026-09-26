@@ -1,0 +1,91 @@
+# HL-60 region-count modelling on cached, frozen backbone embeddings.
+#
+# Transfer learning from a pretrained trunk instead of training a small CNN from
+# scratch: the trunk runs frozen, once, over the UEF region set at long context
+# (`embed regions`), and a small region-level NB count head is trained on the
+# cached features (`train-regions`). See docs/region-counts.md and the plan at
+# `2026-08-19-unique-enhancer-finding`'s notes for why (HL-60 replicate ceiling
+# is >0.9; the from-scratch CNNs plateau around contrast Pearson .5).
+#
+# `inputs.bigwig_dir`/`track_sheet` are placeholders -- point them at the HL-60/
+# AML-BM atlas bigwigs (or a track sheet) before running. `inputs.intervals` is
+# unused by the regions stage itself (InputsConfig requires it for the
+# unconditionally-defined `track_assemble`/`build_dataset` rules) and is set to
+# the cCRE catalogue the region set was built from.
+results_dir: results
+
+inputs:
+  intervals: /Users/asmith/Documents/2026-oxford-notice-period/2026-08-19-unique-enhancer-finding/resources/GRCh38-cCREs.bed
+  fasta: /Users/asmith/Documents/reference/hg38.fa
+  bigwig_dir: /path/to/hl60-atlas-bigwigs
+
+# Unused by the regions stage (build_dataset/train are never targeted here since
+# top-level 'train:' is absent), but InputsConfig/DatasetConfig still validate
+# these sections, so they carry the repo's usual defaults for context/parity.
+dataset:
+  context_length: 524288
+  bin_size: 32
+  n_pred_bins: 6144
+  shift_max_bp: 64
+
+scaling:
+  method: tmm
+
+regions:
+  inputs:
+    # Already carries a 'split' column (979,917 train / 109,415 val / 73,122 test
+    # over 23 chromosomes), so regions.counts.val_chroms/test_chroms are unused.
+    regions: /Users/asmith/Documents/2026-oxford-notice-period/2026-08-19-unique-enhancer-finding/data/interim/05-model-dataset/regions-ccre-signal-min1-full/regions.parquet
+    anchor_regions: /Users/asmith/Documents/2026-oxford-notice-period/2026-08-19-unique-enhancer-finding/resources/common_essential_windows.bed
+    background_regions: /Users/asmith/Documents/2026-oxford-notice-period/2026-08-19-unique-enhancer-finding/data/interim/01-track-qc/background-windows.parquet
+
+  counts:
+    target_width: 1000
+    threads: 4
+
+  embeddings:
+    # Frozen AlphaGenome trunk, flexible-length input: 1 Mb context, keeping the
+    # central 512 kb per window (>= 256 kb of context on each side of every kept bin).
+    - name: alphagenome
+      backbone: alphagenome
+      pretrained: all_folds
+      context: 1048576
+      stride: 524288
+      batch_size: 1
+
+    # Optional second baseline through the same cache/head path -- Flashzoi's fixed
+    # 524,288 bp input tiles by its own output span, so context/stride don't apply.
+    - name: flashzoi
+      backbone: borzoi
+      pretrained: johahi/flashzoi-replicate-0
+      pool_to: 128
+
+  train:
+    nproc_per_node: 1
+    common:
+      trainer:
+        num_workers: 8
+        report_to: [wandb]
+
+    # pretrain -> specific -> target: the same three-stage curriculum as UEF v2
+    # (python/configs/regions_experiment/{pretrain,specific,target}.yaml already set
+    # each stage's data.specific_only/contrast_weighting; no per-phase overrides needed).
+    phases:
+      - name: pretrain
+        preset: pretrain
+      - name: specific
+        preset: specific
+      - name: target
+        preset: target
+
+    # target_group reaches every phase as --target-group HL-60 (data.target_group):
+    # stage 2 filters to HL-60-specific regions, stage 3 weights by |HL-60 contrast|.
+    runs:
+      - name: hl60_alphagenome
+        seed: 0
+        embedding: alphagenome
+        target_group: HL-60
+      - name: hl60_flashzoi
+        seed: 0
+        embedding: flashzoi
+        target_group: HL-60

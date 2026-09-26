@@ -102,6 +102,7 @@ DESIGN = config.get("design")
 ATTRIBUTION = config.get("attribution")
 PARAMETER_SWEEP = config.get("parameter_sweep")
 PREDICTION = config.get("prediction")
+REGIONS_CONFIG = config.get("regions")
 _QC_ENABLED = bool((config.get("qc") or {}).get("checks"))
 
 
@@ -142,6 +143,14 @@ rule all:
             if ATTRIBUTION
             else []
         ),
+        *(
+            expand(
+                str(RESULTS / "regions" / "train" / "{run}" / REGIONS_CONFIG["train"]["phases"][-1]["name"] / "trainer_state.json"),
+                run=[run["name"] for run in REGIONS_CONFIG["train"]["runs"]],
+            )
+            if REGIONS_CONFIG and REGIONS_CONFIG.get("train")
+            else []
+        ),
 
 
 include: "rules/tracks.smk"
@@ -153,3 +162,5 @@ include: "rules/predict.smk"
 include: "rules/parameter_sweep.smk"
 include: "rules/attribute.smk"
 include: "rules/design.smk"
+if REGIONS_CONFIG:
+    include: "rules/regions.smk"

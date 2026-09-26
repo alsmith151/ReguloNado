@@ -222,6 +222,185 @@ class TrainConfig(BaseModel):
         return self
 
 
+class RegionsInputsConfig(BaseModel):
+    """Region-count-specific inputs; ``inputs.fasta`` and ``track_assemble``'s
+    ``tracks.parquet`` are reused from the top-level ``inputs:`` section."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    regions: str = Field(
+        min_length=1,
+        description="BED/parquet region set; a 'split' column, if present, is used as-is.",
+    )
+    anchor_regions: str = Field(min_length=1, description="High-anchor BED/parquet.")
+    background_regions: str = Field(min_length=1, description="Background BED/parquet.")
+
+
+class RegionsCountsConfig(BaseModel):
+    """``counts bam``/``counts gather`` overrides."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_width: int = Field(default=1000, ge=1)
+    threads: int = Field(default=1, ge=1, description="htslib decompression threads per BAM.")
+    workers: int = Field(default=1, ge=1, description="Parallel BAMs per counting job.")
+    chrom_sizes: str | None = None
+    val_chroms: list[str] = Field(
+        default_factory=list,
+        description="Chromosomes assigned split=val when 'regions' has no 'split' column.",
+    )
+    test_chroms: list[str] = Field(
+        default_factory=list,
+        description="Chromosomes assigned split=test when 'regions' has no 'split' column.",
+    )
+
+
+class RegionsEmbeddingConfig(BaseModel):
+    """One ``embed regions`` cache; several can run side by side over the same regions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    backbone: Literal["borzoi", "enformer", "alphagenome"]
+    pretrained: str | None = Field(
+        default=None, description="Pretrained checkpoint name/path passed to --pretrained."
+    )
+    context: int | None = Field(
+        default=None, ge=1, description="Flexible-backbone input length (bp); AlphaGenome only."
+    )
+    stride: int | None = Field(
+        default=None,
+        ge=1,
+        description="Flexible-backbone central kept span (bp); AlphaGenome only.",
+    )
+    pool_to: int | None = Field(
+        default=None, ge=1, description="Average adjacent bins to this bp width."
+    )
+    rc: bool = Field(default=False, description="Also cache a reverse-complement pass.")
+    batch_size: int = Field(default=1, ge=1)
+
+    _check_name = field_validator("name")(staticmethod(_validate_name))
+
+    @model_validator(mode="after")
+    def _context_stride_are_alphagenome_only(self) -> "RegionsEmbeddingConfig":
+        if self.backbone != "alphagenome" and (self.context is not None or self.stride is not None):
+            raise ValueError(
+                f"embedding {self.name!r}: 'context'/'stride' only apply to backbone "
+                "'alphagenome' (fixed-input backbones tile by their own output span)"
+            )
+        return self
+
+
+class RegionsTrainPhase(BaseModel):
+    """Like ``TrainPhase``, but ``preset`` names a ``python/configs/regions_experiment/*.yaml``
+    preset (e.g. ``pretrain``/``specific``/``target``) instead of a backbone fine-tuning preset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    preset: str = Field(min_length=1)
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+    _check_name = field_validator("name")(staticmethod(_validate_name))
+
+
+class RegionsTrainRun(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    seed: int = Field(ge=0)
+    embedding: str = Field(min_length=1, description="Name of one of regions.embeddings.")
+    target_group: str | None = Field(
+        default=None,
+        description=(
+            "Cell-type target group this run trains for (e.g. 'HL-60'), passed to "
+            "'train-regions' as --target-group; required by the 'target' preset's "
+            "contrast objective."
+        ),
+    )
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+    _check_name = field_validator("name")(staticmethod(_validate_name))
+
+
+class RegionsTrainConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    nproc_per_node: int = Field(default=1, ge=1)
+    common: dict[str, Any] = Field(default_factory=dict)
+    phases: list[RegionsTrainPhase] = Field(min_length=1)
+    runs: list[RegionsTrainRun] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _names_are_unique(self) -> "RegionsTrainConfig":
+        for label, items in (("phases", self.phases), ("runs", self.runs)):
+            names = [item.name for item in items]
+            duplicates = sorted({name for name in names if names.count(name) > 1})
+            if duplicates:
+                raise ValueError(
+                    f"regions.train.{label} names must be unique; repeated: "
+                    f"{', '.join(duplicates)}"
+                )
+        for label, settings in [
+            ("regions.train.common", self.common),
+            *(
+                (f"regions.train.phases[{item.name}].settings", item.settings)
+                for item in self.phases
+            ),
+            *(
+                (f"regions.train.runs[{item.name}].settings", item.settings)
+                for item in self.runs
+            ),
+        ]:
+            try:
+                merge_training_settings([settings])
+            except ValueError as exc:
+                raise ValueError(f"{label}: {exc}") from exc
+        return self
+
+
+class RegionsConfig(BaseModel):
+    """Region-count modelling on cached, frozen backbone embeddings.
+
+    Counting (``counts bam``/``counts gather``) reuses the top-level ``inputs.fasta``
+    and the track table ``track_assemble`` already produces; embedding caches
+    (:class:`RegionsEmbeddingConfig`) can name several backbones over the same
+    region set, and each :class:`RegionsTrainRun` names which one it trains on.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    inputs: RegionsInputsConfig
+    counts: RegionsCountsConfig = Field(default_factory=RegionsCountsConfig)
+    embeddings: list[RegionsEmbeddingConfig] = Field(min_length=1)
+    train: RegionsTrainConfig | None = None
+
+    @model_validator(mode="after")
+    def _embedding_names_are_unique(self) -> "RegionsConfig":
+        names = [embedding.name for embedding in self.embeddings]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(
+                f"regions.embeddings names must be unique; repeated: {', '.join(duplicates)}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _runs_name_known_embeddings(self) -> "RegionsConfig":
+        if self.train is None:
+            return self
+        embedding_names = {embedding.name for embedding in self.embeddings}
+        unknown = sorted(
+            {run.embedding for run in self.train.runs} - embedding_names
+        )
+        if unknown:
+            raise ValueError(
+                f"regions.train.runs name embedding(s) not in regions.embeddings: "
+                f"{', '.join(unknown)}"
+            )
+        return self
+
+
 class ParameterSweepConfig(BaseModel):
     """Optional W&B-managed GPU parameter sweep."""
 
@@ -575,6 +754,7 @@ class RegulonadoConfig(BaseModel):
     prediction: PredictionConfig | None = None
     design: DesignConfig | None = None
     attribution: AttributionConfig | None = None
+    regions: RegionsConfig | None = None
 
     @model_validator(mode="after")
     def _design_runs_are_known(self) -> "RegulonadoConfig":
