@@ -189,6 +189,13 @@ regulonado train region_dataset --trunk cached --embeddings embeddings/alphageno
 
 **Model** (`training/regions/model.py`):
 - attention pooling over the K bins → LayerNorm → MLP (D → 512);
+- `model.pooling` picks the head:
+  - `shared` (default): one set of bin weights for every cell type, and an MLP to
+    every cell type's log rate;
+  - `per_group`: each cell type attends over the bins with its own weights and reads out
+    its own pooled vector, so which part of the window matters can differ by cell type;
+  - `RegionCountModel.bin_weights(features)` returns the attention (`[B, K]` or
+    `[B, G, K]`) for inspection;
 - per-group log rates, with an optional soft cap (`model.eta_max`);
 - a `CountHead` with fixed log size factors, centred per-group replicate offsets and a
   per-track NB dispersion.

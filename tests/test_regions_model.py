@@ -221,3 +221,21 @@ def test_save_and_load_round_trip(tmp_path) -> None:
     assert torch.allclose(before, after, atol=1e-6)
     assert reloaded.config.track_groups == TRACK_GROUPS
     assert reloaded.config.log_size_factors == pytest.approx(LOG_SIZE_FACTORS)
+
+
+def test_per_group_pooling_attends_and_reads_out_per_cell_type():
+    config = dict(k=5, d=4, track_groups=[0, 0, 1], log_size_factors=[0.0, 0.1, -0.1], hidden=8)
+    torch.manual_seed(0)
+    model = RegionCountModel(RegionCountConfig(pooling="per_group", **config))
+    features = torch.randn(3, 5, 4)
+    weights = model.bin_weights(features)
+    assert weights.shape == (3, 2, 5)
+    torch.testing.assert_close(weights.sum(-1), torch.ones(3, 2))
+    output = model(features=features, labels=torch.full((3, 3), 2.0))
+    assert output.logits.shape == (3, 2)
+    assert torch.isfinite(output.loss)
+
+    shared = RegionCountModel(RegionCountConfig(**config))
+    assert shared.bin_weights(features).shape == (3, 5)
+    with pytest.raises(ValueError, match="pooling must be one of"):
+        RegionCountConfig(pooling="max", **config)

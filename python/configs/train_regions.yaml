@@ -40,6 +40,9 @@ data:
   exclude_regions: null
 
 model:
+  # shared: one attention pool over the region's bins for every cell type; per_group: each
+  # cell type attends over the bins and reads out on its own.
+  pooling: shared
   hidden: 512
   dropout: 0.1
   # Soft cap on the predicted group log rate; null disables it.

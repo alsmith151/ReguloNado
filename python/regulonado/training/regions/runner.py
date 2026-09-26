@@ -205,6 +205,7 @@ def build_model(
         log_size_factors=[float(v) for v in data.log_size_factors()],
         track_names=list(data.track_names),
         group_names=list(group_names),
+        pooling=str(model_cfg.get("pooling", "shared")),
         hidden=int(model_cfg.get("hidden", 512)),
         dropout=float(model_cfg.get("dropout", 0.1)),
         eta_max=model_cfg.get("eta_max"),

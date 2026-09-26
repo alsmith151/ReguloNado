@@ -6,6 +6,14 @@ pooling, an MLP and a per-track count head -- predicts one NB (or log-normal) ra
 group (cell type) from those features, trained against raw per-track BAM counts
 (:mod:`regulonado.counts`, added separately).
 
+Two pooling heads, chosen by ``RegionCountConfig.pooling``:
+
+- ``"shared"``: one set of attention weights over the ``K`` bins for every cell type, then
+  an MLP to one log rate per group (:class:`AttentionPool`).
+- ``"per_group"``: each cell type attends over the bins on its own and reads its own
+  pooled vector (:class:`GroupAttentionPool`, :class:`GroupReadout`), so which part of the
+  window matters can differ between cell types -- the head's view of specificity.
+
 ``CountHead`` is ported near-verbatim from
 ``unique_enhancer_finding.modelling.model.CountHead`` (UEF), and the soft eta cap
 follows UEF ``model.py``'s ``_trunk`` (around line 548): ``eta_max - softplus(eta_max -
@@ -25,9 +33,15 @@ from transformers.utils import ModelOutput
 
 from regulonado.training.regions.loss import COUNT_NOISE_MODELS, CountLikelihoodLoss
 
+#: ``RegionCountConfig.pooling`` choices.
+POOLING_HEADS = ("shared", "per_group")
+
 __all__ = [
+    "POOLING_HEADS",
     "AttentionPool",
     "CountHead",
+    "GroupAttentionPool",
+    "GroupReadout",
     "RegionCountConfig",
     "RegionCountModel",
     "RegionCountOutput",
@@ -52,6 +66,40 @@ class AttentionPool(nn.Module):
         logits = self.score(features).squeeze(-1)  # [B, K]
         weights = torch.softmax(logits, dim=-1)
         return torch.einsum("bk,bkd->bd", weights, features)
+
+
+class GroupAttentionPool(nn.Module):
+    """Attention pooling with its own bin weights per group, ``[B, K, D] -> [B, G, D]``.
+
+    One scoring layer produces a logit per bin *per group*; each group's softmax over the
+    ``K`` bins weights its own pooled vector.
+    """
+
+    def __init__(self, feature_dim: int, n_groups: int) -> None:
+        super().__init__()
+        self.score = nn.Linear(feature_dim, n_groups)
+
+    def weights(self, features: Tensor) -> Tensor:
+        """Per-group bin weights, ``[batch, n_groups, k]``, each row summing to 1."""
+        return torch.softmax(self.score(features).transpose(1, 2), dim=-1)
+
+    def forward(self, features: Tensor) -> Tensor:
+        """``features``: ``[batch, k, feature_dim]`` -> ``[batch, n_groups, feature_dim]``."""
+        return torch.einsum("bgk,bkd->bgd", self.weights(features), features)
+
+
+class GroupReadout(nn.Module):
+    """One linear readout per group, ``[B, G, H] -> [B, G]``: group ``g`` reads only its own
+    ``H``-vector."""
+
+    def __init__(self, hidden: int, n_groups: int) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(n_groups, hidden))
+        self.bias = nn.Parameter(torch.zeros(n_groups))
+        nn.init.kaiming_uniform_(self.weight, a=5**0.5)
+
+    def forward(self, hidden: Tensor) -> Tensor:
+        return torch.einsum("bgh,gh->bg", hidden, self.weight) + self.bias
 
 
 class CountHead(nn.Module):
@@ -155,6 +203,9 @@ class RegionCountConfig(PretrainedConfig):
         Per-track fixed log size factor (count-unit anchor scaling), ``[n_tracks]``.
     track_names, group_names
         Optional display names, one per track / group; used by metrics dict keys.
+    pooling
+        ``"shared"`` (one attention pool for every group) or ``"per_group"`` (each group
+        pools and reads out on its own); see the module docstring.
     hidden
         Width of the MLP between the pooled feature and the group log rates.
     dropout
@@ -191,6 +242,7 @@ class RegionCountConfig(PretrainedConfig):
         log_size_factors: list[float] | None = None,
         track_names: list[str] | None = None,
         group_names: list[str] | None = None,
+        pooling: str = "shared",
         hidden: int = 512,
         dropout: float = 0.1,
         eta_max: float | None = None,
@@ -228,6 +280,8 @@ class RegionCountConfig(PretrainedConfig):
             raise ValueError("group_names must have one entry per group")
         if count_noise not in COUNT_NOISE_MODELS:
             raise ValueError(f"count_noise must be one of {sorted(COUNT_NOISE_MODELS)}")
+        if pooling not in POOLING_HEADS:
+            raise ValueError(f"pooling must be one of {list(POOLING_HEADS)}; got {pooling!r}")
         for name, weights, expected in (
             ("task_weights", task_weights, resolved_n_tracks),
             ("contrast_task_weights", contrast_task_weights, resolved_n_groups),
@@ -245,6 +299,7 @@ class RegionCountConfig(PretrainedConfig):
         self.log_size_factors = [float(o) for o in log_size_factors]
         self.track_names = [str(name) for name in track_names] if track_names is not None else None
         self.group_names = [str(name) for name in group_names] if group_names is not None else None
+        self.pooling = pooling
         self.hidden = hidden
         self.dropout = dropout
         self.eta_max = eta_max
@@ -293,14 +348,21 @@ class RegionCountModel(PreTrainedModel):
 
     def __init__(self, config: RegionCountConfig) -> None:
         super().__init__(config)
-        self.pool = AttentionPool(config.d)
         self.norm = nn.LayerNorm(config.d)
-        self.mlp = nn.Sequential(
-            nn.Linear(config.d, config.hidden),
-            nn.GELU(),
-            nn.Dropout(config.dropout),
-            nn.Linear(config.hidden, config.n_groups),
-        )
+        if config.pooling == "per_group":
+            self.pool = GroupAttentionPool(config.d, config.n_groups)
+            self.mlp = nn.Sequential(
+                nn.Linear(config.d, config.hidden), nn.GELU(), nn.Dropout(config.dropout)
+            )
+            self.readout = GroupReadout(config.hidden, config.n_groups)
+        else:
+            self.pool = AttentionPool(config.d)
+            self.mlp = nn.Sequential(
+                nn.Linear(config.d, config.hidden),
+                nn.GELU(),
+                nn.Dropout(config.dropout),
+                nn.Linear(config.hidden, config.n_groups),
+            )
         self.count_head = CountHead(
             track_groups=config.track_groups,
             log_size_factors=config.log_size_factors,
@@ -339,14 +401,26 @@ class RegionCountModel(PreTrainedModel):
         ``RegulonadoModel._init_weights`` for the same pattern.
         """
 
-    def _trunk(self, features: Tensor) -> Tensor:
+    def _group_log_rates(self, features: Tensor) -> Tensor:
         """Pooled features through the MLP to group log rates, with the soft eta cap applied."""
         pooled = self.norm(self.pool(features))
-        eta = self.mlp(pooled)
+        if self.config.pooling == "per_group":
+            eta = self.readout(self.mlp(pooled))
+        else:
+            eta = self.mlp(pooled)
         eta_max = self.config.eta_max
         if eta_max is not None:
             eta = eta_max - nn.functional.softplus(eta_max - eta)
         return eta
+
+    def bin_weights(self, features: Tensor) -> Tensor:
+        """The pool's attention over the ``K`` bins: ``[batch, k]`` for ``"shared"`` pooling,
+        ``[batch, n_groups, k]`` for ``"per_group"`` -- which part of each window the head
+        reads, per cell type."""
+        features = features.float()
+        if self.config.pooling == "per_group":
+            return self.pool.weights(features)
+        return torch.softmax(self.pool.score(features).squeeze(-1), dim=-1)
 
     def forward(
         self,
@@ -360,7 +434,7 @@ class RegionCountModel(PreTrainedModel):
         ``labels``, when given: ``[batch, n_tracks]`` raw per-track counts, ``NaN``
         where masked.
         """
-        eta = self._trunk(features.float())
+        eta = self._group_log_rates(features.float())
         loss = None
         if labels is not None:
             loss = self.loss_fn(
