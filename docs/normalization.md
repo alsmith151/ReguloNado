@@ -59,7 +59,7 @@ regulonado normalization original results/tracks/_stages/discovered.parquet \
 This command reads library information through the external `bamnado` binary,
 which must be on `PATH` (or supplied through `BAMNADO`).
 
-Optionally apply edgeR-style TMM correction, scanning `inputs.intervals` directly (the same scan
+Optionally apply edgeR-style TMM correction, scanning `targets.profile.intervals` directly (the same scan
 `tracks qc --check interval_signal/replicate_concordance` shares via `tracks interval-means`, so
 compute that once and pass it to both with `--interval-means` if you're running QC too):
 

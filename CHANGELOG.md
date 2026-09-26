@@ -14,6 +14,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Workflow config (breaking):** every model is a run under `train.runs`, choosing its
+  `backbone` (`{type, pretrained}`), `trunk` (`live` | `cached`), `target` (`profile` |
+  `region_counts`) and `recipe`, a named phase chain under `train.recipes`. What a run
+  predicts is configured under `targets`, and each dataset is built only if a run uses
+  it:
+  - `train.phases` → `train.recipes.<name>`; `runs[].pretrained_model` →
+    `runs[].recipe` + `runs[].backbone`;
+  - `inputs.intervals` + `dataset:` → `targets.profile`;
+    `dataset.drop_missing`/`dedupe_tracks` → `inputs`;
+  - tracks are discovered from bigWigs when `targets.profile` is set, otherwise from BAMs,
+    into one `results/tracks/tracks.parquet`;
+  - prediction, attribution and design only accept `target: profile` runs, and default to
+    all of them;
+  - examples are migrated. `hl60_anchor_folds`, `enhancer_candidates_anchor_folds` and
+    `hl60_design` also drop their obsolete dotted `data.apply_squash` key.
 - Renamed the `regulonado build` CLI command to `regulonado dataset` — the
   name now matches what it produces.
 - Split monolithic dependency list into focused extras: `data`, `train`, `gpu`,
@@ -36,15 +51,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Region-count modelling on cached frozen-backbone embeddings
-  (`docs/region-counts.md`):
-  - `regulonado counts bam/gather`: BAM region counting, ported from UEF, with
-    anchor-based size factors, stored as parquet;
+- Region-count modelling on cached trunk embeddings (`docs/region-counts.md`): a
+  `trunk: cached`, `target: region_counts` run trains an NB count head on embeddings
+  its pretrained trunk computed once:
+  - `regulonado counts regions/bam/gather`: BAM region counting, ported from UEF, with
+    anchor-based size factors, stored as parquet. `counts regions` writes the canonical
+    region table that counting and embedding share, so embedding caches build while BAMs
+    are still being counted. A region set's own `target_start`/`target_end` are kept;
   - `regulonado embed regions`: a backbone-agnostic per-chromosome parquet embedding
-    cache;
-  - `regulonado train-regions`: an NB region-count head with
-    `pretrain`/`specific`/`target` presets;
-  - a Snakemake `regions:` workflow section.
+    cache. In the workflow, one cache per distinct trunk setup, shared by every run
+    that uses it;
+  - `regulonado train --trunk cached --embeddings DIR`, with `pretrain`/`specific`/`target`
+    presets (`python/configs/cached_experiment/`, over `train_cached.yaml`);
+  - `data.exclude_regions` / `targets.region_counts.exclude_regions`: held-out
+    candidates leave training at every phase (UEF `--exclude_bed`).
+- `regulonado tracks discover --format bam`: tracks discovered from BAMs share the
+  bigWig tracks' `discover`/`assemble` steps and `tracks.parquet` schema. `--bam-dir`
+  finds BAMs by `sample_id` (a whole-token match, so run accessions work) and, for bigWig
+  discovery, records each track's `bam`. Track sheets and SeqNado projects now carry
+  `bam` into `tracks.parquet`. bigWig-only commands refuse a BAM track table.
+- `regulonado pipeline` composes every run × recipe phase before scheduling, and the
+  cached-trunk config rejects keys `train_cached.yaml` does not declare.
 - `AlphaGenomeBackboneAdapter` (`alphagenome` extra), and adapter output geometry
   (`output_bin_size`, `fixed_input_length`, `input_multiple`, `output_span`).
 - `regulonado.sequence`: pid-safe pyfastx genome access and zero-padded window fetches.

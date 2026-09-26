@@ -118,7 +118,7 @@ regulonado pipeline config.yaml --dry-run --cores 4
 ```
 
 For a cluster, choose a Snakemake execution preset; `--preset` selects where
-jobs run, while the `train.phases` and `train.runs` entries select what is
+jobs run, while the `train.recipes` and `train.runs` entries select what is
 trained:
 
 ```bash
@@ -143,6 +143,10 @@ dataset. The scaling stage writes per-track factors; its method is selected by `
 tracks at assembly rather than training on them. Each `train_phase` runs one training preset. Phases
 are sequential within a run (later phases warm-start from the previous checkpoint), while separate
 runs can execute concurrently.
+
+Runs that predict region counts (`target: region_counts`) read BAMs instead, and can
+train a head on cached trunk embeddings (`trunk: cached`); see
+[docs/region-counts.md](docs/region-counts.md).
 
 The pipeline does not align reads or call peaks; those are upstream SeqNado work. Prediction
 BigWigs are optional via `prediction:`. It also

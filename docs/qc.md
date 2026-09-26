@@ -25,7 +25,7 @@ Dropping happens in `tracks assemble` (`--drop-degenerate`, driven by `qc.drop_d
 |---|---|---|
 | *(always, free)* | `qc_bases_covered`, `qc_genome_sum/min/max`, `qc_n_chroms_with_signal`, `qc_is_constant` | BigWig header only |
 | `sparsity` | Gates on the free header metrics (`qc_bases_covered >= 1`, `qc_n_chroms_with_signal >= 1`, not constant) | Free |
-| `interval_signal` | `qc_nonzero_bin_fraction`, `qc_interval_mean/sd`, `qc_dynamic_range` (q99/q50), `qc_top1pct_signal_fraction` | One BigWig scan over `inputs.intervals` |
+| `interval_signal` | `qc_nonzero_bin_fraction`, `qc_interval_mean/sd`, `qc_dynamic_range` (q99/q50), `qc_top1pct_signal_fraction` | One BigWig scan over `targets.profile.intervals` |
 | `replicate_concordance` | `qc_replicate_r` (median Pearson to tracks sharing `scaling_group`/`condition`), `qc_nearest_other_r`, `qc_nearest_is_replicate` | Same scan as `interval_signal` |
 | `anchor` | Reuses `scale_quality`, `scale_heldout_recovery`, `scale_anchor_reference`, `scale_background_q50/q99` from `--scale-factors` | Free — no second scan |
 

@@ -38,43 +38,61 @@ regulonado train dataset/ --preset head_only \
 
 ## Configure several runs
 
-A pipeline configuration separates settings shared by all jobs from phase and
-run differences:
+Every model is a run under `train.runs`. A run names its pretrained `backbone`, how
+its trunk is used, what it predicts, and the `recipe` (phase chain) it follows:
+
+| field | values | meaning |
+|---|---|---|
+| `backbone` | `{type: borzoi\|enformer\|alphagenome, pretrained: ...}` | the pretrained trunk |
+| `trunk` | `live` (default) | the trunk runs every step, frozen or fine-tuned per phase preset |
+| | `cached` | the trunk runs once; a head trains on its cached embeddings |
+| `target` | `profile` (default) | binned coverage over `targets.profile` (bigWigs) |
+| | `region_counts` | one count per region over `targets.region_counts` (BAMs) |
+| `recipe` | a `train.recipes` name | the ordered phases, each a preset plus settings |
+
+Implemented pairs are `live`/`profile` and `cached`/`region_counts`. Live recipes
+use the `python/configs/experiment/` presets (`head_only`, `unfreeze_output`,
+`deep_finetune`, `peak_finetune`, `lora_finetune`); cached recipes use
+`python/configs/cached_experiment/` (`pretrain`, `specific`, `target`).
 
 ```yaml
+targets:
+  profile:
+    intervals: intervals.bed
+
 train:
   common:
     trainer:
       batch_size: 8
       num_workers: 8
 
-  phases:
-    - name: head_only
-      preset: head_only
-    - name: unfreeze_output
-      preset: unfreeze_output
-    - name: deep_finetune
-      preset: deep_finetune
-    - name: peak_finetune
-      preset: peak_finetune
+  recipes:
+    finetune:
+      - {name: head_only, preset: head_only}
+      - {name: unfreeze_output, preset: unfreeze_output}
+      - {name: deep_finetune, preset: deep_finetune}
+      - {name: peak_finetune, preset: peak_finetune}
 
   runs:
     - name: flashzoi_0
       seed: 0
-      pretrained_model: johahi/flashzoi-replicate-0
+      recipe: finetune
+      backbone: {type: borzoi, pretrained: johahi/flashzoi-replicate-0}
     - name: flashzoi_1
       seed: 1
-      pretrained_model: johahi/flashzoi-replicate-1
-    - name: flashzoi_2
-      seed: 2
-      pretrained_model: johahi/flashzoi-replicate-2
-    - name: flashzoi_3
-      seed: 3
-      pretrained_model: johahi/flashzoi-replicate-3
+      recipe: finetune
+      backbone: {type: borzoi, pretrained: johahi/flashzoi-replicate-1}
 ```
 
 Use `examples/flashzoi_four_replicates.yaml` for the complete file, including
-dataset construction and normalization.
+dataset construction and normalization, and
+`examples/2026-09-26-hl60-region-counts-alphagenome.yaml` for cached-trunk runs on
+region counts (see [region-counts.md](region-counts.md)).
+
+Swapping a model is an edit to one run. Datasets and embedding caches are derived
+from the runs: the profile dataset is built only for `target: profile` runs, the
+region-count dataset only for `target: region_counts` runs, and each distinct
+cached trunk setup gets one embedding cache that every run using it shares.
 
 Settings are resolved in this order, with later layers winning:
 
@@ -84,8 +102,8 @@ base defaults -> phase preset -> train.common -> phase settings -> run settings
 
 For example, change `train.common.trainer.batch_size` to update every job, add a
 key under a phase's `settings` mapping to affect only that phase, or add a key
-under `flashzoi_2.settings` to affect only that replicate. The run's `seed` and
-`pretrained_model` fields always identify that run and take precedence.
+under `flashzoi_1.settings` to affect only that replicate. The run's `seed` and
+`backbone` always identify that run and take precedence.
 
 ## Inspect and run the matrix
 
@@ -98,7 +116,9 @@ The dry run prints each run and phase with its model, seed, output directory,
 and dependency. Independent runs may execute concurrently. Phases are ordered
 within a run and never consume another run's checkpoint.
 
-Before allocating a GPU, resolve a single job against the built Parquet dataset:
+Every run × phase is composed before anything is scheduled, so a misspelt or
+mistyped setting fails immediately. Before allocating a GPU, resolve a single
+live-trunk job against the built Parquet dataset:
 
 ```bash
 regulonado train results/dataset --preset head_only --schedule-only \
