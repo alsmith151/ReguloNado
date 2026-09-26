@@ -15,11 +15,17 @@ no backbone-specific cases:
   the central ``--stride`` bp of the (uncropped) output, discarding the rest as context-only
   margin. Windows tile by ``stride``.
 
-A region's ``K`` bins are found by locating which window's kept span contains the region's
-raw-bin range; a region whose range straddles two adjacent tiles gets a one-off "extra"
-window instead (see :func:`_assign_windows`), so every region's ``K`` bins always come from
-a single window. ``--pool-to`` groups adjacent raw bins by simple averaging after
-extraction, so the tiling and extraction logic never has to special-case pooling.
+Kept spans tile the chromosome back-to-back and contiguously, so every kept bin -- whichever
+tile it came from -- is a valid central bin with full context. A region's ``K`` raw bins are
+therefore found by *stitching*, not by adding extra windows: its raw-bin range is split into
+one segment per tile it touches (almost always one, occasionally two adjacent tiles for a
+region straddling a tile boundary; see :func:`_region_segments`), each tile is run at most
+once regardless of how many regions' segments land in it, and a straddling region's bins are
+reassembled by concatenating its segments in order. At HL-60 density (~0.4 regions/kb) most
+tile boundaries have a straddler, so this keeps the forward-pass count equal to the tile
+count -- extra one-off windows per straddler would otherwise add 35-100% more passes.
+``--pool-to`` groups adjacent raw bins by simple averaging *after* stitching, so a pool group
+that itself straddles a tile boundary still pools correctly.
 
 Reverse-complementing: the whole window is complemented and reversed before the forward
 pass; since flipping a bin-aligned array end-to-end also reverses the order of the bins
@@ -248,36 +254,50 @@ def _target_width(regions_df: pl.DataFrame) -> int:
     return int(widths[0])
 
 
-def _assign_windows(
+def _region_segments(
     chrom_regions: pl.DataFrame, *, bin_size: int, pool_factor: int, k: int, keep_bp: int
-) -> dict[int, dict]:
-    """Assign each region to a window, adding one-off windows for tile-boundary stragglers.
+) -> tuple[list[tuple[int, list[tuple[int, int, int]]]], list[int]]:
+    """Split each region's raw-bin range into per-tile segments, and list the tiles needed.
 
-    Returns a mapping ``window_start -> {"kept_start": int, "regions": [(region_row,
-    local_raw_start, raw_count), ...]}``. Regular tiles are keyed by their (bin-aligned)
-    kept-span start; a region whose raw-bin range spans two adjacent regular tiles instead
-    gets kept_start == its own range's start, so its ``K`` bins always come from one window
-    (see module docstring).
+    Tiles are numbered ``0, 1, 2, ...`` by their (bin-aligned) kept-span start
+    ``tile_index * keep_bp``; tile ``t``'s kept span holds raw bins
+    ``[t * n_bins_per_tile, (t + 1) * n_bins_per_tile)``. A region's raw-bin range almost
+    always falls inside one tile; one that straddles a boundary is split into one segment
+    per tile it touches (in practice at most two, since ``K`` bins are tiny next to one
+    tile's span), so it can be reassembled by concatenating those tiles' bins in order
+    without ever running an extra window (see module docstring).
+
+    Returns
+    -------
+    tuple[list, list[int]]
+        ``(segments_by_region, tile_indices)``: ``segments_by_region`` is
+        ``[(region_row, [(tile_index, local_start_bin, n_bins), ...]), ...]``, one entry
+        per region, in the order it appeared in *chrom_regions*; ``tile_indices`` is the
+        sorted, deduplicated list of every tile index any region's segments touch -- the
+        complete set of windows that actually need a forward pass.
     """
-    windows: dict[int, dict] = {}
+    n_bins_per_tile = keep_bp // bin_size
+    segments_by_region: list[tuple[int, list[tuple[int, int, int]]]] = []
+    tile_indices: set[int] = set()
     for region_row, target_start in zip(
         chrom_regions["region_row"].to_list(), chrom_regions["target_start"].to_list()
     ):
         eff_bin_size = bin_size * pool_factor
         raw_first = (target_start // eff_bin_size) * pool_factor
         raw_count = k * pool_factor
-        bp_start = raw_first * bin_size
-        bp_end = bp_start + raw_count * bin_size
 
-        tile_start_index = bp_start // keep_bp
-        tile_end_index = (bp_end - 1) // keep_bp
-        kept_start = tile_start_index * keep_bp if tile_start_index == tile_end_index else bp_start
-
-        window_start = kept_start  # keyed before offsetting by keep_offset_bp by the caller
-        info = windows.setdefault(window_start, {"kept_start": kept_start, "regions": []})
-        local_raw_start = (bp_start - kept_start) // bin_size
-        info["regions"].append((region_row, local_raw_start, raw_count))
-    return windows
+        segments: list[tuple[int, int, int]] = []
+        pos_bin = raw_first
+        remaining = raw_count
+        while remaining > 0:
+            tile_index, local_start = divmod(pos_bin, n_bins_per_tile)
+            take = min(n_bins_per_tile - local_start, remaining)
+            segments.append((tile_index, local_start, take))
+            tile_indices.add(tile_index)
+            pos_bin += take
+            remaining -= take
+        segments_by_region.append((region_row, segments))
+    return segments_by_region, sorted(tile_indices)
 
 
 def _decode_fixed_size_list(table: pa.Table, name: str, k: int, d: int) -> np.ndarray:
@@ -287,32 +307,33 @@ def _decode_fixed_size_list(table: pa.Table, name: str, k: int, d: int) -> np.nd
     return values.reshape(table.num_rows, k, d)
 
 
-def _write_chrom_table(
-    path: Path,
-    *,
+def _chrom_schema(k: int, d: int, rc: bool) -> pa.Schema:
+    fields = [
+        pa.field("region_row", pa.int64()),
+        pa.field("features", pa.list_(pa.float16(), k * d)),
+    ]
+    if rc:
+        fields.append(pa.field("features_rc", pa.list_(pa.float16(), k * d)))
+    return pa.schema(fields)
+
+
+def _chrom_batch(
+    schema: pa.Schema,
     region_rows: Sequence[int],
-    features: np.ndarray,
-    features_rc: np.ndarray | None,
+    features: Sequence[np.ndarray],
+    features_rc: Sequence[np.ndarray] | None,
     k: int,
     d: int,
-    row_group_size: int,
-) -> None:
-    n = len(region_rows)
-    columns: dict[str, pa.Array] = {
-        "region_row": pa.array(np.asarray(region_rows, dtype=np.int64), type=pa.int64()),
-        "features": pa.FixedSizeListArray.from_arrays(
-            pa.array(features.reshape(-1).astype(np.float16), type=pa.float16()), k * d
-        ),
-    }
+) -> pa.RecordBatch:
+    def _column(arrays: Sequence[np.ndarray]) -> pa.Array:
+        flat = np.stack(arrays).astype(np.float16).reshape(-1)
+        return pa.FixedSizeListArray.from_arrays(pa.array(flat, type=pa.float16()), k * d)
+
+    rows = pa.array(np.asarray(region_rows, dtype=np.int64), type=pa.int64())
+    columns = [rows, _column(features)]
     if features_rc is not None:
-        columns["features_rc"] = pa.FixedSizeListArray.from_arrays(
-            pa.array(features_rc.reshape(-1).astype(np.float16), type=pa.float16()), k * d
-        )
-    table = pa.table(columns)
-    partial = path.with_name(f".{path.name}.partial")
-    effective_row_group_size = max(row_group_size, 1) if n else None
-    pq.write_table(table, partial, compression="none", row_group_size=effective_row_group_size)
-    os.replace(partial, path)
+        columns.append(_column(features_rc))
+    return pa.RecordBatch.from_arrays(columns, schema=schema)
 
 
 def _embed_chrom(
@@ -334,78 +355,117 @@ def _embed_chrom(
     row_group_size: int,
     chrom_path: Path,
 ) -> None:
-    windows = _assign_windows(
+    """Embed one chromosome's regions, streaming tiles and row groups to bound memory.
+
+    Tiles run in genomic order and are dropped as soon as no pending region needs them, and
+    finished regions are written out in float16 row groups as they fill, so peak memory is
+    a few tiles plus one row group -- not the whole chromosome.
+    """
+    segments_by_region, tile_indices = _region_segments(
         chrom_regions, bin_size=bin_size, pool_factor=pool_factor, k=k, keep_bp=keep_bp
     )
+    # Regions complete in order of their last tile; sorting by it lets a single pass over
+    # the tiles emit each region as soon as every tile it needs has been run.
+    pending = sorted(segments_by_region, key=lambda item: (item[1][-1][0], item[1][0][0]))
     offset_bp, _n_bins_bb = adapter.output_span(input_length)
     local_bin_offset = (keep_offset_bp - offset_bp) // bin_size
     n_bins_kept = keep_bp // bin_size
+    kept_slice = slice(local_bin_offset, local_bin_offset + n_bins_kept)
+    row_group_size = max(row_group_size, 1)
 
-    region_rows_out: list[int] = []
+    schema = _chrom_schema(k, d, rc)
+    partial = chrom_path.with_name(f".{chrom_path.name}.partial")
+    writer = pq.ParquetWriter(partial, schema, compression="none")
+
+    # Each tile is run at most once, however many regions' segments touch it -- straddling
+    # regions are handled by stitching tiles' bins together, not by extra windows.
+    tile_features: dict[int, np.ndarray] = {}
+    tile_features_rc: dict[int, np.ndarray] = {}
+    rows_out: list[int] = []
     features_out: list[np.ndarray] = []
-    features_rc_out: list[np.ndarray] | None = [] if rc else None
+    features_rc_out: list[np.ndarray] = []
+    next_region = 0
 
-    window_items = sorted(windows.items(), key=lambda item: item[0])
-    with torch.inference_mode():
-        for batch_index in range(0, len(window_items), max(batch_size, 1)):
-            batch = window_items[batch_index : batch_index + max(batch_size, 1)]
-            inputs = [
-                fetch_window(
-                    genome,
-                    chrom,
-                    kept_start - keep_offset_bp,
-                    kept_start - keep_offset_bp + input_length,
-                )
-                for kept_start, _info in batch
-            ]
-            batch_tensor = torch.from_numpy(np.stack(inputs)).to(device)
-            features_full = adapter.forward_features(batch_tensor)
-            features_full_np = features_full.detach().to(torch.float32).cpu().numpy()
-
-            features_rc_full_np = None
-            if rc:
-                rc_inputs = np.stack([_reverse_complement_onehot(x) for x in inputs])
-                rc_tensor = torch.from_numpy(rc_inputs).to(device)
-                features_rc_full = adapter.forward_features(rc_tensor)
-                # Flip back along the bin axis: see module docstring.
-                features_rc_full_np = features_rc_full.detach().to(torch.float32).cpu().numpy()
-                features_rc_full_np = features_rc_full_np[:, :, ::-1]
-
-            kept_slice = slice(local_bin_offset, local_bin_offset + n_bins_kept)
-            for local_index, (_kept_start, info) in enumerate(batch):
-                kept = features_full_np[local_index][:, kept_slice]
-                kept_rc = (
-                    features_rc_full_np[local_index][:, kept_slice]
-                    if features_rc_full_np is not None
-                    else None
-                )
-                for region_row, local_raw_start, raw_count in info["regions"]:
-                    raw = kept[:, local_raw_start : local_raw_start + raw_count]
-                    pooled = raw.reshape(d, k, pool_factor).mean(axis=-1).T  # [K, D]
-                    region_rows_out.append(int(region_row))
-                    features_out.append(pooled)
-                    if kept_rc is not None:
-                        raw_rc = kept_rc[:, local_raw_start : local_raw_start + raw_count]
-                        pooled_rc = raw_rc.reshape(d, k, pool_factor).mean(axis=-1).T
-                        features_rc_out.append(pooled_rc)  # type: ignore[union-attr]
-
-    features_matrix = (
-        np.stack(features_out) if features_out else np.zeros((0, k, d), dtype=np.float32)
-    )
-    features_rc_matrix = None
-    if rc:
-        features_rc_matrix = (
-            np.stack(features_rc_out) if features_rc_out else np.zeros((0, k, d), dtype=np.float32)
+    def _stitch(tiles: dict[int, np.ndarray], segments: list[tuple[int, int, int]]) -> np.ndarray:
+        # [D, raw_count], stitched across tiles when the region straddled a boundary.
+        raw = np.concatenate(
+            [tiles[t][:, start : start + count] for t, start, count in segments], axis=1
         )
-    _write_chrom_table(
-        chrom_path,
-        region_rows=region_rows_out,
-        features=features_matrix,
-        features_rc=features_rc_matrix,
-        k=k,
-        d=d,
-        row_group_size=row_group_size,
-    )
+        return raw.reshape(d, k, pool_factor).mean(axis=-1).T.astype(np.float16)  # [K, D]
+
+    def _flush() -> None:
+        if rows_out:
+            writer.write_batch(
+                _chrom_batch(schema, rows_out, features_out, features_rc_out if rc else None, k, d),
+                row_group_size=row_group_size,
+            )
+            rows_out.clear()
+            features_out.clear()
+            features_rc_out.clear()
+
+    try:
+        with torch.inference_mode():
+            step = max(batch_size, 1)
+            for batch_index in range(0, len(tile_indices), step):
+                batch_tiles = tile_indices[batch_index : batch_index + step]
+                inputs = [
+                    fetch_window(
+                        genome,
+                        chrom,
+                        tile_index * keep_bp - keep_offset_bp,
+                        tile_index * keep_bp - keep_offset_bp + input_length,
+                    )
+                    for tile_index in batch_tiles
+                ]
+                batch_tensor = torch.from_numpy(np.stack(inputs)).to(device)
+                features_full = adapter.forward_features(batch_tensor)
+                features_full_np = features_full.detach().to(torch.float32).cpu().numpy()
+
+                features_rc_full_np = None
+                if rc:
+                    rc_inputs = np.stack([_reverse_complement_onehot(x) for x in inputs])
+                    rc_tensor = torch.from_numpy(rc_inputs).to(device)
+                    features_rc_full = adapter.forward_features(rc_tensor)
+                    # Flip back along the bin axis (per window, before any stitching): see
+                    # module docstring.
+                    features_rc_full_np = features_rc_full.detach().to(torch.float32).cpu().numpy()
+                    features_rc_full_np = features_rc_full_np[:, :, ::-1]
+
+                for local_index, tile_index in enumerate(batch_tiles):
+                    # Copy, so the kept slice does not pin the whole batch output in memory.
+                    tile_features[tile_index] = features_full_np[local_index][:, kept_slice].copy()
+                    if features_rc_full_np is not None:
+                        tile_features_rc[tile_index] = (
+                            features_rc_full_np[local_index][:, kept_slice].copy()
+                        )
+                last_run = batch_tiles[-1]
+
+                while next_region < len(pending) and pending[next_region][1][-1][0] <= last_run:
+                    region_row, segments = pending[next_region]
+                    rows_out.append(int(region_row))
+                    features_out.append(_stitch(tile_features, segments))
+                    if rc:
+                        features_rc_out.append(_stitch(tile_features_rc, segments))
+                    next_region += 1
+                    if len(rows_out) >= row_group_size:
+                        _flush()
+
+                # Drop tiles no pending region can still need. Sorting by (last, first) tile
+                # means every remaining region starts at or after the next one's first tile.
+                if next_region < len(pending):
+                    keep_from = pending[next_region][1][0][0]
+                else:
+                    keep_from = last_run + 1
+                for tile_index in [t for t in tile_features if t < keep_from]:
+                    del tile_features[tile_index]
+                    tile_features_rc.pop(tile_index, None)
+        _flush()
+        writer.close()
+    except BaseException:
+        writer.close()
+        partial.unlink(missing_ok=True)
+        raise
+    os.replace(partial, chrom_path)
 
 
 def embed_regions(

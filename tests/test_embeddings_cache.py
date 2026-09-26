@@ -208,12 +208,13 @@ def test_region_bins_cover_target_with_contig_end_padding(tmp_path, fixed_genome
     assert features[:, 0].tolist() == expected
 
 
-def test_straddling_region_gets_its_own_window_and_normal_regions_use_tiles(tmp_path, fixed_genome):
+def test_straddling_region_is_stitched_from_both_tiles_with_no_extra_window(tmp_path, fixed_genome):
     regions = _regions_frame(
         [
             # In-tile, well inside tile 0's kept span [0, 4096).
             _tile_row("chrTile", 100),
-            # Straddles tile 0/1's boundary at bp 4096 -> needs an extra, one-off window.
+            # Straddles tile 0/1's boundary at bp 4096 -> stitched from tile 0's trailing bin
+            # and tile 1's leading bins, without running any extra window.
             _tile_row("chrTile", 4090),
             # In-tile, inside tile 1's kept span [4096, 8192).
             _tile_row("chrTile", 4200),
@@ -223,13 +224,19 @@ def test_straddling_region_gets_its_own_window_and_normal_regions_use_tiles(tmp_
     adapter = _fixed_adapter()
     embed_regions(regions, fixed_genome, adapter, out_dir, backbone="stub", chroms=["chrTile"])
 
+    # Exactly the two regular tiles are ever run (one forward call each, batch_size=1) --
+    # region 1 straddling their boundary must not add a third, one-off window.
+    assert adapter.forward_calls == 2
+
     store = EmbeddingStore(out_dir)
     assert sorted(store.region_rows) == [0, 1, 2]
 
     raw_first_a = 100 // BIN_SIZE  # 3
     assert store.get(0)[:, 0].tolist() == [float(raw_first_a + j) for j in range(33)]
 
-    raw_first_b = 4064 // BIN_SIZE  # 127 (bp_start for K=33 bins from floor(4090/32)=127)
+    # K=33 raw bins from floor(4090/32)=127: bin 127 is tile 0's last kept bin, bins
+    # 128..159 are tile 1's first 32 kept bins -- stitched, the sequence is unbroken.
+    raw_first_b = 4064 // BIN_SIZE  # 127
     assert store.get(1)[:, 0].tolist() == [float(raw_first_b + j) for j in range(33)]
 
     raw_first_c = 4192 // BIN_SIZE  # 131
