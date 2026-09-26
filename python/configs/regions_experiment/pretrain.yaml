@@ -1,0 +1,18 @@
+# @package _global_
+# Stage 1: train the count head on every region, no filtering or weighting.
+
+data:
+  specific_only: false
+  contrast_weighting: false
+
+trainer:
+  batch_size: 64
+  eval_batch_size: 64
+  learning_rate: 1.0e-3
+  scheduler: cosine
+  max_epochs: 20
+  evals_per_epoch: 4
+  report_to: [wandb]
+  metric_for_best_model: eval_contrast_pearson_mean
+  greater_is_better: true
+  early_stopping_patience: 5

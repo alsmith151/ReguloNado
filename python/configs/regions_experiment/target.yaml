@@ -1,0 +1,30 @@
+# @package _global_
+# Stage 3: fine-tune on the HL-60 target, weighting train regions by |contrast| of
+# data.target_group rather than filtering to it (set data.target_group, e.g. "HL-60").
+# Warm-started from the specific stage; the count noise is frozen so the likelihood cannot
+# down-weight the target by calling it noisy.
+
+data:
+  specific_only: false
+  contrast_weighting: true
+  contrast_weight_floor: 0.25
+  contrast_weight_cap: 4.0
+
+model:
+  count_freeze_noise: true
+
+loss:
+  contrast_weight: 1.0
+  contrast_task_weight: 1.0
+
+trainer:
+  batch_size: 64
+  eval_batch_size: 64
+  learning_rate: 1.0e-4
+  scheduler: cosine
+  max_epochs: 20
+  evals_per_epoch: 4
+  report_to: [wandb]
+  metric_for_best_model: eval_contrast_pearson_mean
+  greater_is_better: true
+  early_stopping_patience: 5

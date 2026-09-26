@@ -1,0 +1,20 @@
+# @package _global_
+# Stage 2: fine-tune on cell type-specific regions only (Gini filter), warm-started from
+# the pretrain stage (pass --init-weights-from-checkpoint, or `trainer.init_weights_from_checkpoint`).
+
+data:
+  specific_only: true
+  gini_std_threshold: 1.0
+  contrast_weighting: false
+
+trainer:
+  batch_size: 64
+  eval_batch_size: 64
+  learning_rate: 3.0e-4
+  scheduler: cosine
+  max_epochs: 20
+  evals_per_epoch: 4
+  report_to: [wandb]
+  metric_for_best_model: eval_contrast_pearson_mean
+  greater_is_better: true
+  early_stopping_patience: 5

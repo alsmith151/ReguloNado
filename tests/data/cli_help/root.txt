@@ -18,6 +18,7 @@
 │ config         Generate a workflow config, interactively or from flags.                          │
 │ init           Install Snakemake execution presets into ~/.config/snakemake/.                    │
 │ train          Train one model from a named preset.                                              │
+│ train-regions  Train a region-count head on cached backbone embeddings from a named preset.      │
 │ dataset        Build an Arrow DatasetDict from BED / FASTA / a pre-assembled track table.        │
 │ predict        Generate BigWig tracks from trained model predictions, collapsing equal bins.     │
 │ design         Mutate endogenous enhancer candidates to sharpen cell-type specificity.           │

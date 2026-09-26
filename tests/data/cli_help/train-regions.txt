@@ -1,0 +1,40 @@
+                                                                                                    
+ Usage: root train-regions [OPTIONS] REGION_DATASET                                                 
+                                                                                                    
+ Train a region-count head on cached backbone embeddings from a named preset.                       
+                                                                                                    
+ Use ``--set`` for less common settings, for example ``--set data.gini_std_threshold=1.5``.         
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    region_dataset      PATH  RegionCountData run directory (regulonado counts gather)          │
+│                                [required]                                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --embeddings                    -e      PATH     Embeddings cache directory (regulonado embed │
+│                                                     regions)                                     │
+│                                                     [required]                                   │
+│    --output-dir                    -o      PATH     Run directory for checkpoints and            │
+│                                                     diagnostics                                  │
+│    --preset                        -p      TEXT     Named regions_experiment preset              │
+│                                                     [default: pretrain]                          │
+│    --target-group                          TEXT     Override data.target_group (e.g. HL-60)      │
+│    --nproc-per-node                        INTEGER  Use torchrun with this many local processes  │
+│                                                     when >1                                      │
+│                                                     [default: 1]                                 │
+│    --resume-from-checkpoint                TEXT     Full Trainer resume from a checkpoint dir,   │
+│                                                     or 'true' for latest in output-dir           │
+│    --init-weights-from-checkpoint          PATH     Warm start from model weights only           │
+│                                                     (shape-mismatched tensors are skipped)       │
+│    --batch-size                            INTEGER  Override per-device train batch size         │
+│    --learning-rate,--lr                    FLOAT    Override head learning rate                  │
+│    --num-workers                           INTEGER  Override DataLoader worker count             │
+│    --no-wandb                                       Disable W&B reporting for this run           │
+│    --set                                   TEXT     Override one setting as KEY=VALUE            │
+│                                                     (repeatable)                                 │
+│    --print-config                                   Print the resolved region-training config    │
+│                                                     and exit                                     │
+│    --dry-run                                        Print the resolved command without running   │
+│                                                     it                                           │
+│    --help                                           Show this message and exit.                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

@@ -1,0 +1,107 @@
+# Region-count head training on cached backbone embeddings (see
+# python/regulonado/regions/{data,model,loss,metrics,runner}.py). Unlike train.yaml, there is
+# no backbone/head config group here: the backbone is frozen and its features are already
+# cached (`regulonado embed regions`), so this trains only the small pooling head.
+#
+# Override these values directly or start from a `regions_experiment/*` preset with
+# `+regions_experiment=<name>`, mirroring `+experiment=<name>` for `regulonado train`.
+defaults:
+  - _self_
+
+seed: 42
+output_dir: ${hydra:runtime.output_dir}
+
+data:
+  # RegionCountData run directory (regulonado counts gather).
+  path: ???
+  # Embeddings cache directory (regulonado embed regions).
+  embeddings_dir: ???
+  # Group (cell type) name stage 2/3 knobs and metrics below are relative to, e.g. "HL-60".
+  target_group: null
+  # Stage 2: keep only cell type-specific regions (Gini filter at group level).
+  specific_only: false
+  gini_std_threshold: 1.0
+  # Stage 3: weight train regions by |contrast| of target_group instead of filtering to it.
+  contrast_weighting: false
+  contrast_weight_floor: 0.25
+  contrast_weight_cap: 4.0
+  # Per-track artefact-count masking, thresholds from the train split only. <= 0 disables it.
+  count_mask_quantile: 0.999
+  count_mask_factor: 20.0
+  # Randomly serve the reverse-complement pass in train mode, when the cache has one.
+  enable_rc_aug: true
+  # Load every served region's features into RAM up front.
+  preload: false
+  # A region missing from the embeddings cache is an error by default; set true to drop it
+  # (with a warning) instead.
+  drop_missing_from_cache: false
+
+model:
+  hidden: 512
+  dropout: 0.1
+  # Soft cap on the predicted group log rate; null disables it.
+  eta_max: null
+  count_noise: nb
+  count_replicate_offsets: true
+  # Freeze CountHead's log_noise (no gradient) -- e.g. for the target stage, so the
+  # likelihood cannot down-weight the target task by calling it noisy.
+  count_freeze_noise: false
+  count_noise_shrinkage: 0.0
+
+loss:
+  # Weight of the per-region centred log-MSE (specificity) loss term; 0 disables it.
+  contrast_weight: 0.0
+  # log1p multiplier for the contrast term alone; null defaults to the metric's own scale (1.0).
+  contrast_multiplier: null
+  # Weight of data.target_group inside the contrast term only (every other group is 1.0).
+  contrast_task_weight: 1.0
+
+trainer:
+  batch_size: 64
+  eval_batch_size: 64
+  num_workers: 4
+  persistent_workers: true
+  prefetch_factor: 2
+
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_steps: 0
+  max_epochs: 20
+  max_steps: null
+  gradient_accumulation_steps: 1
+  mixed_precision: bf16
+  gradient_clip_norm: 1.0
+
+  log_every_n_steps: 50
+  eval_every_n_steps: null
+  evals_per_epoch: 4
+  checkpoint_every_n_steps: null
+  metric_for_best_model: eval_contrast_pearson_mean
+  greater_is_better: true
+  early_stopping_patience: null
+  early_stopping_threshold: 0.0
+  eval_accumulation_steps: null
+  max_eval_samples: null
+  eval_on_start: true
+
+  report_to: []
+  wandb_project: regulonado-regions
+  wandb_group: null
+  wandb_job_type: training
+  wandb_run_name: null
+  wandb_tags: []
+
+  resume_from_checkpoint: null
+  init_weights_from_checkpoint: null
+
+  provenance:
+    enabled: true
+    save_git_diff: false
+
+hydra:
+  run:
+    dir: outputs/train-regions/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun-regions/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
