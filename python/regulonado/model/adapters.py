@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 import torch
@@ -12,8 +13,15 @@ from borzoi_pytorch.pytorch_borzoi_transformer import Attention as BorzoiAttenti
 from borzoi_pytorch.pytorch_borzoi_transformer import get_positional_embed
 from enformer_pytorch import Enformer
 from enformer_pytorch.config_enformer import EnformerConfig
+from enformer_pytorch.modeling_enformer import SEQUENCE_LENGTH as ENFORMER_SEQUENCE_LENGTH
 
-BackboneType = Literal["borzoi", "enformer"]
+BackboneType = Literal["borzoi", "enformer", "alphagenome"]
+
+# AlphaGenome checkpoints are hosted here (not gated), as .safetensors files named
+# model_all_folds.safetensors, model_fold_0.safetensors, ..., model_fold_3.safetensors.
+# See https://huggingface.co/gtca/alphagenome_pytorch. Weights are distributed under a
+# non-commercial licence -- see that repo's LICENSE before using them outside research.
+ALPHAGENOME_HUB_REPO_ID = "gtca/alphagenome_pytorch"
 
 
 @dataclass(slots=True)
@@ -138,9 +146,48 @@ class BaseBackboneAdapter(nn.Module):
     ----------
     feature_dim : int
         Output feature dimension.
+    output_bin_size : int
+        Width, in base pairs, of one output bin (e.g. 32 for Borzoi/Flashzoi, 128 for
+        Enformer and AlphaGenome).
+    fixed_input_length : int | None
+        The one input length (bp) this adapter accepts, or ``None`` when any multiple
+        of ``input_multiple`` works (AlphaGenome is fully convolutional and flexible;
+        Borzoi and Enformer are deployed at one fixed context length).
+    input_multiple : int
+        Input lengths must be a multiple of this many base pairs. Equal to
+        ``output_bin_size`` for every current adapter.
     """
 
     feature_dim: int
+    output_bin_size: int
+    fixed_input_length: int | None
+    input_multiple: int
+
+    def output_span(self, input_length: int) -> tuple[int, int]:
+        """Part of ``input_length`` covered by this adapter's feature map.
+
+        Some backbones (Borzoi, Enformer) centre-crop their feature map to a
+        fixed number of bins, discarding an equal margin from each end of the
+        input; others (AlphaGenome) keep the full span. This lets the embedding
+        cache line a region's target bins up with the right slice of the feature
+        map for any backbone, without special-casing each one.
+
+        Parameters
+        ----------
+        input_length : int
+            Input sequence length in base pairs. Must be a multiple of
+            ``input_multiple``, and must equal ``fixed_input_length`` when that
+            is not ``None``.
+
+        Returns
+        -------
+        tuple[int, int]
+            ``(offset_bp, n_bins)``: ``offset_bp`` is the number of input base
+            pairs excluded from the start (and, symmetrically, the end) of the
+            input before the feature map begins; ``n_bins`` is the feature
+            map's length in bins.
+        """
+        raise NotImplementedError
 
     def iter_named_blocks(self) -> Iterable[tuple[str, nn.Module]]:
         """Yield ordered trainable backbone stages from early layers toward
@@ -188,12 +235,27 @@ class BorzoiBackboneAdapter(BaseBackboneAdapter):
         super().__init__()
         self.model = model
         self.feature_dim = 1920
+        # Borzoi's main path pools by 2x five times (conv_dna + the four strided steps of
+        # res_tower) before the U-Net skip that final_joined_convs sits on -- 32 bp/bin,
+        # independent of config (depth, dim, ...). Fixed by architecture, not config.
+        self.output_bin_size = 32
+        self.input_multiple = self.output_bin_size
+        # Borzoi/Flashzoi checkpoints are trained and deployed at this context length.
+        # The network is fully convolutional and would run at other multiples of 32, but
+        # only this length is supported here -- matches RegulonadoConfig.context_length.
+        self.fixed_input_length = 524_288
         # Parameters stay float32 (the checkpoint dtype is whatever it was saved in, so
         # cast explicitly). Casting the backbone to bf16 instead makes AdamW update bf16
         # weights directly: bf16's relative resolution is ~0.8%, so any step smaller than
         # ~0.4% of |w| rounds to zero and larger ones are quantised. float32 weights are
         # the master copy; forward_features supplies the bf16 compute via autocast.
         self.model = self.model.float()
+
+    def output_span(self, input_length: int) -> tuple[int, int]:
+        n_bins = int(self.model.config.bins_to_return)
+        total_bins = input_length // self.output_bin_size
+        offset_bins = (total_bins - n_bins) // 2
+        return offset_bins * self.output_bin_size, n_bins
 
     def forward_features(self, input_ids: torch.Tensor) -> torch.Tensor:
         param_dtype = next(self.model.parameters()).dtype
@@ -295,7 +357,25 @@ class EnformerBackboneAdapter(BaseBackboneAdapter):
     def __init__(self, model: Enformer):
         super().__init__()
         self.model = model
-        self.feature_dim = int(model.config.dim)
+        # enformer_pytorch's final_pointwise block projects the transformer's `dim`-wide
+        # trunk up to `2 * dim` right before `return_only_embeddings=True` returns it
+        # (see modeling_enformer.py's `twice_dim`) -- confirmed against a live forward
+        # pass, which returns (B, L, 2 * dim), not (B, L, dim) as this previously assumed.
+        self.feature_dim = int(model.config.dim) * 2
+        # Enformer downsamples by 2x `num_downsamples` times (7 by default -> 128 bp/bin);
+        # read from config since num_downsamples is a real EnformerConfig override. Falls
+        # back to the default for dummy/stub configs (e.g. in tests) that omit it.
+        self.output_bin_size = 2 ** int(getattr(model.config, "num_downsamples", 7))
+        self.input_multiple = self.output_bin_size
+        # Enformer is deployed at this context length by convention (enformer_pytorch's
+        # own SEQUENCE_LENGTH constant), matching the crop tests are trained against.
+        self.fixed_input_length = ENFORMER_SEQUENCE_LENGTH
+
+    def output_span(self, input_length: int) -> tuple[int, int]:
+        n_bins = int(self.model.config.target_length)
+        total_bins = input_length // self.output_bin_size
+        offset_bins = (total_bins - n_bins) // 2
+        return offset_bins * self.output_bin_size, n_bins
 
     def forward_features(self, input_ids: torch.Tensor) -> torch.Tensor:
         if input_ids.ndim != 3:
@@ -333,6 +413,120 @@ class EnformerBackboneAdapter(BaseBackboneAdapter):
         return cls(Enformer(config))
 
 
+def _resolve_alphagenome_weights_path(name: str) -> str:
+    """Resolve an AlphaGenome checkpoint name to a local weights file path.
+
+    ``name`` may be a path to an existing local ``.pth``/``.safetensors`` file, or one
+    of the named folds hosted at ``ALPHAGENOME_HUB_REPO_ID`` on the Hugging Face Hub
+    (``"all_folds"``, ``"fold_0"``, ..., ``"fold_3"``), which is downloaded (and cached
+    by huggingface_hub) on first use.
+    """
+    local_path = Path(name)
+    if local_path.exists():
+        return str(local_path)
+
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(repo_id=ALPHAGENOME_HUB_REPO_ID, filename=f"model_{name}.safetensors")
+
+
+class AlphaGenomeBackboneAdapter(BaseBackboneAdapter):
+    """Adapter for AlphaGenome (via the ``alphagenome-pytorch`` optional extra).
+
+    Unlike Borzoi/Enformer, AlphaGenome is fully convolutional over its 128 bp output
+    resolution with no fixed context length or centre-crop, so ``forward_features``
+    accepts any input length that is a multiple of 128 and returns a feature map
+    covering the whole input (``output_span`` offset is always 0).
+    """
+
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+        self.feature_dim = 3072
+        self.output_bin_size = 128
+        self.input_multiple = self.output_bin_size
+        self.fixed_input_length = None
+        # See BorzoiBackboneAdapter: keep float32 master weights, bf16 compute only
+        # under autocast (forward_features), so AdamW updates aren't quantised by bf16.
+        self.model = self.model.float()
+
+    def forward_features(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """[B, 4, L] one-hot -> [B, 3072, L/128] AlphaGenome 128 bp embeddings.
+
+        ``L`` must be a multiple of 128 (``input_multiple``); AlphaGenome's own
+        SAME-padded pooling would otherwise silently round the output length up,
+        breaking the 1:1 bin alignment the embedding cache relies on.
+        """
+        if input_ids.ndim != 3:
+            raise ValueError(
+                f"Expected input_ids shape (batch, channels, length), got {tuple(input_ids.shape)}"
+            )
+        if input_ids.shape[-1] % self.input_multiple != 0:
+            raise ValueError(
+                f"AlphaGenome input length {input_ids.shape[-1]} is not a multiple of "
+                f"{self.input_multiple}"
+            )
+        param_dtype = next(self.model.parameters()).dtype
+        sequence_major = input_ids.transpose(1, 2).to(param_dtype)  # NCL -> NLC (B, L, 4)
+        organism_index = torch.zeros(
+            sequence_major.shape[0], dtype=torch.long, device=sequence_major.device
+        )
+        if input_ids.is_cuda:
+            # Always bf16, as Borzoi's forward_features does -- see there for why not
+            # torch.get_autocast_dtype("cuda").
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                outputs = self.model.encode(
+                    sequence_major, organism_index, resolutions=(128,), channels_last=False
+                )
+        else:
+            # CPU/MPS: float32. MPS has no kernel for one op AlphaGenome's rotary
+            # embeddings use (`aten::logspace`), so running on MPS needs the process
+            # started with PYTORCH_ENABLE_MPS_FALLBACK=1 (checked once at process
+            # start, so it can't be set here) to route just that op to CPU.
+            outputs = self.model.encode(
+                sequence_major, organism_index, resolutions=(128,), channels_last=False
+            )
+        return outputs["embeddings_128bp"]
+
+    def output_span(self, input_length: int) -> tuple[int, int]:
+        if input_length % self.input_multiple != 0:
+            raise ValueError(
+                f"AlphaGenome input length {input_length} is not a multiple of "
+                f"{self.input_multiple}"
+            )
+        return 0, input_length // self.output_bin_size
+
+    def iter_named_blocks(self) -> Iterable[tuple[str, nn.Module]]:
+        """Top-level trunk modules in data-flow order.
+
+        AlphaGenome's block structure (encoder down-blocks, transformer tower,
+        decoder up-blocks, output embedders) doesn't map onto Borzoi/Enformer's
+        "transformer blocks then a short output tail" shape, so unlike those
+        adapters this yields whole top-level submodules rather than individual
+        transformer layers. FreezePolicy's "unfreeze last N" still works against
+        this ordering; it just unfreezes whole stages rather than single blocks.
+        """
+        for name, module in self.model.named_children():
+            yield name, module
+
+    def iter_locon_conv_candidates(self) -> Iterable[str]:
+        """No LoCon support yet for AlphaGenome; empty by design (see plan)."""
+        return iter(())
+
+    @classmethod
+    def from_spec(cls, spec: BackboneSpec) -> "AlphaGenomeBackboneAdapter":
+        from alphagenome_pytorch import AlphaGenome
+
+        if spec.pretrained_name:
+            weights_path = _resolve_alphagenome_weights_path(spec.pretrained_name)
+            model = AlphaGenome.from_pretrained(weights_path)
+            return cls(model)
+
+        _require_pretrained_or_explicit_random(spec, example="all_folds")
+        overrides = dict(spec.config_overrides or {})
+        return cls(AlphaGenome(**overrides))
+
+
 def build_backbone_adapter(spec: BackboneSpec) -> BaseBackboneAdapter:
     """Build a backbone adapter from specification.
 
@@ -368,6 +562,8 @@ def build_backbone_adapter(spec: BackboneSpec) -> BaseBackboneAdapter:
         return BorzoiBackboneAdapter.from_spec(spec)
     if spec.backbone_type == "enformer":
         return EnformerBackboneAdapter.from_spec(spec)
+    if spec.backbone_type == "alphagenome":
+        return AlphaGenomeBackboneAdapter.from_spec(spec)
     raise ValueError(f"Unsupported backbone type {spec.backbone_type!r}")
 
 
@@ -399,4 +595,8 @@ def build_backbone_architecture(
             overrides.setdefault("target_length", target_length)
         enformer_config = EnformerConfig(**overrides)
         return EnformerBackboneAdapter(Enformer(enformer_config))
+    if backbone_type == "alphagenome":
+        from alphagenome_pytorch import AlphaGenome
+
+        return AlphaGenomeBackboneAdapter(AlphaGenome(**dict(config_overrides or {})))
     raise ValueError(f"Unsupported backbone type {backbone_type!r}")

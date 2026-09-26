@@ -1,4 +1,5 @@
 from regulonado.model.adapters import (
+    AlphaGenomeBackboneAdapter,
     BackboneSpec,
     BackboneType,
     BorzoiBackboneAdapter,
@@ -35,6 +36,7 @@ from regulonado.model.wrapper import (
 
 __all__ = [
     "ActivationType",
+    "AlphaGenomeBackboneAdapter",
     "BackboneSpec",
     "BackboneAdapter",
     "BackboneType",

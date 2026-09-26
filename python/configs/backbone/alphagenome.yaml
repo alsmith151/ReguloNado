@@ -1,0 +1,18 @@
+# Backbone family name used by the adapter builder.
+name: alphagenome
+# Named checkpoint hosted at https://huggingface.co/gtca/alphagenome_pytorch:
+# "all_folds" (default; trained across all cross-validation folds, matching the plan's
+# leakage-not-addressed-yet decision) or "fold_0".."fold_3". May also be a local path to
+# a .pth/.safetensors weights file. Weights are distributed under a non-commercial
+# licence -- see that repo's LICENSE before using them outside research.
+pretrained_name: all_folds
+# AlphaGenome has no centre-crop/target-length concept: it is fully convolutional at
+# 128 bp bins over the whole input. Unused; kept for parity with the other backbone configs.
+target_length: null
+# Raw keyword arguments passed to AlphaGenome() when not loading pretrained weights.
+config_overrides: {}
+# Safety guard: when pretrained_name is unset the backbone would be randomly initialised
+# (no pretrained motif representations), which is almost never intended for transfer
+# learning. Building fails in that case unless this is explicitly set to true to train
+# from scratch.
+allow_random_init: false
