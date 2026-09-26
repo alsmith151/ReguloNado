@@ -47,7 +47,7 @@ data = [
     "polars>=1.0",
     "pybigtools",
     # FASTA access for region counting and embedding caches.
-    "pyfastx",
+    "pyfaidx",
     # BAM inspection (`regulonado tracks fragment-lengths`).
     "pysam",
     "scipy",
@@ -117,7 +117,6 @@ dev = [
 test = [
     "regulonado[data]",
     "pandera[strategies]",
-    "pyfaidx",
     "pytest>=9.1.1",
 ]
 

@@ -1,9 +1,10 @@
 """Genome sequence access and one-hot encoding, shared by counting and training.
 
 Ported from ``unique_enhancer_finding.modelling.sequence``: sequence is read
-lazily from the genome FASTA via ``pyfastx`` rather than materialised
+lazily from the genome FASTA via ``pyfaidx`` rather than materialised
 up-front, so callers can hold a region set that is far larger than the
-sequence any one of them touches.
+sequence any one of them touches. ``pyfaidx`` reads the standard ``.fai``
+index, so a shared, read-only reference that already has one opens as-is.
 
 Coordinates are 0-based half-open throughout: a region ``(start, end)``
 covers ``end - start`` bases, ``fasta[chrom][start:end]``.
@@ -38,9 +39,9 @@ _BASE_INDEX = {base: index for index, base in enumerate(BASE_ORDER)}
 
 
 class Genome:
-    """A ``pyfastx.Fasta`` handle, opened lazily and re-opened per process.
+    """A ``pyfaidx.Fasta`` handle, opened lazily and re-opened per process.
 
-    A pyfastx handle (an mmap'd file plus a SQLite index) must never be
+    A pyfaidx handle (an open file with its own read position) must never be
     shared across forked or spawned worker processes. Rather than requiring
     every caller to remember that, this class defers opening until first use
     and re-opens whenever the current pid differs from the one that opened
@@ -62,11 +63,20 @@ class Genome:
 
     @property
     def fasta(self) -> Any:
-        """The underlying ``pyfastx.Fasta``, opened (or re-opened) for the current process."""
-        if self._fasta is None or self._pid != os.getpid():
-            import pyfastx  # deferred: compiled extension, only needed when reading sequence
+        """The underlying ``pyfaidx.Fasta``, opened (or re-opened) for the current process.
 
-            self._fasta = pyfastx.Fasta(str(self._path), build_index=self._build_index)
+        An existing ``.fai`` is used as-is, never rebuilt, so a reference directory we can't
+        write to still opens; one is built only when missing (and *build_index* allows it).
+        """
+        if self._fasta is None or self._pid != os.getpid():
+            import pyfaidx  # deferred: only needed when reading sequence
+
+            self._fasta = pyfaidx.Fasta(
+                str(self._path),
+                as_raw=True,
+                rebuild=False,
+                build_index=self._build_index,
+            )
             self._pid = os.getpid()
         return self._fasta
 
@@ -93,7 +103,7 @@ def fetch_sequence(genome: Genome, chrom: str, start: int, end: int) -> str:
 
     ``fasta[chrom][start:end]`` already uses plain Python slicing semantics
     -- 0-based, half-open -- so no offset translation is needed (unlike
-    ``pyfastx.Fasta.fetch``, which takes 1-based inclusive intervals and is
+    ``pyfaidx.Fasta.get_seq``, which takes 1-based inclusive intervals and is
     deliberately not used here).
 
     Raises:

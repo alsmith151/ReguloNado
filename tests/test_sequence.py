@@ -7,7 +7,7 @@ import os
 import numpy as np
 import pytest
 
-pytest.importorskip("pyfastx")
+pytest.importorskip("pyfaidx")
 
 from regulonado.sequence import (  # noqa: E402
     fetch_sequence,
@@ -40,6 +40,23 @@ def test_fetch_sequence_rejects_empty_or_negative_interval(fasta_path):
     with pytest.raises(ValueError):
         fetch_sequence(genome, "chr1", -1, 5)
 
+
+
+def test_open_genome_reads_an_indexed_fasta_in_a_read_only_directory(fasta_path):
+    """A shared reference we can't write to opens from its existing .fai, even when the
+    FASTA is newer than the index (which pyfaidx would otherwise try to rebuild)."""
+    import pyfaidx
+
+    pyfaidx.Faidx(str(fasta_path)).close()
+    os.utime(fasta_path)
+    directory = fasta_path.parent
+    directory.chmod(0o555)
+    try:
+        genome = open_genome(fasta_path)
+        assert genome.contig_length("chr2") == 10
+        assert fetch_sequence(genome, "chr1", 0, 4) == "ACGT"
+    finally:
+        directory.chmod(0o755)
 
 def test_open_genome_reopens_after_a_pid_change(fasta_path):
     """The lazy handle re-opens when the cached pid no longer matches (fork simulation)."""

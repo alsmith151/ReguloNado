@@ -2191,18 +2191,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pyfastx"
-version = "2.3.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/04/30/b637657b3b05c318307a74075e106eca49432f80237925c48367bcc2b471/pyfastx-2.3.1.tar.gz", hash = "sha256:19d802cc13ee7774a3068bae3e4d4f419cc69aa237f2dd6366ce220a08b03dca", size = 261246, upload-time = "2026-06-10T14:05:46.202Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/62/eb/368aa67d7f228132834ec36795b2ebf926804227ec2c3887955307ba1cac/pyfastx-2.3.1-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:179848af93735327c988cb2e017b36d2634b53d9b5b39a4c93748197cb911e63", size = 784727, upload-time = "2026-06-10T14:05:02.948Z" },
-    { url = "https://files.pythonhosted.org/packages/e0/86/6751ad1ee8d30f4e17efd6c2397d9dcd1ed51787d89c8b572709e270f6c6/pyfastx-2.3.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:0badf3fd4bbb3240c9dd3a97546b887a7d2761b48264e1dafcd7cdb1020b2f01", size = 744170, upload-time = "2026-06-10T14:05:04.544Z" },
-    { url = "https://files.pythonhosted.org/packages/78/cb/14c4c17f114736ad2b3e65ae97e0102048d1adf73c4a532ab9cd6da2ea3e/pyfastx-2.3.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:7774085d02a0500bd86e3e9a2b1d10900130f73d34cc0bb341d15473738b746f", size = 876242, upload-time = "2026-06-10T14:05:06.035Z" },
-    { url = "https://files.pythonhosted.org/packages/7e/0f/54647eb0d31c027d766c2d43df15eaccdd3c7f2f1edb7839a9e65239c8c2/pyfastx-2.3.1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:b2b6d0ce18a745249163a3507b2c4794de66396a79ac57eafa0035eac33b72d0", size = 882704, upload-time = "2026-06-10T14:05:07.32Z" },
-]
-
-[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2410,7 +2398,7 @@ all = [
     { name = "plotly", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "polars", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pyfastx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyfaidx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "seaborn", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -2433,7 +2421,7 @@ alphagenome = [
     { name = "peft", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "polars", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pyfastx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyfaidx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "torch", version = "2.6.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "sys_platform == 'linux'" },
@@ -2447,7 +2435,7 @@ data = [
     { name = "datasets", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "polars", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pyfastx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyfaidx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
@@ -2470,7 +2458,7 @@ gpu = [
     { name = "peft", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "polars", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pyfastx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyfaidx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "torch", version = "2.6.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "sys_platform == 'linux'" },
@@ -2496,7 +2484,6 @@ test = [
     { name = "polars", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pyfaidx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pyfastx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pytest", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -2513,7 +2500,7 @@ train = [
     { name = "peft", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "polars", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pyfastx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyfaidx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "torch", version = "2.6.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "sys_platform == 'linux'" },
@@ -2561,8 +2548,7 @@ requires-dist = [
     { name = "pyarrow" },
     { name = "pybigtools", marker = "extra == 'data'" },
     { name = "pydantic", specifier = ">=2.0" },
-    { name = "pyfaidx", marker = "extra == 'test'" },
-    { name = "pyfastx", marker = "extra == 'data'" },
+    { name = "pyfaidx", marker = "extra == 'data'" },
     { name = "pysam", marker = "extra == 'data'" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.1.1" },
