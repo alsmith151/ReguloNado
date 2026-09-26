@@ -62,39 +62,39 @@ def test_concurrent_stage_files_are_isolated(tmp_path):
 
 
 def test_track_dedupe_none_preserves_repeated_tracks(tmp_path):
-    from regulonado.dataset.discovery import _resolve_bigwig_tracks
+    from regulonado.dataset.discovery import _resolve_track_files
 
     src = tmp_path / "track.bw"
     src.write_text("track")
 
-    paths, metadata = _resolve_bigwig_tracks(
+    paths, metadata = _resolve_track_files(
         [src, src],
         drop_missing=False,
         dedupe_tracks="none",
     )
 
     assert paths == [str(src), str(src)]
-    assert metadata["final_bigwig_paths"] == paths
-    assert metadata["bigwig_paths"] == paths
+    assert metadata["final_track_paths"] == paths
+    assert metadata["track_paths"] == paths
     assert metadata["n_final_tracks"] == 2
     assert metadata["n_dropped_duplicate_tracks"] == 0
 
 
 def test_track_dedupe_identity_drops_exact_repeated_path(tmp_path):
-    from regulonado.dataset.discovery import _resolve_bigwig_tracks
+    from regulonado.dataset.discovery import _resolve_track_files
 
     src = tmp_path / "track.bw"
     src.write_text("track")
 
-    paths, metadata = _resolve_bigwig_tracks(
+    paths, metadata = _resolve_track_files(
         [src, src, src],
         drop_missing=False,
         dedupe_tracks="identity",
     )
 
     assert paths == [str(src)]
-    assert metadata["final_bigwig_paths"] == paths
-    assert metadata["bigwig_paths"] == paths
+    assert metadata["final_track_paths"] == paths
+    assert metadata["track_paths"] == paths
     assert metadata["n_requested_tracks"] == 3
     assert metadata["n_final_tracks"] == 1
     assert metadata["n_dropped_duplicate_tracks"] == 2
@@ -103,14 +103,14 @@ def test_track_dedupe_identity_drops_exact_repeated_path(tmp_path):
 
 
 def test_track_dedupe_content_drops_copied_identical_file(tmp_path):
-    from regulonado.dataset.discovery import _resolve_bigwig_tracks
+    from regulonado.dataset.discovery import _resolve_track_files
 
     src = tmp_path / "track-a.bw"
     copied = tmp_path / "track-b.bw"
     src.write_bytes(b"same bigwig bytes")
     shutil.copyfile(src, copied)
 
-    paths, metadata = _resolve_bigwig_tracks(
+    paths, metadata = _resolve_track_files(
         [src, copied],
         drop_missing=False,
         dedupe_tracks="content",
@@ -129,7 +129,7 @@ def test_track_dedupe_content_drops_copied_identical_file(tmp_path):
 
 
 def test_track_dedupe_content_keeps_same_basename_different_content(tmp_path):
-    from regulonado.dataset.discovery import _resolve_bigwig_tracks
+    from regulonado.dataset.discovery import _resolve_track_files
 
     src_a = tmp_path / "a" / "track.bw"
     src_b = tmp_path / "b" / "track.bw"
@@ -138,15 +138,15 @@ def test_track_dedupe_content_keeps_same_basename_different_content(tmp_path):
     src_a.write_bytes(b"aa")
     src_b.write_bytes(b"bb")
 
-    paths, metadata = _resolve_bigwig_tracks(
+    paths, metadata = _resolve_track_files(
         [src_a, src_b],
         drop_missing=False,
         dedupe_tracks="content",
     )
 
     assert paths == [str(src_a), str(src_b)]
-    assert metadata["final_bigwig_paths"] == paths
-    assert metadata["bigwig_paths"] == paths
+    assert metadata["final_track_paths"] == paths
+    assert metadata["track_paths"] == paths
     assert metadata["n_final_tracks"] == 2
     assert metadata["n_dropped_duplicate_tracks"] == 0
     assert [r["track_index"] for r in metadata["final_track_records"]] == [0, 1]

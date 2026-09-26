@@ -39,12 +39,17 @@ def scale(
 
 def _included_tracks(track_table: Path) -> pd.DataFrame:
     """Included rows of a ``tracks.parquet``-shaped table, ordered by ``track_index``."""
-    from regulonado.tracks_table import read_track_table
+    from regulonado.tracks_table import read_track_table, require_track_format
 
     if not track_table.exists():
         typer.echo(f"Track table not found: {track_table}", err=True)
         raise typer.Exit(1)
     table = read_track_table(track_table)
+    try:
+        require_track_format(table, "bigwig", "normalization")
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
     included = table[table["status"] == "included"].sort_values("track_index").reset_index(
         drop=True
     )

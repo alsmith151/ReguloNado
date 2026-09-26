@@ -504,9 +504,14 @@ def _load_verified_track_table(track_table: str | Path) -> tuple[pd.DataFrame, l
     tracks.parquet) and the resolved BigWig paths for included tracks in
     ``track_index`` order.
     """
-    from regulonado.tracks_table import read_track_table, verify_fingerprint  # noqa: PLC0415
+    from regulonado.tracks_table import (  # noqa: PLC0415
+        read_track_table,
+        require_track_format,
+        verify_fingerprint,
+    )
 
     table = read_track_table(track_table)
+    require_track_format(table, "bigwig", "dataset build")
     included = table[table["status"] == "included"].sort_values("track_index")
     for _, row in included.iterrows():
         expected = {k: row[k] for k in row.index if k.startswith("fp_") and pd.notna(row[k])}

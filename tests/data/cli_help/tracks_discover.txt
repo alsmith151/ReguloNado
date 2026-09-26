@@ -1,10 +1,12 @@
                                                                                                     
  Usage: root tracks discover [OPTIONS] OUTPUT                                                       
                                                                                                     
- Resolve raw BigWig sources into the discovery-stage track table.                                   
+ Resolve raw BigWig or BAM sources into the discovery-stage track table.                            
                                                                                                     
  Precedence: an explicit ``--track-sheet``/``--seqnado-project`` combination,                       
- else ``--bigwig-dir``, else explicit ``--bigwig`` files.                                           
+ else ``--bigwig-dir`` (``--bam-dir`` for ``--format bam``), else explicit                          
+ ``--bigwig`` files. Track sheets and SeqNado projects serve both formats: a row's                  
+ ``bigwig`` feeds ``--format bigwig`` and its ``bam`` ``--format bam``.                             
                                                                                                     
 ╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
 │ *    output      PATH  Where to write discovered.parquet [required]                              │
@@ -17,8 +19,16 @@
 │ --track-sheet              PATH  CSV mapping tracks to annotation; supplies the ordered track    │
 │                                  list.                                                           │
 │ --seqnado-project          TEXT  SeqNado output directory as PATH or NAME=PATH (repeatable).     │
-│ --drop-missing                   Drop missing BigWig paths instead of raising                    │
+│ --drop-missing                   Drop missing track files instead of raising                     │
 │ --dedupe-tracks            TEXT  none, identity, or content [default: none]                      │
+│ --format                   TEXT  bigwig (coverage models) or bam (region count models): the file │
+│                                  each track is discovered from                                   │
+│                                  [default: bigwig]                                               │
+│ --bam-dir                  PATH  BAM directory. --format bam: every BAM in it is a track unless  │
+│                                  a sheet or project names them. Either format: sheet rows (or    │
+│                                  bigWigs) with no 'bam' find one here by sample_id or bigWig     │
+│                                  stem                                                            │
+│ --bam-glob                 TEXT  Glob for --bam-dir listing (repeatable). Default: '*.bam'.      │
 │ --help                           Show this message and exit.                                     │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 

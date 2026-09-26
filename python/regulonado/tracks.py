@@ -1,4 +1,4 @@
-"""Track sheets: the mapping from BigWig files to biological annotation.
+"""Track sheets: the mapping from BigWig and BAM files to biological annotation.
 
 ReguloNado's training code reads per-track categorical ids (``condition_id``,
 ``source_id``, ``assay_type_id``, ``target_id``) and ``timepoint_minutes``
@@ -33,6 +33,35 @@ if TYPE_CHECKING:
     import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+TRACK_FILE_COLUMNS = {"bigwig": "bigwig", "bam": "bam"}
+
+
+def find_bam(
+    bam_dir: str | Path, key: str, *, candidates: Sequence[Path] | None = None
+) -> Path | None:
+    """Find the BAM for *key* (a sample id or file stem) under *bam_dir*.
+
+    ``<bam_dir>/<key>.bam`` first; otherwise the one ``*.bam`` anywhere below *bam_dir*
+    whose name contains *key* as a whole ``[A-Za-z0-9]``-delimited token, so BAMs named
+    by run accession (``x_SRR2920511_sorted.bam``) resolve from ``sample_id: SRR2920511``.
+
+    *candidates* is the ``*.bam`` listing of *bam_dir*, when the caller looks up many keys
+    and has already walked the tree once.
+
+    Raises:
+        ValueError: if *key* matches more than one BAM.
+    """
+    bam_dir = Path(bam_dir).expanduser()
+    direct = bam_dir / f"{key}.bam"
+    if direct.exists():
+        return direct
+    token = re.compile(rf"(?<![A-Za-z0-9]){re.escape(key)}(?![A-Za-z0-9])")
+    listing = candidates if candidates is not None else bam_dir.rglob("*.bam")
+    hits = sorted(path for path in listing if token.search(path.name))
+    if len(hits) > 1:
+        raise ValueError(f"{key!r} matches more than one BAM under {bam_dir}: {hits}")
+    return hits[0] if hits else None
 
 # SeqNado constrains label columns to this alphabet because they are interpolated
 # into output paths. We enforce the same rule so a sheet round-trips between the
@@ -96,19 +125,19 @@ def _track_record_from_csv_row(
         else:
             data[column] = None
 
-    # sample_id, track_name and bigwig can each stand in for the others;
+    # sample_id, track_name and the track file can each stand in for the others;
     # what we cannot do is proceed with none of them.
-    bigwig = data.get("bigwig")
+    track_file = data.get("bigwig") or data.get("bam")
     if not data.get("sample_id"):
         data["sample_id"] = data.get("track_name") or (
-            bigwig.stem if bigwig is not None else None
+            track_file.stem if track_file is not None else None
         )
     if not data.get("sample_id"):
         raise ValueError(
-            f"{path}: row {index + 1} has none of 'sample_id', 'track_name' "
-            f"or 'bigwig'; at least one is needed to identify the track"
+            f"{path}: row {index + 1} has none of 'sample_id', 'track_name', "
+            f"'bigwig' or 'bam'; at least one is needed to identify the track"
         )
-    if not data.get("track_name") and bigwig is not None:
+    if not data.get("track_name") and track_file is not None:
         data["track_name"] = data["sample_id"]
 
     return TrackRecord(**data)
@@ -419,30 +448,51 @@ class TrackSheet(BaseModel):
         return iter(self.records)
 
     @property
-    def bigwig_paths(self) -> list[Path]:
-        """Track BigWig paths, in sheet order. Order defines track order."""
-        self.require_resolved()
-        return [record.bigwig for record in self.records if record.bigwig is not None]
-
-    @property
     def bam_paths(self) -> list[Path | None]:
         return [record.bam for record in self.records]
 
-    def require_resolved(self) -> None:
-        """Raise unless every row has a BigWig path.
+    def track_paths(self, track_format: str) -> list[Path]:
+        """Each track's *track_format* (``bigwig``/``bam``) file, in sheet order."""
+        self.require_resolved(track_format)
+        column = TRACK_FILE_COLUMNS[track_format]
+        return [getattr(record, column) for record in self.records]
+
+    def require_resolved(self, track_format: str = "bigwig") -> None:
+        """Raise unless every row has a *track_format* (``bigwig``/``bam``) path.
 
         Rows may legitimately arrive without one — a sheet that overlays a
         SeqNado project only needs ``sample_id`` — but nothing downstream can
-        proceed until :meth:`resolve_from_projects` has filled them in.
+        proceed until :meth:`resolve_from_projects` (or, for BAMs,
+        :meth:`resolve_bams`) has filled them in.
         """
-        missing = [record.sample_id for record in self.records if record.bigwig is None]
+        column = TRACK_FILE_COLUMNS[track_format]
+        missing = [record.sample_id for record in self.records if getattr(record, column) is None]
         if missing:
             listing = ", ".join(missing[:5]) + (" …" if len(missing) > 5 else "")
+            hint = " or pass a BAM directory to look them up in" if column == "bam" else ""
             raise ValueError(
-                f"{len(missing)} track sheet row(s) have no 'bigwig' path and were "
+                f"{len(missing)} track sheet row(s) have no '{column}' path and were "
                 f"not resolved against a SeqNado project: {listing}. Either add a "
-                f"'bigwig' column or configure the project the 'project' column names."
+                f"'{column}' column{hint} or configure the project the 'project' column names."
             )
+
+    def resolve_bams(self, bam_dir: str | Path) -> "TrackSheet":
+        """Fill in ``bam`` for rows without one, from *bam_dir* (see :func:`find_bam`).
+
+        Looked up by ``sample_id``, then by the row's bigWig stem. Rows with no match
+        keep ``bam`` unset. Modifies the sheet in place and returns it.
+        """
+        candidates = sorted(Path(bam_dir).expanduser().rglob("*.bam"))
+        for record in self.records:
+            if record.bam is not None:
+                continue
+            keys = [record.sample_id, *([record.bigwig.stem] if record.bigwig else [])]
+            for key in keys:
+                found = find_bam(bam_dir, key, candidates=candidates)
+                if found is not None:
+                    record.bam = found.resolve()
+                    break
+        return self
 
     # ------------------------------------------------------------------ #
     #  CSV round-trip                                                      #
@@ -776,18 +826,22 @@ class TrackSheet(BaseModel):
                 value = getattr(record, column)
                 if value is not None:
                     entry[column] = value
+            # Carried into tracks.parquet so region counting can read a bigWig track's BAM.
+            if record.bam is not None:
+                entry["bam"] = str(record.bam)
             annotations.append(entry)
 
         return annotations, vocab
 
-    def annotations_by_path(self) -> dict[str, dict[str, Any]]:
-        """Annotation dicts keyed by resolved BigWig path, for the dataset builder."""
-        self.require_resolved()
+    def annotations_by_path(self, track_format: str = "bigwig") -> dict[str, dict[str, Any]]:
+        """Annotation dicts keyed by resolved *track_format* path, for track discovery."""
+        self.require_resolved(track_format)
+        column = TRACK_FILE_COLUMNS[track_format]
         annotations, _ = self.to_track_records()
         return {
-            str(record.bigwig.resolve()): annotation
+            str(getattr(record, column).resolve()): annotation
             for record, annotation in zip(self.records, annotations)
-            if record.bigwig is not None
+            if getattr(record, column) is not None
         }
 
     # ------------------------------------------------------------------ #

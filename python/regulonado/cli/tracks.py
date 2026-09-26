@@ -109,13 +109,21 @@ def _parse_seqnado_projects(values: Optional[list[str]]) -> dict[str, str]:
     return projects
 
 
-def _read_table(path: Path):
-    from regulonado.tracks_table import read_track_table
+def _read_table(path: Path, *, bigwig_reader: str | None = None):
+    """Read a track table; with *bigwig_reader* (the command name), refuse a BAM table."""
+    from regulonado.tracks_table import read_track_table, require_track_format
 
     if not path.exists():
         typer.echo(f"Track table not found: {path}", err=True)
         raise typer.Exit(1)
-    return read_track_table(path)
+    table = read_track_table(path)
+    if bigwig_reader is not None:
+        try:
+            require_track_format(table, "bigwig", bigwig_reader)
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1) from exc
+    return table
 
 
 @tracks_app.command("discover")
@@ -151,20 +159,48 @@ def discover(
         ),
     ] = None,
     drop_missing: Annotated[
-        bool, typer.Option("--drop-missing", help="Drop missing BigWig paths instead of raising")
+        bool, typer.Option("--drop-missing", help="Drop missing track files instead of raising")
     ] = False,
     dedupe_tracks: Annotated[
         str, typer.Option("--dedupe-tracks", help="none, identity, or content")
     ] = "none",
+    track_format: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="bigwig (coverage models) or bam (region count models): the file each "
+            "track is discovered from",
+        ),
+    ] = "bigwig",
+    bam_dir: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--bam-dir",
+            help="BAM directory. --format bam: every BAM in it is a track unless a sheet or "
+            "project names them. Either format: sheet rows (or bigWigs) with no 'bam' find "
+            "one here by sample_id or bigWig stem",
+        ),
+    ] = None,
+    bam_glob: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--bam-glob", help="Glob for --bam-dir listing (repeatable). Default: '*.bam'."
+        ),
+    ] = None,
 ) -> None:
-    """Resolve raw BigWig sources into the discovery-stage track table.
+    """Resolve raw BigWig or BAM sources into the discovery-stage track table.
 
     Precedence: an explicit ``--track-sheet``/``--seqnado-project`` combination,
-    else ``--bigwig-dir``, else explicit ``--bigwig`` files.
+    else ``--bigwig-dir`` (``--bam-dir`` for ``--format bam``), else explicit
+    ``--bigwig`` files. Track sheets and SeqNado projects serve both formats: a row's
+    ``bigwig`` feeds ``--format bigwig`` and its ``bam`` ``--format bam``.
     """
     from regulonado.dataset.discovery import discover_tracks
-    from regulonado.tracks_table import write_track_table
+    from regulonado.tracks import find_bam
+    from regulonado.tracks_table import TRACK_FORMATS, write_track_table
 
+    if track_format not in TRACK_FORMATS:
+        raise typer.BadParameter(f"Expected one of {TRACK_FORMATS}", param_hint="--format")
     projects = _parse_seqnado_projects(seqnado_project)
     annotations: Optional[dict] = None
 
@@ -178,20 +214,33 @@ def discover(
                 sheet = TrackSheet.from_seqnado_projects(
                     [{"name": name, "path": path} for name, path in projects.items()]
                 )
+            if bam_dir is not None:
+                sheet.resolve_bams(bam_dir)
+            paths: list[str] = [str(p) for p in sheet.track_paths(track_format)]
+            annotations = sheet.annotations_by_path(track_format)
         except Exception as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(1) from exc
-        bw_paths: list[str] = [str(p) for p in sheet.bigwig_paths]
-        annotations = sheet.annotations_by_path()
+    elif track_format == "bam":
+        if bam_dir is None:
+            typer.echo(
+                "--format bam needs --bam-dir, --track-sheet or --seqnado-project.", err=True
+            )
+            raise typer.Exit(1)
+        globs = list(bam_glob) if bam_glob else ["*.bam"]
+        paths = [str(p) for p in sorted({p for pattern in globs for p in bam_dir.glob(pattern)})]
+        if not paths:
+            typer.echo(f"No files matching {globs} in {bam_dir}", err=True)
+            raise typer.Exit(1)
     elif bigwig_dir is not None:
         globs = list(bigwig_glob) if bigwig_glob else ["*.bw", "*.bigWig"]
         matched = {p for pattern in globs for p in bigwig_dir.glob(pattern)}
-        bw_paths = [str(p) for p in sorted(matched)]
-        if not bw_paths:
+        paths = [str(p) for p in sorted(matched)]
+        if not paths:
             typer.echo(f"No files matching {globs} in {bigwig_dir}", err=True)
             raise typer.Exit(1)
     elif bigwig:
-        bw_paths = [str(p) for p in bigwig]
+        paths = [str(p) for p in bigwig]
     else:
         typer.echo(
             "Provide --bigwig files, --bigwig-dir, --track-sheet or --seqnado-project.",
@@ -199,8 +248,22 @@ def discover(
         )
         raise typer.Exit(1)
 
+    if track_format == "bigwig" and bam_dir is not None and annotations is None:
+        # A plain bigWig listing: pair each track with <stem>.bam, the same convention
+        # 'tracks fragment-lengths' and bamnado scaling use.
+        annotations = {}
+        candidates = sorted(bam_dir.expanduser().rglob("*.bam"))
+        for path in paths:
+            bam = find_bam(bam_dir, Path(path).stem, candidates=candidates)
+            if bam is not None:
+                annotations[str(Path(path).expanduser().resolve())] = {"bam": str(bam.resolve())}
+
     df = discover_tracks(
-        bw_paths, drop_missing=drop_missing, dedupe_tracks=dedupe_tracks, annotations=annotations
+        paths,
+        drop_missing=drop_missing,
+        dedupe_tracks=dedupe_tracks,
+        annotations=annotations,
+        track_format=track_format,
     )
     write_track_table(df, output)
     n_included = int((df["status"] == "included").sum())
@@ -221,7 +284,7 @@ def interval_means_cmd(
     """One shared BigWig scan, consumed by ``tmm`` scaling and interval-based QC checks."""
     from regulonado import qc as qc_module
 
-    included = _read_table(track_table)
+    included = _read_table(track_table, bigwig_reader="tracks interval-means")
     included = included[included["status"] == "included"].sort_values("track_index")
     windows = qc_module.intervals_from_bed(
         intervals, n_pred_bins=n_pred_bins, bin_size=bin_size, shift_max_bp=shift_max_bp,
@@ -305,7 +368,7 @@ def qc_cmd(
         typer.echo(f"Unknown check(s): {unknown}; choose from {qc_module.CHECKS}", err=True)
         raise typer.Exit(1)
 
-    table = _read_table(track_table)
+    table = _read_table(track_table, bigwig_reader="tracks qc")
     included = table[table["status"] == "included"].sort_values("track_index").reset_index(
         drop=True
     )
@@ -437,9 +500,10 @@ def assemble(
     stage leaves its columns null rather than absent, so the schema is
     identical regardless of which stages ran.
     """
-    from regulonado.tracks_table import read_track_table, write_track_table
+    from regulonado.tracks_table import read_track_table, track_format, write_track_table
 
     merged = read_track_table(discovered)
+    discovered_format = track_format(merged)
 
     scaling_method = None
     if scale_factors is not None:
@@ -498,7 +562,9 @@ def assemble(
     merged["track_index"] = pd.array([pd.NA] * len(merged), dtype="Int64")
     merged.loc[included_mask, "track_index"] = range(int(included_mask.sum()))
 
-    write_track_table(merged, output, scaling_method=scaling_method)
+    write_track_table(
+        merged, output, scaling_method=scaling_method, track_format=discovered_format
+    )
     typer.echo(
         f"Assembled {len(merged)} track(s): {int(included_mask.sum())} included -> {output}"
     )

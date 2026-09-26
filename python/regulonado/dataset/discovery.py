@@ -1,4 +1,4 @@
-"""Track discovery: resolve raw BigWig sources into the ``tracks/_stages/discovered.parquet``.
+"""Track discovery: resolve raw BigWig or BAM sources into ``tracks/_stages/discovered.parquet``.
 
 Existence filtering, dedupe, fingerprinting and track naming all happen here so
 every downstream stage (scaling, QC, assembly, build) can assume a validated,
@@ -15,7 +15,7 @@ from typing import Sequence
 
 import pandas as pd
 
-from regulonado.tracks_table import bigwig_fingerprint
+from regulonado.tracks_table import TRACK_FORMATS, bigwig_fingerprint, file_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +54,8 @@ def _track_file_record(source_index: int, path: str) -> dict:
     }
 
 
-def _resolve_bigwig_tracks(
-    bigwig_paths: Sequence[str | Path],
+def _resolve_track_files(
+    track_paths: Sequence[str | Path],
     *,
     drop_missing: bool,
     dedupe_tracks: str,
@@ -63,7 +63,7 @@ def _resolve_bigwig_tracks(
 ) -> tuple[list[str], dict]:
     """Filter requested tracks and return final paths plus provenance metadata.
 
-    ``annotations`` maps a resolved BigWig path to biological annotation
+    ``annotations`` maps a resolved track file path to biological annotation
     (``condition``, ``track_name``, …) from a track sheet. Annotation is merged
     into each surviving track record; provenance fields always win on a key
     clash, so a sheet can never overwrite dedupe bookkeeping.
@@ -73,7 +73,7 @@ def _resolve_bigwig_tracks(
             f"dedupe_tracks must be one of {sorted(_DEDUPE_TRACK_MODES)}, got {dedupe_tracks!r}"
         )
 
-    requested = [str(p).strip().strip('"').strip("'") for p in bigwig_paths]
+    requested = [str(p).strip().strip('"').strip("'") for p in track_paths]
     existing: list[dict] = []
     missing_records: list[dict] = []
     for source_index, path in enumerate(requested):
@@ -85,12 +85,12 @@ def _resolve_bigwig_tracks(
     if missing_records:
         if drop_missing:
             logger.warning(
-                f"Dropping {len(missing_records)}/{len(requested)} missing bigwig paths:\n"
+                f"Dropping {len(missing_records)}/{len(requested)} missing track paths:\n"
                 + "\n".join(f"  {r['path']}" for r in missing_records)
             )
         else:
             raise FileNotFoundError(
-                f"{len(missing_records)}/{len(requested)} bigwig paths do not exist:\n"
+                f"{len(missing_records)}/{len(requested)} track paths do not exist:\n"
                 + "\n".join(f"  {r['path']}" for r in missing_records)
             )
 
@@ -252,12 +252,12 @@ def _resolve_bigwig_tracks(
         )
 
     provenance = {
-        "bigwig_paths": final_paths,
-        "final_bigwig_paths": final_paths,
-        "requested_bigwig_paths": requested,
+        "track_paths": final_paths,
+        "final_track_paths": final_paths,
+        "requested_track_paths": requested,
         "final_track_records": final_records,
         "dropped_duplicate_tracks": dropped_records,
-        "missing_bigwig_paths": missing_records,
+        "missing_track_paths": missing_records,
         "n_requested_tracks": len(requested),
         "n_missing_tracks": len(missing_records),
         "n_dropped_duplicate_tracks": len(dropped_records),
@@ -302,13 +302,18 @@ def _dedupe_name(name: str, used: set[str]) -> str:
 
 
 def discover_tracks(
-    bigwig_paths: Sequence[str | Path],
+    track_paths: Sequence[str | Path],
     *,
     drop_missing: bool = False,
     dedupe_tracks: str = "none",
     annotations: dict[str, dict] | None = None,
+    track_format: str = "bigwig",
 ) -> pd.DataFrame:
-    """Resolve raw BigWig paths into the discovery-stage track table.
+    """Resolve raw BigWig (or, with ``track_format="bam"``, BAM) paths into the
+    discovery-stage track table.
+
+    A BAM table records each track's file in ``bam`` as well as ``resolved_path``, and
+    stamps ``track_format`` into the table attrs so the bigWig-only stages refuse it.
 
     One row per requested path: ``included`` (survives existence + dedupe
     filtering), ``dropped_duplicate``, or ``missing``. ``track_name`` comes
@@ -316,8 +321,11 @@ def discover_tracks(
     stem; colliding stems among *included* tracks raise here, matching
     :meth:`regulonado.tracks.TrackSheet._require_unique_track_names`.
     """
-    final_paths, provenance = _resolve_bigwig_tracks(
-        bigwig_paths,
+    if track_format not in TRACK_FORMATS:
+        raise ValueError(f"track_format must be one of {TRACK_FORMATS}, got {track_format!r}")
+    fingerprint = bigwig_fingerprint if track_format == "bigwig" else file_fingerprint
+    final_paths, provenance = _resolve_track_files(
+        track_paths,
         drop_missing=drop_missing,
         dedupe_tracks=dedupe_tracks,
         annotations=annotations,
@@ -331,7 +339,9 @@ def discover_tracks(
         track_name = row.pop("track_name", None) or Path(row["path"]).stem
         included_names.append(track_name)
         used_names.add(track_name)
-        fp = bigwig_fingerprint(row["resolved_path"])
+        fp = fingerprint(row["resolved_path"])
+        if track_format == "bam":
+            row["bam"] = row["resolved_path"]
         content_hash = row.pop("content_hash", None)
         row.update(fp)
         if content_hash is not None:
@@ -353,10 +363,11 @@ def discover_tracks(
             }
         )
 
-    for rec in provenance["missing_bigwig_paths"]:
+    for rec in provenance["missing_track_paths"]:
         name = _dedupe_name(Path(rec["path"]).stem, used_names)
         rows.append({"track_name": name, "status": "missing", "path": rec["path"]})
 
     df = pd.DataFrame(rows)
     df.attrs["dedupe_tracks"] = provenance["dedupe_tracks"]
+    df.attrs["track_format"] = track_format
     return df

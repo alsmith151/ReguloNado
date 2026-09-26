@@ -7,7 +7,7 @@
 │ --help          Show this message and exit.                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ───────────────────────────────────────────────────────────────────────────────────────╮
-│ discover          Resolve raw BigWig sources into the discovery-stage track table.               │
+│ discover          Resolve raw BigWig or BAM sources into the discovery-stage track table.        │
 │ interval-means    One shared BigWig scan, consumed by ``tmm`` scaling and interval-based QC      │
 │                   checks.                                                                        │
 │ qc                Compute opt-in QC metrics and a verdict; does not drop or mutate tracks.       │

@@ -40,6 +40,11 @@ SCHEMA_VERSION = "1"
 
 STATUSES = ("included", "dropped_duplicate", "missing", "qc_failed", "excluded")
 
+# What a table's ``path``/``resolved_path`` point at, stamped by discovery into the run-level
+# attrs. bigWig tables feed the coverage stages (interval means, scaling, QC, dataset build);
+# BAM tables feed region counting. Tables written before this existed are bigWig tables.
+TRACK_FORMATS = ("bigwig", "bam")
+
 # Sheet/discovery label columns -> the categorical id field derived at load time.
 # Canonical definition; regulonado.tracks imports this. Ids are never stored,
 # only labels, so they are always recomputed by sorted factorisation (see
@@ -208,6 +213,28 @@ def read_track_table(path: str | Path) -> pd.DataFrame:
             f"{path}: shift_max_bp ({shift_max_bp}) must be a multiple of bin_size ({bin_size})"
         )
     return df
+
+
+def track_format(df: pd.DataFrame) -> str:
+    """``"bigwig"`` or ``"bam"``: what this table's ``resolved_path`` column points at."""
+    return str(df.attrs.get("track_format", "bigwig"))
+
+
+def require_track_format(df: pd.DataFrame, expected: str, what: str) -> None:
+    """Raise when *df* was discovered from the other file type than *what* reads."""
+    actual = track_format(df)
+    if actual != expected:
+        raise ValueError(
+            f"{what} reads {expected} tracks, but this track table was discovered from "
+            f"{actual} files (tracks discover --format {actual})"
+        )
+
+
+def file_fingerprint(path: str | Path) -> dict[str, Any]:
+    """Size/mtime fingerprint for any file (the part of :func:`bigwig_fingerprint` that
+    does not need a BigWig header)."""
+    st = Path(path).resolve().stat()
+    return {"fp_size_bytes": int(st.st_size), "fp_mtime_ns": int(st.st_mtime_ns)}
 
 
 def bigwig_fingerprint(path: str | Path) -> dict[str, Any]:
