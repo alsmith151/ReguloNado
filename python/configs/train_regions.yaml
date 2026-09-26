@@ -1,11 +1,13 @@
-# Region-count head training on cached backbone embeddings (see
-# python/regulonado/regions/{data,model,loss,metrics,runner}.py). Unlike train.yaml, there is
-# no backbone/head config group here: the backbone is frozen and its features are already
-# cached (`regulonado embed regions`), so this trains only the small pooling head.
+# Region-count head training (python/regulonado/training/regions/). Features come from
+# either:
+#   - a cached trunk: data.embeddings_dir (`regulonado embed regions`); only the head trains;
+#   - a live trunk: data.fasta + data.input_length + a backbone group (backbone=alphagenome);
+#     the trunk runs every step on each region's window and trains per trunk.* below.
 #
 # Override these values directly or start from a `region_experiment/*` preset with
 # `+region_experiment=<name>`, mirroring `+experiment=<name>` for `regulonado train`.
 defaults:
+  - backbone: null
   - _self_
 
 seed: 42
@@ -14,8 +16,16 @@ output_dir: ${hydra:runtime.output_dir}
 data:
   # RegionCountData run directory (regulonado counts gather).
   path: ???
-  # Embeddings cache directory (regulonado embed regions).
-  embeddings_dir: ???
+  # Embeddings cache directory (regulonado embed regions): a cached trunk. Leave empty for a
+  # live trunk.
+  embeddings_dir: ""
+  # Live trunk only: genome FASTA, bp of sequence read per region (a multiple of the
+  # backbone's bin size; the region's bins sit centrally), a train-time random window shift
+  # of up to shift_max bp, and the bp width bins are averaged to (as `embed --pool-to`).
+  fasta: ""
+  input_length: null
+  shift_max: 0
+  pool_to: null
   # Group (cell type) name stage 2/3 knobs and metrics below are relative to, e.g. "HL-60".
   target_group: null
   # Stage 2: keep only cell type-specific regions (Gini filter at group level).
@@ -28,7 +38,8 @@ data:
   # Per-track artefact-count masking, thresholds from the train split only. <= 0 disables it.
   count_mask_quantile: 0.999
   count_mask_factor: 20.0
-  # Randomly serve the reverse-complement pass in train mode, when the cache has one.
+  # Train mode: randomly serve the reverse-complement pass (cached: when the cache has one;
+  # live: reverse-complement the window).
   enable_rc_aug: true
   # Read the whole embeddings cache into RAM once instead of memory-mapping it.
   in_memory: false
@@ -61,6 +72,29 @@ loss:
   contrast_multiplier: null
   # Weight of data.target_group inside the contrast term only (every other group is 1.0).
   contrast_task_weight: 1.0
+
+# Live trunk only (training/regions/live.py). finetune: frozen | full | last_blocks
+# (unfreeze_last) | adapters (AlphaGenome: lora/ia3/houlsby on the transformer tower via
+# alphagenome-pytorch; locon on convolutions, the choice for backbone.features: encoder).
+# Trunk parameters train at trainer.backbone_learning_rate (default trainer.learning_rate).
+trunk:
+  finetune: frozen
+  unfreeze_last: 0
+  adapters: []
+  lora_rank: 8
+  lora_alpha: 16
+  lora_targets: [q_proj, v_proj]
+  ia3_targets: [k_proj, v_proj]
+  ia3_ff_targets: []
+  houlsby_latent_dim: 8
+  houlsby_placement: block
+  houlsby_targets: [mha, mlp]
+  locon_rank: 4
+  locon_alpha: 1
+  locon_targets: [down_blocks]
+  unfreeze_norm: false
+  # Recompute the trunk's blocks in backward instead of storing activations (less memory).
+  gradient_checkpointing: false
 
 trainer:
   batch_size: 64

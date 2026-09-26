@@ -38,7 +38,8 @@ Reverse-complementing: the whole window is complemented and reversed before the 
 pass; since flipping a bin-aligned array end-to-end also reverses the order of the bins
 (without touching their internal alignment), flipping the RC pass's output back along the
 bin axis restores forward genomic order, ready for the same window-relative slicing logic
-as the forward pass. See :func:`_reverse_complement_onehot` and ``_embed_chrom``.
+as the forward pass. See :func:`regulonado.sequence.reverse_complement_onehot` and
+``_embed_chrom``.
 """
 
 from __future__ import annotations
@@ -57,7 +58,7 @@ from datasets import Array2D, Dataset, Features, Value, concatenate_datasets
 from datasets.arrow_writer import ArrowWriter
 
 from regulonado.model.adapters import BaseBackboneAdapter
-from regulonado.sequence import Genome, fetch_window
+from regulonado.sequence import Genome, fetch_window, reverse_complement_onehot
 
 __all__ = [
     "CHROM_SUFFIX",
@@ -254,11 +255,6 @@ def _window_geometry(
     return input_length, keep_offset_bp, stride
 
 
-def _reverse_complement_onehot(x: np.ndarray) -> np.ndarray:
-    """Reverse-complement a one-hot window, rows ``A C G T`` (see ``sequence.py``)."""
-    return np.ascontiguousarray(x[[3, 2, 1, 0], :][:, ::-1])
-
-
 def _target_width(regions_df: pl.DataFrame) -> int:
     widths = (regions_df["target_end"] - regions_df["target_start"]).unique()
     if widths.len() != 1:
@@ -448,7 +444,7 @@ def _embed_chrom(
 
                 features_rc_full_np = None
                 if rc:
-                    rc_inputs = np.stack([_reverse_complement_onehot(x) for x in inputs])
+                    rc_inputs = np.stack([reverse_complement_onehot(x) for x in inputs])
                     rc_tensor = torch.from_numpy(rc_inputs).to(device)
                     features_rc_full = adapter.forward_features(rc_tensor)
                     # Flip back along the bin axis (per window, before any stitching): see

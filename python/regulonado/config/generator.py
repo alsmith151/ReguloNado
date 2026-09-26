@@ -15,7 +15,7 @@ from typing import Any
 from regulonado.config.genomes import GenomeEntry, load_genome_registry
 from regulonado.config.models import (
     BAMNADO_METHODS,
-    LIVE_PRESETS,
+    PROFILE_PRESETS,
     BackboneConfig,
     InputsConfig,
     ProfileTargetConfig,
@@ -360,7 +360,7 @@ def build_config(
         ask(
             "Training phases, in order?",
             ",".join(phase_default),
-            choices=list(LIVE_PRESETS),
+            choices=list(PROFILE_PRESETS),
             multi_select=True,
             interactive=interactive,
         )

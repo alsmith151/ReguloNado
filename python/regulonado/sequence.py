@@ -30,6 +30,7 @@ __all__ = [
     "fetch_window",
     "one_hot_encode",
     "open_genome",
+    "reverse_complement_onehot",
 ]
 
 #: Row order of the one-hot encoding. Matches ``one_hot_sequence_tokens``'s
@@ -128,6 +129,12 @@ def one_hot_encode(sequence: str) -> np.ndarray:
     for base, index in _BASE_INDEX.items():
         encoded[index] = codes == ord(base)
     return encoded
+
+
+def reverse_complement_onehot(x: np.ndarray) -> np.ndarray:
+    """Reverse-complement a ``[4, L]`` one-hot window (rows ``A C G T``, so the complement
+    is the row order reversed); all-zero padding columns stay all-zero."""
+    return np.ascontiguousarray(x[[3, 2, 1, 0], :][:, ::-1])
 
 
 def fetch_window(genome: Genome, chrom: str, start: int, end: int) -> np.ndarray:

@@ -1154,11 +1154,12 @@ $defs:
     type: object
   TrainPhase:
     additionalProperties: false
-    description: 'One step of a recipe. ``preset`` must suit the trunk mode of every
-      run using it:
+    description: 'One step of a recipe. ``preset`` must suit the target of every run
+      using it:
 
-      :data:`LIVE_PRESETS` for ``trunk: live``, :data:`CACHED_PRESETS` for ``trunk:
-      cached``.'
+      :data:`PROFILE_PRESETS` for ``target: profile``, :data:`REGION_PRESETS` for
+
+      ``target: region_counts``.'
     properties:
       name:
         title: Name
@@ -1224,6 +1225,15 @@ $defs:
         - $ref: '#/$defs/TrunkCacheConfig'
         - type: 'null'
         description: 'Embedding settings; trunk: cached only.'
+      init_from:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        description: '''<run>/<phase>'': warm-start this run''s first phase from another
+          run''s phase, e.g. fine-tune a live trunk from a head trained on cached
+          embeddings.'
+        title: Init From
       settings:
         additionalProperties: true
         title: Settings

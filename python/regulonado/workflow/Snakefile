@@ -100,12 +100,20 @@ def phase_run_dir(run, phase):
 
 
 def previous_phase_dir(run, phase):
+    """The phase *phase* warm-starts from: the run's previous phase, or, for its first
+    phase, the ``init_from`` run/phase if it names one."""
     index = phase_index(run, phase)
-    return None if index == 0 else phase_run_dir(run, run_phases(run)[index - 1]["name"])
+    if index:
+        return phase_run_dir(run, run_phases(run)[index - 1]["name"])
+    init_from = RUN_BY_NAME[run].get("init_from")
+    if init_from:
+        source, phase_name = init_from.split("/", 1)
+        return phase_run_dir(source, phase_name)
+    return None
 
 
 def previous_phase_state(wildcards):
-    """Chain a phase only to the preceding phase of the same run."""
+    """Chain a phase to the preceding phase of its run (or its run's ``init_from``)."""
     previous = previous_phase_dir(wildcards.run, wildcards.phase)
     return [] if previous is None else str(previous / "trainer_state.json")
 

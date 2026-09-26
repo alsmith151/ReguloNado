@@ -1,9 +1,10 @@
 """Independent, staged training runs: each run follows its recipe's phases in order.
 
 One ``train_phase`` rule serves every run. What a run's trunk and target need is
-decided per run: ``trunk: live`` runs train on the profile dataset (after a CPU
-schedule preflight); ``trunk: cached`` runs train a head on the region-count dataset
-and their trunk's embedding cache.
+decided per run: ``target: profile`` runs train on the profile dataset (after a CPU
+schedule preflight); ``target: region_counts`` runs train on the region-count dataset,
+from their trunk's embedding cache (``trunk: cached``) or from sequence with the trunk
+running every step (``trunk: live``).
 """
 
 import re
@@ -11,11 +12,12 @@ import shlex
 
 from regulonado.training.overrides import hydra_override_items, merge_training_settings
 
-LIVE_RUN_NAMES = [run["name"] for run in RUNS if run.get("trunk", "live") == "live"]
-
-
 def _is_cached(run_name):
     return RUN_BY_NAME[run_name].get("trunk", "live") == "cached"
+
+
+def _is_regions(run_name):
+    return RUN_BY_NAME[run_name].get("target", "profile") == "region_counts"
 
 
 def _override_flags(wildcards):
@@ -30,9 +32,11 @@ def _override_flags(wildcards):
         pretrained_model=None if cached else run["backbone"]["pretrained"],
         backbone_type=None if cached else run["backbone"]["type"],
     )
-    if cached:
+    if _is_regions(wildcards.run):
         if REGION_COUNTS.get("exclude_regions"):
             merged.setdefault("data.exclude_regions", str(REGION_COUNTS["exclude_regions"]))
+        if not cached:
+            merged["backbone.features"] = run["backbone"].get("features", "trunk")
     elif merged.get("trainer.specificity_panel_path"):
         merged.setdefault("trainer.specificity_panel_fasta", config["inputs"]["fasta"])
     merged.setdefault("trainer.wandb_project", "regulonado-training")
@@ -47,29 +51,37 @@ def _override_flags(wildcards):
 
 
 def _dataset_dir(wildcards):
-    return str(REGION_DATASET_DIR if _is_cached(wildcards.run) else training_dataset_dir())
+    return str(REGION_DATASET_DIR if _is_regions(wildcards.run) else training_dataset_dir())
 
 
 def _trunk_args(wildcards):
     """The data flags that differ by trunk."""
     run = RUN_BY_NAME[wildcards.run]
+    if not _is_regions(wildcards.run):
+        return f"--metadata {shlex.quote(str(training_dataset_dir() / 'tracks.parquet'))}"
     if _is_cached(wildcards.run):
         args = ["--trunk cached", f"--embeddings {shlex.quote(str(embedding_cache_dir(run['name'])))}"]
-        if run.get("target_group"):
-            args.append(f"--target-group {shlex.quote(str(run['target_group']))}")
-        return " ".join(args)
-    return f"--metadata {shlex.quote(str(training_dataset_dir() / 'tracks.parquet'))}"
+    else:
+        fasta = shlex.quote(str(config["inputs"]["fasta"]))
+        args = ["--trunk live", "--target region_counts", f"--fasta {fasta}"]
+    if run.get("target_group"):
+        args.append(f"--target-group {shlex.quote(str(run['target_group']))}")
+    return " ".join(args)
 
 
 def _phase_inputs(wildcards):
-    if _is_cached(wildcards.run):
-        return {
+    if _is_regions(wildcards.run):
+        inputs = {
             "dataset": str(REGION_DATASET_DIR / "counts.parquet"),
-            "embeddings": str(embedding_cache_dir(wildcards.run) / ".done"),
             "exclude_regions": (
                 [REGION_COUNTS["exclude_regions"]] if REGION_COUNTS.get("exclude_regions") else []
             ),
         }
+        if _is_cached(wildcards.run):
+            inputs["embeddings"] = str(embedding_cache_dir(wildcards.run) / ".done")
+        else:
+            inputs["fasta"] = config["inputs"]["fasta"]
+        return inputs
     return {
         "dataset": str(training_dataset_dir() / "README.md"),
         "metadata": str(training_dataset_dir() / "tracks.parquet"),
@@ -77,10 +89,10 @@ def _phase_inputs(wildcards):
     }
 
 
-if LIVE_RUN_NAMES:
+if PROFILE_RUN_NAMES:
 
     rule train_schedule_preflight:
-        """Resolve a live-trunk phase's update schedule on CPU before it takes a GPU."""
+        """Resolve a profile phase's update schedule on CPU before it takes a GPU."""
         input:
             dataset=str(training_dataset_dir() / "README.md"),
             metadata=str(training_dataset_dir() / "tracks.parquet"),
@@ -97,7 +109,7 @@ if LIVE_RUN_NAMES:
             mem_mb=4000,
             runtime=10,
         wildcard_constraints:
-            run="|".join(re.escape(name) for name in LIVE_RUN_NAMES),
+            run="|".join(re.escape(name) for name in PROFILE_RUN_NAMES),
             phase="|".join(re.escape(name) for name in PHASE_NAMES),
         log:
             str(RESULTS / "logs" / "schedule_{run}_{phase}.log"),

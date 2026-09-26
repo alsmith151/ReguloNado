@@ -1,10 +1,11 @@
-"""Region-level count head trained on cached backbone embeddings.
+"""Region-level count head, on cached backbone embeddings or on a live trunk.
 
-``RegionCountModel`` sits on top of a frozen backbone's cached per-region features
-(:mod:`regulonado.embeddings`, added separately): a small learned head -- attention
-pooling, an MLP and a per-track count head -- predicts one NB (or log-normal) rate per
-group (cell type) from those features, trained against raw per-track BAM counts
-(:mod:`regulonado.counts`, added separately).
+``RegionCountModel`` reads a region's ``K`` backbone bins -- from the embedding cache
+(:mod:`regulonado.embeddings`), or computed each step by an optional live ``trunk``
+submodule (:mod:`regulonado.training.regions.live`) -- and a small learned head --
+attention pooling, an MLP and a per-track count head -- predicts one NB (or log-normal)
+rate per group (cell type), trained against raw per-track BAM counts
+(:mod:`regulonado.counts`).
 
 Two pooling heads, chosen by ``RegionCountConfig.pooling``:
 
@@ -186,7 +187,7 @@ class RegionCountConfig(PretrainedConfig):
     Parameters
     ----------
     backbone_name
-        Name of the backbone the cached features came from (e.g. ``"alphagenome"``,
+        Name of the backbone the features come from (e.g. ``"alphagenome"``,
         ``"borzoi"``); informational -- the head itself is backbone-agnostic and only
         depends on ``k``/``d``.
     backbone_checkpoint
@@ -226,6 +227,10 @@ class RegionCountConfig(PretrainedConfig):
     loss_contrast_weight, loss_contrast_multiplier, task_weights, contrast_task_weights
         Passed through to :class:`~regulonado.training.regions.loss.CountLikelihoodLoss`; see
         its docstring.
+    trunk
+        For a live-trunk model, how its trunk was built and how each region's window maps
+        onto its bins (see :mod:`regulonado.training.regions.live`); ``None`` for a head
+        trained on cached embeddings.
     """
 
     model_type = "regulonado_region_count"
@@ -254,6 +259,7 @@ class RegionCountConfig(PretrainedConfig):
         loss_contrast_multiplier: float | None = None,
         task_weights: list[float] | None = None,
         contrast_task_weights: list[float] | None = None,
+        trunk: dict | None = None,
         **kwargs: object,
     ) -> None:
         super().__init__(**kwargs)
@@ -311,6 +317,7 @@ class RegionCountConfig(PretrainedConfig):
         self.loss_contrast_multiplier = loss_contrast_multiplier
         self.task_weights = task_weights
         self.contrast_task_weights = contrast_task_weights
+        self.trunk = trunk
 
 
 @dataclass
@@ -331,11 +338,14 @@ class RegionCountOutput(ModelOutput):
 
 
 class RegionCountModel(PreTrainedModel):
-    """Attention pool + MLP + :class:`CountHead`, trained on cached backbone features.
+    """Attention pool + MLP + :class:`CountHead`, on cached or live-trunk features.
 
     ``forward`` follows the HF convention -- ``logits``, plus ``loss`` when ``labels``
     is passed -- so ``transformers.Trainer`` can drive it without a custom
-    ``compute_loss``.
+    ``compute_loss``. It takes cached ``features``, or, when built with a *trunk*, the
+    region windows' one-hot ``sequence`` (and per-row ``rc`` flags), which the trunk turns
+    into the same ``[batch, k, d]`` features. The head's parameter names are identical
+    either way, so a live-trunk run can warm-start from a cached-embeddings checkpoint.
     """
 
     config_class = RegionCountConfig
@@ -346,7 +356,7 @@ class RegionCountModel(PreTrainedModel):
     #: ``Trainer``'s ``num_processes`` rescaling for token-level losses does not apply.
     accepts_loss_kwargs = False
 
-    def __init__(self, config: RegionCountConfig) -> None:
+    def __init__(self, config: RegionCountConfig, trunk: nn.Module | None = None) -> None:
         super().__init__(config)
         self.norm = nn.LayerNorm(config.d)
         if config.pooling == "per_group":
@@ -363,6 +373,17 @@ class RegionCountModel(PreTrainedModel):
                 nn.Dropout(config.dropout),
                 nn.Linear(config.hidden, config.n_groups),
             )
+        if trunk is not None:
+            self.trunk = trunk
+            self.main_input_name = "sequence"
+            # Checkpoints keep only what trains: frozen pretrained trunk weights (and its
+            # buffers) are rebuilt from the backbone checkpoint, not re-saved every time.
+            trainable = {
+                f"trunk.{name}" for name, p in trunk.named_parameters() if p.requires_grad
+            }
+            self._keys_to_ignore_on_save = [
+                f"trunk.{name}" for name in trunk.state_dict() if f"trunk.{name}" not in trainable
+            ]
         self.count_head = CountHead(
             track_groups=config.track_groups,
             log_size_factors=config.log_size_factors,
@@ -424,16 +445,26 @@ class RegionCountModel(PreTrainedModel):
 
     def forward(
         self,
-        features: Tensor,
+        features: Tensor | None = None,
         labels: Tensor | None = None,
         sample_weight: Tensor | None = None,
+        sequence: Tensor | None = None,
+        rc: Tensor | None = None,
         **kwargs: object,
     ) -> RegionCountOutput:
-        """``features``: ``[batch, k, d]`` (cast to float32 regardless of cache dtype).
+        """``features``: ``[batch, k, d]`` (cast to float32 regardless of cache dtype); or,
+        for a live-trunk model, ``sequence``: ``[batch, 4, input_length]`` one-hot windows
+        and ``rc``: ``[batch]`` flags marking reverse-complemented rows.
 
         ``labels``, when given: ``[batch, n_tracks]`` raw per-track counts, ``NaN``
         where masked.
         """
+        if sequence is not None:
+            if not hasattr(self, "trunk"):
+                raise ValueError("this model has no live trunk; pass cached `features`")
+            features = self.trunk(sequence, rc)
+        if features is None:
+            raise ValueError("pass `features` (cached) or `sequence` (live trunk)")
         eta = self._group_log_rates(features.float())
         loss = None
         if labels is not None:

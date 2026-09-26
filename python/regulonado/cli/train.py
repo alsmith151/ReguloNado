@@ -69,8 +69,8 @@ def train(
     dataset: Annotated[
         Path,
         typer.Argument(
-            help="Training dataset: the profile dataset directory (trunk live), or the "
-            "region-count dataset from 'counts gather' (trunk cached)"
+            help="Training dataset: the profile dataset directory (target profile), or the "
+            "region-count dataset from 'counts gather' (target region_counts)"
         ),
     ],
     trunk: Annotated[
@@ -81,13 +81,29 @@ def train(
             "head on embeddings cached by 'embed regions'",
         ),
     ] = "live",
+    target: Annotated[
+        Optional[str],
+        typer.Option(
+            "--target",
+            help="profile or region_counts; default region_counts with --trunk cached, "
+            "else profile",
+        ),
+    ] = None,
     embeddings: Annotated[
         Optional[Path],
         typer.Option("--embeddings", "-e", help="Embedding cache directory (trunk cached)"),
     ] = None,
+    fasta: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--fasta", help="Genome FASTA for a live trunk on region counts (data.fasta)"
+        ),
+    ] = None,
     target_group: Annotated[
         Optional[str],
-        typer.Option("--target-group", help="Set data.target_group (trunk cached), e.g. HL-60"),
+        typer.Option(
+            "--target-group", help="Set data.target_group (target region_counts), e.g. HL-60"
+        ),
     ] = None,
     output_dir: Annotated[
         Optional[Path],
@@ -98,8 +114,9 @@ def train(
         typer.Option(
             "--preset",
             "-p",
-            help="Named phase preset: python/configs/experiment/ (trunk live, default "
-            "head_only) or python/configs/region_experiment/ (trunk cached, default pretrain)",
+            help="Named phase preset: python/configs/experiment/ (target profile, default "
+            "head_only) or python/configs/region_experiment/ (target region_counts, default "
+            "pretrain)",
         ),
     ] = None,
     metadata: Annotated[
@@ -192,38 +209,53 @@ def train(
         raise typer.Exit(1)
     if trunk not in ("live", "cached"):
         raise typer.BadParameter("Expected 'live' or 'cached'", param_hint="--trunk")
+    target = target or ("region_counts" if trunk == "cached" else "profile")
+    if target not in ("profile", "region_counts"):
+        raise typer.BadParameter("Expected 'profile' or 'region_counts'", param_hint="--target")
+    if trunk == "cached" and target != "region_counts":
+        raise typer.BadParameter(
+            "--trunk cached trains region_counts heads only", param_hint="--trunk/--target"
+        )
+    regions = target == "region_counts"
     if (trunk == "cached") != (embeddings is not None):
         raise typer.BadParameter(
             "--embeddings is required with --trunk cached, and only valid with it",
             param_hint="--trunk/--embeddings",
         )
-    live_only = {
+    if fasta is not None and not (regions and trunk == "live"):
+        raise typer.BadParameter(
+            "--fasta only applies to --trunk live --target region_counts", param_hint="--fasta"
+        )
+    profile_only = {
         "--metadata": metadata,
         "--max-steps": max_steps,
         "--eval-batch-size": eval_batch_size,
-        "--backbone-lr": backbone_lr,
         "--schedule-only": schedule_only or None,
     }
     if trunk == "cached":
-        used = [flag for flag, value in live_only.items() if value is not None]
+        profile_only["--backbone-lr"] = backbone_lr
+    if regions:
+        used = [flag for flag, value in profile_only.items() if value is not None]
         if used:
             raise typer.BadParameter(
-                f"{', '.join(used)} only apply to --trunk live", param_hint="--trunk"
+                f"{', '.join(used)} do not apply to --target region_counts"
+                + (" or --trunk cached" if trunk == "cached" else ""),
+                param_hint="--target",
             )
     elif target_group is not None:
-        overrides_hint = "--set data.target_group=... is not a live-trunk setting"
+        overrides_hint = "--set data.target_group=... is not a profile-model setting"
         raise typer.BadParameter(
-            f"--target-group only applies to --trunk cached ({overrides_hint})",
+            f"--target-group only applies to --target region_counts ({overrides_hint})",
             param_hint="--target-group",
         )
-    preset = preset or ("head_only" if trunk == "live" else "pretrain")
+    preset = preset or ("pretrain" if regions else "head_only")
 
-    if trunk == "cached":
-        overrides = [
-            f"+region_experiment={preset}",
-            f"data.path={dataset}",
-            f"data.embeddings_dir={embeddings}",
-        ]
+    if regions:
+        overrides = [f"+region_experiment={preset}", f"data.path={dataset}"]
+        if embeddings is not None:
+            overrides.append(f"data.embeddings_dir={embeddings}")
+        if fasta is not None:
+            overrides.append(f"data.fasta={fasta}")
         if target_group is not None:
             overrides.append(f"data.target_group={target_group}")
     else:
@@ -260,7 +292,7 @@ def train(
             )
         overrides.append(setting)
 
-    if print_config and trunk == "cached":
+    if print_config and regions:
         try:
             from regulonado.training.regions.runner import resolved_region_config
         except ImportError as exc:
@@ -303,9 +335,7 @@ def train(
         typer.echo(json.dumps(asdict(schedule), indent=2))
         return
 
-    module = (
-        "regulonado.training.regions.runner" if trunk == "cached" else "regulonado.training.runner"
-    )
+    module = "regulonado.training.regions.runner" if regions else "regulonado.training.runner"
     if nproc_per_node > 1:
         import random
 

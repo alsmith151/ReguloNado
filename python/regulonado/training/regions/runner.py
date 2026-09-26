@@ -1,14 +1,20 @@
 """Lean HF ``Trainer`` entry point for :class:`~regulonado.training.regions.model.RegionCountModel`.
 
 Driven by the Hydra config ``python/configs/train_regions.yaml`` (``data.*``/``model.*``/
-``loss.*``/``trainer: TrainerConfig``), the same shape as :mod:`regulonado.training.runner`
-but far smaller: the backbone is already frozen and cached
-(:mod:`regulonado.embeddings.cache`), so there is no backbone to build, freeze-policy, or
-adapter here -- only the pooling head, and a plain ``transformers.Trainer`` is enough
-(``RegionCountModel.forward`` already returns an HF-style ``ModelOutput`` with ``loss``
-computed when ``labels`` is given, so no custom ``compute_loss``/``Trainer`` subclass is
-needed). Reuses :mod:`regulonado.training.runner`'s schedule/``TrainingArguments``
-resolution, :mod:`regulonado.training.callbacks`, and
+``loss.*``/``trunk.*``/``trainer: TrainerConfig``), the same shape as
+:mod:`regulonado.training.runner` but far smaller. Features come from one of two sources:
+
+- a **cached** trunk (``data.embeddings_dir``): frozen embeddings stored by
+  :mod:`regulonado.embeddings.cache`, and only the head trains;
+- a **live** trunk (``data.fasta`` plus a ``backbone`` config group): the backbone runs
+  every step on each region's window (:mod:`regulonado.training.regions.live`), frozen or
+  fine-tuned per ``trunk.*``.
+
+Either way a plain ``transformers.Trainer`` is enough (``RegionCountModel.forward`` already
+returns an HF-style ``ModelOutput`` with ``loss`` computed when ``labels`` is given, so no
+custom ``compute_loss``/``Trainer`` subclass is needed). Reuses
+:mod:`regulonado.training.runner`'s schedule/``TrainingArguments`` resolution,
+:mod:`regulonado.training.callbacks`, and
 :mod:`regulonado.training.provenance` verbatim -- see each import below.
 """
 
@@ -17,22 +23,24 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import hydra
 import numpy as np
+import polars as pl
 import torch
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 from torch.optim import AdamW
-from torch.utils.data import Subset
+from torch.utils.data import Dataset, Subset
 from transformers import EarlyStoppingCallback, Trainer, default_data_collator
 
 from regulonado.counts.dataset import RegionCountData
-from regulonado.embeddings.cache import EmbeddingManifest, EmbeddingStore
+from regulonado.embeddings.cache import EmbeddingStore
 from regulonado.training.callbacks import LRLogCallback, WandbConfigCallback
 from regulonado.training.config import TrainerConfig
 from regulonado.training.provenance import write_provenance
@@ -42,6 +50,13 @@ from regulonado.training.regions.data import (
     RegionsDataConfig,
     attach_region_rows,
     prepare_region_data,
+)
+from regulonado.training.regions.live import (
+    LiveTrunk,
+    SequenceRegionDataset,
+    TrunkFinetuneConfig,
+    TrunkWindow,
+    prepare_trunk,
 )
 from regulonado.training.regions.metrics import GroupedCountMetrics
 from regulonado.training.regions.model import RegionCountConfig, RegionCountModel
@@ -59,7 +74,7 @@ logger = logging.getLogger(__name__)
 CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs"
 # Sections read key-by-key (``cfg["data"].get(...)``), so a misspelt key would otherwise
 # be silently ignored; train_regions.yaml declares every key they accept.
-_CHECKED_SECTIONS = ("data", "model", "loss")
+_CHECKED_SECTIONS = ("data", "model", "loss", "trunk")
 
 
 def validate_region_config(cfg: Mapping[str, Any]) -> None:
@@ -129,41 +144,34 @@ def _resolve_trainer_config(cfg: Mapping[str, Any]) -> TrainerConfig:
 
 def _build_optimizer(model: RegionCountModel, trainer_cfg: TrainerConfig) -> AdamW:
     """AdamW with :class:`~regulonado.training.regions.model.CountHead` params excluded from
-    weight decay.
+    weight decay, and a live trunk's trainable params in their own groups.
 
     Shrinking a replicate offset or a noise scale toward zero is not regularisation of
     the sequence model -- see ``CountHead``'s docstring. 1-D parameters (norm/bias) are
-    also excluded, matching the main runner's convention.
+    also excluded, matching the main runner's convention. Trunk parameters train at
+    ``trainer.backbone_learning_rate`` (default: ``trainer.learning_rate``).
     """
     count_head_names = set(model.count_head_parameter_names())
-    decay: list[torch.nn.Parameter] = []
-    no_decay: list[torch.nn.Parameter] = []
+    buckets: dict[str, list[torch.nn.Parameter]] = {
+        "head": [], "head_no_decay": [], "backbone": [], "backbone_no_decay": []
+    }
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        if name in count_head_names or parameter.ndim <= 1:
-            no_decay.append(parameter)
-        else:
-            decay.append(parameter)
-    groups: list[dict[str, Any]] = []
-    if decay:
-        groups.append(
-            {
-                "params": decay,
-                "lr": trainer_cfg.learning_rate,
-                "weight_decay": trainer_cfg.weight_decay,
-                "name": "head",
-            }
-        )
-    if no_decay:
-        groups.append(
-            {
-                "params": no_decay,
-                "lr": trainer_cfg.learning_rate,
-                "weight_decay": 0.0,
-                "name": "head_no_decay",
-            }
-        )
+        part = "backbone" if name.startswith("trunk.") else "head"
+        no_decay = name in count_head_names or parameter.ndim <= 1
+        buckets[f"{part}_no_decay" if no_decay else part].append(parameter)
+    backbone_lr = trainer_cfg.backbone_learning_rate or trainer_cfg.learning_rate
+    groups: list[dict[str, Any]] = [
+        {
+            "params": params,
+            "lr": backbone_lr if name.startswith("backbone") else trainer_cfg.learning_rate,
+            "weight_decay": 0.0 if name.endswith("no_decay") else trainer_cfg.weight_decay,
+            "name": name,
+        }
+        for name, params in buckets.items()
+        if params
+    ]
     if not groups:
         raise ValueError("model has no trainable parameters")
     return AdamW(groups)
@@ -171,12 +179,13 @@ def _build_optimizer(model: RegionCountModel, trainer_cfg: TrainerConfig) -> Ada
 
 def build_model(
     cfg: Mapping[str, Any],
-    manifest: EmbeddingManifest,
+    source: "_FeatureSource",
     data: RegionCountData,
     group_names: list[str],
     track_groups: np.ndarray,
 ) -> RegionCountModel:
-    """Build :class:`RegionCountModel` from the embeddings manifest, track table and config."""
+    """Build :class:`RegionCountModel` over *source*'s features from the track table and
+    config (with *source*'s live trunk as a submodule, if it has one)."""
     model_cfg = cfg["model"]
     loss_cfg = cfg["loss"]
     data_cfg = cfg["data"]
@@ -197,10 +206,10 @@ def build_model(
             ]
 
     config = RegionCountConfig(
-        backbone_name=manifest.backbone,
-        backbone_checkpoint=manifest.checkpoint,
-        k=manifest.k,
-        d=manifest.d,
+        backbone_name=source.backbone,
+        backbone_checkpoint=source.checkpoint,
+        k=source.k,
+        d=source.d,
         track_groups=[int(g) for g in track_groups],
         log_size_factors=[float(v) for v in data.log_size_factors()],
         track_names=list(data.track_names),
@@ -216,8 +225,9 @@ def build_model(
         loss_contrast_weight=contrast_weight,
         loss_contrast_multiplier=loss_cfg.get("contrast_multiplier"),
         contrast_task_weights=contrast_task_weights,
+        trunk=source.trunk_info,
     )
-    return RegionCountModel(config)
+    return RegionCountModel(config, trunk=source.trunk)
 
 
 def _load_warm_start(model: RegionCountModel, checkpoint: str | Path) -> None:
@@ -275,50 +285,160 @@ def _load_warm_start(model: RegionCountModel, checkpoint: str | Path) -> None:
         )
 
 
+@dataclass
+class _FeatureSource:
+    """Where a run's ``[K, D]`` region features come from, and each split's dataset."""
+
+    backbone: str
+    checkpoint: str
+    k: int
+    d: int
+    make_dataset: Callable[..., Dataset]
+    trunk: LiveTrunk | None = None
+    trunk_info: dict[str, Any] | None = None
+
+
+def _target_width(regions: pl.DataFrame) -> int:
+    widths = (regions["target_end"] - regions["target_start"]).unique().to_list()
+    if len(widths) != 1:
+        raise ValueError(f"target_end - target_start must be constant; got widths {widths[:5]}")
+    return int(widths[0])
+
+
+def _cached_source(
+    data_cfg: RegionsDataConfig, raw: RegionCountData
+) -> tuple[RegionCountData, _FeatureSource]:
+    data, manifest = attach_region_rows(raw, Path(data_cfg.embeddings_dir))
+    store = EmbeddingStore(data_cfg.embeddings_dir, in_memory=data_cfg.in_memory)
+
+    def make_dataset(prepared, split, *, train, sample_weights=None):
+        return CachedRegionDataset(
+            prepared,
+            store,
+            split=split,
+            train=train,
+            sample_weights=sample_weights,
+            enable_rc_aug=data_cfg.enable_rc_aug and train,
+            drop_missing_from_cache=data_cfg.drop_missing_from_cache,
+        )
+
+    return data, _FeatureSource(
+        backbone=manifest.backbone,
+        checkpoint=manifest.checkpoint,
+        k=manifest.k,
+        d=manifest.d,
+        make_dataset=make_dataset,
+    )
+
+
+def _live_source(
+    cfg: Mapping[str, Any], data_cfg: RegionsDataConfig, raw: RegionCountData
+) -> tuple[RegionCountData, _FeatureSource]:
+    from regulonado.model.adapters import BackboneSpec, build_backbone_adapter
+    from regulonado.sequence import open_genome
+
+    backbone_cfg = cfg.get("backbone")
+    if not backbone_cfg:
+        raise ValueError("a live trunk needs a backbone config group (e.g. backbone=alphagenome)")
+    if not data_cfg.input_length:
+        raise ValueError("a live trunk needs data.input_length (bp of sequence per region)")
+    spec = BackboneSpec(
+        backbone_type=str(backbone_cfg.get("name")),
+        pretrained_name=backbone_cfg.get("pretrained_name"),
+        target_length=backbone_cfg.get("target_length"),
+        config_overrides=dict(backbone_cfg.get("config_overrides") or {}),
+        features=str(backbone_cfg.get("features", "trunk")),
+        allow_random_init=bool(backbone_cfg.get("allow_random_init", False)),
+    )
+    finetune = TrunkFinetuneConfig(**dict(cfg.get("trunk") or {}))
+    adapter = build_backbone_adapter(spec)
+    counts = prepare_trunk(adapter, finetune)
+    logger.info(
+        f"live trunk {spec.backbone_type}/{spec.features}: {finetune.finetune}, "
+        f"{counts['trainable']:,} of {counts['total']:,} trunk parameters train"
+    )
+    window = TrunkWindow.for_adapter(
+        adapter, int(data_cfg.input_length), _target_width(raw.regions), data_cfg.pool_to
+    )
+    genome = open_genome(data_cfg.fasta)
+    data = RegionCountData(
+        regions=raw.regions.with_row_index("region_row").with_columns(
+            pl.col("region_row").cast(pl.Int64)
+        ),
+        counts=raw.counts,
+        track_names=raw.track_names,
+        tracks=raw.tracks,
+    )
+
+    def make_dataset(prepared, split, *, train, sample_weights=None):
+        return SequenceRegionDataset(
+            prepared,
+            genome,
+            window,
+            split=split,
+            train=train,
+            sample_weights=sample_weights,
+            enable_rc_aug=data_cfg.enable_rc_aug and train,
+            shift_max=data_cfg.shift_max if train else 0,
+        )
+
+    backbone = spec.backbone_type
+    if spec.features != "trunk":
+        backbone = f"{backbone}:{spec.features}"
+    return data, _FeatureSource(
+        backbone=backbone,
+        checkpoint=spec.pretrained_name or "",
+        k=window.k,
+        d=int(adapter.feature_dim),
+        make_dataset=make_dataset,
+        trunk=LiveTrunk(adapter, window),
+        trunk_info={
+            "backbone": {
+                "type": spec.backbone_type,
+                "pretrained": spec.pretrained_name,
+                "features": spec.features,
+            },
+            "window": window.as_dict(),
+            "finetune": dataclasses.asdict(finetune),
+        },
+    )
+
+
 def _load_and_prepare(
     cfg: Mapping[str, Any],
-) -> tuple[PreparedRegionData, EmbeddingManifest, RegionsDataConfig]:
+) -> tuple[PreparedRegionData, _FeatureSource, RegionsDataConfig]:
     data_cfg = _resolve_data_config(cfg)
     if not data_cfg.path:
         raise ValueError("data.path is required")
-    if not data_cfg.embeddings_dir:
-        raise ValueError("data.embeddings_dir is required")
+    if bool(data_cfg.embeddings_dir) == bool(data_cfg.fasta):
+        raise ValueError(
+            "set exactly one of data.embeddings_dir (a cached trunk) or data.fasta (a live trunk)"
+        )
     raw = RegionCountData.read(Path(data_cfg.path))
-    data, manifest = attach_region_rows(raw, Path(data_cfg.embeddings_dir))
+    if data_cfg.embeddings_dir:
+        data, source = _cached_source(data_cfg, raw)
+    else:
+        data, source = _live_source(cfg, data_cfg, raw)
     prepared = prepare_region_data(data, data_cfg)
-    return prepared, manifest, data_cfg
+    return prepared, source, data_cfg
 
 
 def _build_datasets(
     prepared: PreparedRegionData,
-    data_cfg: RegionsDataConfig,
+    source: _FeatureSource,
     trainer_cfg: TrainerConfig,
     *,
     seed: int,
-) -> tuple[CachedRegionDataset, Any, bool]:
+) -> tuple[Dataset, Any, bool]:
     split_names = set(prepared.data.regions["split"].unique().to_list())
     has_eval = "val" in split_names
 
-    store = EmbeddingStore(data_cfg.embeddings_dir, in_memory=data_cfg.in_memory)
-    train_dataset = CachedRegionDataset(
-        prepared.data,
-        store,
-        split="train",
-        train=True,
-        sample_weights=prepared.train_sample_weights,
-        enable_rc_aug=data_cfg.enable_rc_aug,
-        drop_missing_from_cache=data_cfg.drop_missing_from_cache,
+    train_dataset = source.make_dataset(
+        prepared.data, "train", train=True, sample_weights=prepared.train_sample_weights
     )
     val_dataset: Any = None
     if has_eval:
-        val_dataset = CachedRegionDataset(
-            prepared.data,
-            store,
-            split="val",
-            train=False,
-            enable_rc_aug=False,
-            drop_missing_from_cache=data_cfg.drop_missing_from_cache,
-        )
+        val_dataset = source.make_dataset(prepared.data, "val", train=False)
         if trainer_cfg.max_eval_samples is not None:
             n_val = len(val_dataset)
             if n_val > trainer_cfg.max_eval_samples:
@@ -349,9 +469,9 @@ def run_training(cfg: Mapping[str, Any]) -> dict[str, Any]:
     seed = int(cfg.get("seed", 42))
     _seed_everything(seed)
 
-    prepared, manifest, data_cfg = _load_and_prepare(cfg)
+    prepared, source, data_cfg = _load_and_prepare(cfg)
     train_dataset, val_dataset, has_eval = _build_datasets(
-        prepared, data_cfg, trainer_cfg, seed=seed
+        prepared, source, trainer_cfg, seed=seed
     )
 
     schedule: TrainingSchedule = _resolve_training_schedule(
@@ -362,7 +482,7 @@ def run_training(cfg: Mapping[str, Any]) -> dict[str, Any]:
         f"eval_steps={schedule.eval_steps} checkpoint_steps={schedule.checkpoint_steps}"
     )
 
-    model = build_model(cfg, manifest, prepared.data, prepared.group_names, prepared.track_groups)
+    model = build_model(cfg, source, prepared.data, prepared.group_names, prepared.track_groups)
     if trainer_cfg.init_weights_from_checkpoint:
         _load_warm_start(model, trainer_cfg.init_weights_from_checkpoint)
 
@@ -377,7 +497,12 @@ def run_training(cfg: Mapping[str, Any]) -> dict[str, Any]:
         cfg=cfg,
         data_path=Path(data_cfg.path),
         dataset_dict=dataset_dict,
-        metadata={"backbone": manifest.backbone, "k": manifest.k, "d": manifest.d},
+        metadata={
+            "backbone": source.backbone,
+            "k": source.k,
+            "d": source.d,
+            "trunk": source.trunk_info,
+        },
         records=prepared.data.tracks.to_dicts(),
         trainer_cfg=trainer_cfg,
     )
@@ -437,7 +562,7 @@ def run_training(cfg: Mapping[str, Any]) -> dict[str, Any]:
     summary = {
         "output_dir": str(output_dir),
         "seed": seed,
-        "backbone": manifest.backbone,
+        "backbone": source.backbone,
         "n_tracks": prepared.data.n_tracks,
         "n_groups": len(prepared.group_names),
         "group_names": prepared.group_names,

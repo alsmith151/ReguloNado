@@ -119,7 +119,13 @@ class RegionsDataConfig:
     path
         :class:`~regulonado.counts.dataset.RegionCountData` run directory.
     embeddings_dir
-        :mod:`regulonado.embeddings.cache` directory to read features from.
+        :mod:`regulonado.embeddings.cache` directory to read features from (a cached
+        trunk). Empty for a live trunk, which reads sequence from ``fasta`` instead.
+    fasta, input_length, shift_max, pool_to
+        Live trunk only (:mod:`regulonado.training.regions.live`): the genome, the window
+        length in bp each region's sequence is read at, a train-time random shift of up
+        to ``shift_max`` bp, and the bp width bins are averaged to (as the cache's
+        ``--pool-to``).
     target_group
         The group (cell type) name stage 2/3 knobs below are relative to (also used as
         :class:`~regulonado.training.regions.metrics.GroupedCountMetrics`'s ``top_decile_task``).
@@ -155,6 +161,10 @@ class RegionsDataConfig:
 
     path: str = ""
     embeddings_dir: str = ""
+    fasta: str = ""
+    input_length: int | None = None
+    shift_max: int = 0
+    pool_to: int | None = None
     target_group: str | None = None
     specific_only: bool = False
     gini_std_threshold: float = 1.0

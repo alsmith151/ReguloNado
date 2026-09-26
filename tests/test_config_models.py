@@ -428,14 +428,17 @@ def test_profile_and_region_count_runs_share_bigwig_tracks():
     _validate_against_schema(config.to_dict())
 
 
-def test_recipe_presets_must_suit_the_run_trunk():
-    with pytest.raises(ValueError, match="not trunk-cached presets"):
+def test_recipe_presets_must_suit_the_run_target():
+    with pytest.raises(ValueError, match="not region_counts presets"):
         TrainConfig(
             recipes={"finetune": [TrainPhase(name="head", preset="head_only")]},
             runs=[_cached(recipe="finetune")],
         )
-    with pytest.raises(ValueError, match="not trunk-live presets"):
+    with pytest.raises(ValueError, match="not profile presets"):
         TrainConfig(recipes=CURRICULUM, runs=[_run(recipe="curriculum")])
+    # A live-trunk region-count run follows the same region presets as a cached one.
+    live = _run(recipe="curriculum", target="region_counts", target_group="HL-60")
+    assert TrainConfig(recipes=CURRICULUM, runs=[live]).runs[0].trunk == "live"
 
 
 def test_runs_must_name_a_known_recipe():
@@ -446,8 +449,6 @@ def test_runs_must_name_a_known_recipe():
 def test_unimplemented_trunk_target_pairs_are_rejected():
     with pytest.raises(ValueError, match="trunk 'cached' with target 'profile' is not implemented"):
         _run(trunk="cached", target="profile")
-    with pytest.raises(ValueError, match="trunk 'live' with target 'region_counts'"):
-        _run(target="region_counts")
 
 
 def test_encoder_features_are_alphagenome_region_count_only():
@@ -466,7 +467,7 @@ def test_cache_settings_apply_to_cached_alphagenome_runs_only():
         _run(cache=TrunkCacheConfig(pool_to=128))
     with pytest.raises(ValueError, match="only apply to backbone 'alphagenome'"):
         _cached(type="borzoi", pretrained="model/a", cache=TrunkCacheConfig(context=524_288))
-    with pytest.raises(ValueError, match="target_group applies to trunk: cached"):
+    with pytest.raises(ValueError, match="target_group applies to target: region_counts"):
         _run(target_group="HL-60")
 
 
@@ -528,3 +529,21 @@ def test_final_phase_follows_each_runs_recipe():
     )
     assert train.final_phase("run_a") == "deep"
     assert train.final_phase("counts_run") == "pretrain"
+
+
+def test_init_from_names_another_runs_phase_with_the_same_target():
+    cached = _cached("cached")
+    live = _run("live", recipe="curriculum", target="region_counts", init_from="cached/pretrain")
+    assert TrainConfig(recipes=CURRICULUM, runs=[cached, live]).runs[1].init_from
+    for init_from, match in (
+        ("missing/pretrain", "must name another run's phase"),
+        ("live/pretrain", "must name another run's phase"),
+        ("cached/target", "is not a phase of run 'cached'"),
+    ):
+        bad = _run("live", recipe="curriculum", target="region_counts", init_from=init_from)
+        with pytest.raises(ValueError, match=match):
+            TrainConfig(recipes=CURRICULUM, runs=[cached, bad])
+    profile = _run("profile", init_from="cached/pretrain")
+    recipes = {**CURRICULUM, "finetune": [TrainPhase(name="head", preset="head_only")]}
+    with pytest.raises(ValueError, match="has target region_counts, not profile"):
+        TrainConfig(recipes=recipes, runs=[cached, profile])

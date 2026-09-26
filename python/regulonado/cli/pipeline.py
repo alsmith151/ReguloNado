@@ -155,6 +155,7 @@ def _validate_training_matrix(configfile: Path) -> None:
     counts = config.targets.region_counts
     for run in config.train.runs:
         cached = run.trunk == "cached"
+        regions = run.target == "region_counts"
         for phase in config.train.recipes[run.recipe]:
             settings = merge_training_settings(
                 [config.train.common, phase.settings, run.settings],
@@ -162,16 +163,23 @@ def _validate_training_matrix(configfile: Path) -> None:
                 pretrained_model=None if cached else run.backbone.pretrained,
                 backbone_type=None if cached else run.backbone.type,
             )
-            if cached and counts is not None and counts.exclude_regions:
+            if regions and counts is not None and counts.exclude_regions:
                 settings.setdefault("data.exclude_regions", counts.exclude_regions)
+            if regions and not cached:
+                settings["backbone.features"] = run.backbone.features
+            source = (
+                ["data.embeddings_dir=/config-validation"]
+                if cached
+                else ["data.fasta=/config-validation"] if regions else []
+            )
             overrides = [
                 "data.path=/config-validation",
                 "output_dir=/config-validation",
-                *(["data.embeddings_dir=/config-validation"] if cached else []),
+                *source,
                 *([f"data.target_group={run.target_group}"] if run.target_group else []),
                 *hydra_override_items(settings),
             ]
-            compose = resolved_region_config if cached else resolved_training_config
+            compose = resolved_region_config if regions else resolved_training_config
             try:
                 compose(phase.preset, overrides)
             except Exception as exc:

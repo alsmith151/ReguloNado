@@ -1343,3 +1343,57 @@ targets:
     assert "build_dataset" in output
     for rule in ("region_set", "embed_chrom", "region_count_track_names"):
         assert rule not in output
+
+
+def test_encoder_cache_and_live_trunk_region_runs(tmp_path):
+    """Encoder features tile short windows; a live region run needs no cache, and gets its
+    backbone, genome and fine-tune settings on the train command line."""
+    pytest.importorskip("hydra")
+    encoder = "type: alphagenome, pretrained: all_folds, features: encoder"
+    live = f"""
+    - name: run_live
+      seed: 0
+      recipe: curriculum
+      backbone: {{{encoder}}}
+      trunk: live
+      target: region_counts
+      target_group: HL-60
+      init_from: run_encoder/specific
+      settings:
+        data: {{input_length: 4096, shift_max: 16}}
+        model: {{pooling: per_group}}
+        trunk: {{finetune: adapters, adapters: [locon], gradient_checkpointing: true}}
+"""
+    config = _count_only_config(
+        tmp_path, runs=[_cached_run("run_encoder", backbone=encoder), live]
+    )
+    results = tmp_path / "results"
+    output, code = _snakemake_dry_run(tmp_path, config)
+    assert code == 0, output
+
+    cache = results / "embeddings" / "alphagenome-all_folds-encoder-ctx4096-stride2048"
+    assert str(cache / "chr1.arrow") in output
+    assert "--features encoder --context 4096 --stride 2048" in output
+    assert re.search(r"embed_done\s+1", output)  # only the cached run has a cache
+
+    assert re.search(r"train_phase\s+6", output)
+    assert "train_schedule_preflight" not in output
+    genome = tmp_path / "genome.fa"
+    assert f"--trunk live --target region_counts --fasta {genome} --target-group HL-60" in output
+    assert "'backbone=\"alphagenome\"'" in output
+    assert '++backbone.features="encoder"' in output
+    assert '++trunk.adapters=["locon"]' in output
+    assert '++model.pooling="per_group"' in output
+
+    # The live run's first phase warm-starts from the cached run's specific phase.
+    live_pretrain = re.search(
+        r"rule train_phase:\n\s+input: (.*)\n\s+output: .*run_live/pretrain/trainer_state.json",
+        output,
+    )
+    assert live_pretrain, output
+    assert str(results / "train" / "run_encoder" / "specific" / "trainer_state.json") in (
+        live_pretrain.group(1)
+    )
+
+    result = _pipeline_dry_run(tmp_path, config)
+    assert result.returncode == 0, result.stderr

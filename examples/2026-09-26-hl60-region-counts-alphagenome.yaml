@@ -10,35 +10,30 @@
 # region set, and a small region-level NB count head trains on the cached embeddings.
 # Runs on the same backbone/checkpoint share one cache. See docs/region-counts.md.
 #
-# Only targets.region_counts is configured, so tracks are discovered from BAMs and no
-# bigWig, scaling or profile-dataset rule runs. To also fine-tune a profile model on
-# the same tracks, give the sheet a bigwig column, add targets.profile and a
-# `trunk: live` run: tracks are then discovered from bigWigs, each still carrying its
-# BAM, and both kinds of run train on exactly the same tracks.
+# The runs compare where specificity comes from: AlphaGenome's full trunk (1 Mb of
+# context) and Flashzoi, against AlphaGenome's CNN encoder alone (local sequence, ~1.5 kb
+# receptive field) -- then the encoder fine-tuned (LoCon) on each region's own 4 kb
+# window, starting from the cached encoder run's head. Set `model: {pooling: per_group}`
+# in a run's settings to let each cell type attend over the region's bins on its own.
 #
-# The track sheet is UEF's informative tracks (116 tracks / 52 cell types). Each
-# row's sample_id is its run accession, which `bam_dir` resolves to a BAM anywhere
-# below it whose name contains that accession. From the UEF repo root:
+# Only targets.region_counts is configured, so tracks are discovered from the BAMs in
+# bam_dir and no bigWig, scaling or profile-dataset rule runs. Each track is named by its
+# file stem, the same rule bigWig discovery uses, so one track_annotations file (keyed on
+# track_name) serves both. To also fine-tune a profile model on the same tracks, add
+# inputs.bigwig_dir, targets.profile and a `trunk: live` run: tracks are then discovered
+# from bigWigs, each paired with the BAM of the same stem under bam_dir, and both kinds
+# of run train on exactly the same tracks.
 #
-#   from unique_enhancer_finding.grammar import informative_tracks
-#   manifest = pl.read_parquet("data/interim/00-collate/bigwig-manifest.parquet")
-#   informative_tracks(manifest, pl.read_parquet(
-#       "data/interim/01-track-qc/scale-factors-background_to_anchor.parquet"))
-#   .join(manifest.select("track_id", "run"), on="track_id")
-#   .select(
-#       pl.col("track_id").alias("track_name"),
-#       pl.col("run").alias("sample_id"),
-#       pl.col("cell_type").alias("group"),
-#       # sheet labels are [A-Za-z0-9_-]; see counts.bam.ASSAY_CLASS_ALIASES
-#       pl.col("assay_class").replace({"CUT&RUN": "cutandrun"}).alias("assay"),
-#   )
-#   .write_csv("data/interim/05-model-dataset/count-tracks.csv")
+# track_annotations is also the list of tracks to keep: a discovered BAM with no row in it
+# is dropped (status 'unannotated'). Each row gives a 'group' (cell type; target_group
+# names one) and an 'assay_class' (ATAC / ChIP / CUT&RUN) or 'assay' alias
+# (counts.bam.ASSAY_CLASS_ALIASES), which picks each track's count spec.
 results_dir: results/2026-09-26-hl60-region-counts
 
 inputs:
   fasta: /path/to/hg38.fa
-  track_sheet: data/interim/05-model-dataset/count-tracks.csv
-  bam_dir: /path/to/atlas-bams
+  bam_dir: /path/to/atlas/seqnado_output/atac/aligned
+  track_annotations: /path/to/track_annotations.parquet
 
 targets:
   region_counts:
@@ -87,6 +82,30 @@ train:
             metric_for_best_model: eval_contrast_pearson_top_decile_HL-60
             early_stopping_patience: 8
 
+    # The target stage again, with the trunk fine-tuned live: same data, loss and metric
+    # as curriculum's target stage, plus the window, adapter and learning-rate settings.
+    encoder_finetune:
+      - name: target
+        preset: target
+        settings:
+          data:
+            specific_only: true
+            gini_std_threshold: 0.5
+            input_length: 4096
+            shift_max: 32
+          loss:
+            contrast_weight: 4.0
+            contrast_task_weight: 20.0
+          trunk:
+            finetune: adapters
+            adapters: [locon]
+            locon_rank: 8
+          trainer:
+            metric_for_best_model: eval_contrast_pearson_top_decile_HL-60
+            early_stopping_patience: 8
+            batch_size: 64
+            backbone_learning_rate: 1.0e-4
+
   # Swapping a model is an edit to one run: its backbone, trunk, target or recipe.
   runs:
     - name: hl60_alphagenome
@@ -117,3 +136,35 @@ train:
       target_group: HL-60
       cache:
         pool_to: 128
+
+    # AlphaGenome's CNN encoder only: 1536-d 128 bp features from 4 kb windows keeping
+    # the central 2 kb (>= 1 kb of context either side), so short and cheap to cache. The
+    # reverse-complement pass is cached too, for train-time RC augmentation.
+    - name: hl60_alphagenome_encoder
+      seed: 0
+      recipe: curriculum
+      backbone:
+        type: alphagenome
+        pretrained: all_folds
+        features: encoder
+      trunk: cached
+      target: region_counts
+      target_group: HL-60
+      cache:
+        rc: true
+        batch_size: 64
+
+    # The encoder, now live and fine-tuned: LoCon adapters on its conv layers, trained on
+    # each region's own 4 kb window with RC and +/-32 bp shift augmentation. Warm-starts
+    # from the cached encoder run's specific stage, so only the target stage runs here.
+    - name: hl60_alphagenome_encoder_finetune
+      seed: 0
+      recipe: encoder_finetune
+      init_from: hl60_alphagenome_encoder/specific
+      backbone:
+        type: alphagenome
+        pretrained: all_folds
+        features: encoder
+      trunk: live
+      target: region_counts
+      target_group: HL-60

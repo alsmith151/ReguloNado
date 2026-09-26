@@ -1,11 +1,14 @@
-# Region counts on cached trunk embeddings
+# Region counts on pretrained trunks
 
-A run with `trunk: cached` and `target: region_counts` trains a small region-level count
-head on a **frozen** pretrained trunk (AlphaGenome, Borzoi, Flashzoi, Enformer, …). The
-trunk runs once, at long context, over every region. The embeddings covering each
-region's scored 1 kb target are cached as a Hugging Face `datasets` Arrow file, and the
-head trains on the cache in minutes. It is a run like any other (see [training.md](training.md)); only its trunk,
-target and recipe differ from a fine-tuned profile model.
+A run with `target: region_counts` trains a small region-level count head on a
+pretrained trunk (AlphaGenome, Borzoi, Flashzoi, Enformer, …). With `trunk: cached` the
+trunk is **frozen** and runs once, at long context, over every region. The embeddings
+covering each region's scored 1 kb target are cached as a Hugging Face `datasets` Arrow
+file, and the head trains on the cache in minutes. With `trunk: live` the trunk runs
+every step on each region's own window, so it can be fine-tuned (see
+[Live trunk](#4-live-trunk-fine-tuning-on-short-inputs)). It is a run like any other
+(see [training.md](training.md)); only its trunk, target and recipe differ from a
+fine-tuned profile model.
 
 ```
 targets.region_counts.regions ── counts regions ──► region_set.parquet ─┬─ counts bam/gather ──► region_counts/dataset
@@ -221,3 +224,51 @@ phase before scheduling anything.
 
 The metric names match UEF (`eval_contrast_pearson_mean`, `eval_contrast_pearson_<group>`,
 `eval_contrast_pearson_top_decile_<target>`), so runs can be compared directly with UEF v2.
+
+## 4. Live trunk: fine-tuning on short inputs
+
+`trunk: live` with `target: region_counts` runs the trunk every step on each region's own
+window (`training/regions/live.py`). The window's bins are exactly the cache's: the `K`
+bins start at the bin holding `target_start`, placed centrally in the trunk's output. A
+live run can therefore warm-start from a cached run's head (`init_from`), and a cached
+head's parameter names match the live model's.
+
+```yaml
+- name: hl60_alphagenome_encoder_finetune
+  recipe: encoder_finetune           # e.g. just the target stage
+  init_from: hl60_alphagenome_encoder/specific
+  backbone: {type: alphagenome, pretrained: all_folds, features: encoder}
+  trunk: live
+  target: region_counts
+  target_group: HL-60
+```
+
+Phase settings for a live trunk:
+
+| setting | meaning |
+|---|---|
+| `data.input_length` | bp of sequence per region (a multiple of the bin size) |
+| `data.shift_max` | train-time random window shift, in bp |
+| `data.enable_rc_aug` | train-time reverse-complement of half the windows |
+| `data.pool_to` | average bins to this width, as `embed --pool-to` |
+| `trunk.finetune` | `frozen`, `full`, `last_blocks` (`trunk.unfreeze_last`) or `adapters` |
+| `trunk.adapters` | AlphaGenome: `lora`, `ia3`, `houlsby` (transformer tower) and `locon` (convolutions) |
+| `trunk.gradient_checkpointing` | recompute blocks in backward, for long inputs |
+| `trainer.backbone_learning_rate` | learning rate for trunk parameters |
+
+- `lora`, `ia3` and `houlsby` come from `alphagenome-pytorch`'s fine-tuning extension
+  (`prepare_for_transfer`), with its `lora_*`/`ia3_*`/`houlsby_*` options. They adapt the
+  transformer tower, so they need `features: trunk`.
+- `locon` is ReguloNado's `SameLocon`: the port's `Locon` does not reproduce
+  `StandardizedConv1d`'s manual "same" padding and changes the output length on
+  AlphaGenome's convolutions. It is the adapter for `features: encoder`.
+- The trunk always runs in eval mode, so normalisation uses stored statistics and its
+  features match the cache's.
+- Checkpoints save only what trains: frozen trunk weights are rebuilt from the backbone
+  checkpoint, not re-saved at every checkpoint.
+
+**Memory on a 48 GB card (L40/L40S).** The encoder on a few kb is small, and full
+fine-tuning fits comfortably. The full trunk is the constraint. A published benchmark of
+this PyTorch port puts 1 Mb inference at about 41 GB peak and full fine-tuning at up to
+262 kb on 48 GB cards, without gradient checkpointing. Use shorter inputs, adapters and
+`trunk.gradient_checkpointing: true` for the full trunk.

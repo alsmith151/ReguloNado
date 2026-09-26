@@ -18,14 +18,16 @@ from regulonado.training.overrides import merge_training_settings
 
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-# Phase presets per trunk mode: python/configs/experiment/*.yaml compose over train.yaml
-# (the trunk runs live, every step); python/configs/region_experiment/*.yaml over
-# train_regions.yaml (a head trained on cached trunk embeddings).
-LIVE_PRESETS = ("head_only", "unfreeze_output", "deep_finetune", "peak_finetune", "lora_finetune")
-CACHED_PRESETS = ("pretrain", "specific", "target")
-PRESETS_BY_TRUNK = {"live": LIVE_PRESETS, "cached": CACHED_PRESETS}
+# Phase presets per target: python/configs/experiment/*.yaml compose over train.yaml
+# (profile models); python/configs/region_experiment/*.yaml over train_regions.yaml
+# (region-count heads, on a cached or a live trunk).
+PROFILE_PRESETS = (
+    "head_only", "unfreeze_output", "deep_finetune", "peak_finetune", "lora_finetune"
+)
+REGION_PRESETS = ("pretrain", "specific", "target")
+PRESETS_BY_TARGET = {"profile": PROFILE_PRESETS, "region_counts": REGION_PRESETS}
 # (trunk, target) pairs with a training implementation.
-SUPPORTED_RUN_KINDS = {("live", "profile"), ("cached", "region_counts")}
+SUPPORTED_RUN_KINDS = {("live", "profile"), ("cached", "region_counts"), ("live", "region_counts")}
 # AlphaGenome takes flexible-length input; embed_regions' default tiling per feature layer:
 # the full trunk at 1 Mb keeping the central 512 kb, the CNN encoder (receptive field
 # ~1.5 kb) at 4 kb keeping the central 2 kb.
@@ -246,8 +248,9 @@ class QCConfig(BaseModel):
 
 
 class TrainPhase(BaseModel):
-    """One step of a recipe. ``preset`` must suit the trunk mode of every run using it:
-    :data:`LIVE_PRESETS` for ``trunk: live``, :data:`CACHED_PRESETS` for ``trunk: cached``."""
+    """One step of a recipe. ``preset`` must suit the target of every run using it:
+    :data:`PROFILE_PRESETS` for ``target: profile``, :data:`REGION_PRESETS` for
+    ``target: region_counts``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -327,6 +330,13 @@ class TrainRun(BaseModel):
     cache: TrunkCacheConfig | None = Field(
         default=None, description="Embedding settings; trunk: cached only."
     )
+    init_from: str | None = Field(
+        default=None,
+        description=(
+            "'<run>/<phase>': warm-start this run's first phase from another run's phase, "
+            "e.g. fine-tune a live trunk from a head trained on cached embeddings."
+        ),
+    )
     settings: dict[str, Any] = Field(default_factory=dict)
 
     _check_name = field_validator("name")(staticmethod(_validate_name))
@@ -339,10 +349,10 @@ class TrainRun(BaseModel):
                 f"run {self.name!r}: trunk {self.trunk!r} with target {self.target!r} is not "
                 f"implemented (supported trunk/target: {supported})"
             )
-        if self.target_group is not None and self.trunk != "cached":
+        if self.target_group is not None and self.target != "region_counts":
             raise ValueError(
-                f"run {self.name!r}: target_group applies to trunk: cached runs "
-                "(data.target_group); live runs set their target in settings"
+                f"run {self.name!r}: target_group applies to target: region_counts runs "
+                "(data.target_group); profile runs set their target in settings"
             )
         if self.cache is not None and self.trunk != "cached":
             raise ValueError(f"run {self.name!r}: 'cache' only applies to trunk: cached")
@@ -413,18 +423,41 @@ class TrainConfig(BaseModel):
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:
             raise ValueError(f"train.runs names must be unique; repeated: {', '.join(duplicates)}")
+        by_name = {run.name: run for run in self.runs}
+        for run in self.runs:
+            if run.init_from is None:
+                continue
+            source, _, phase = run.init_from.partition("/")
+            if source not in by_name or source == run.name:
+                raise ValueError(
+                    f"run {run.name!r}: init_from {run.init_from!r} must name another run's phase "
+                    f"as '<run>/<phase>'"
+                )
+            if by_name[source].init_from and by_name[source].init_from.split("/")[0] == run.name:
+                raise ValueError(f"runs {run.name!r} and {source!r} init_from each other")
+            phases = [p.name for p in self.recipes.get(by_name[source].recipe, [])]
+            if phase not in phases:
+                raise ValueError(
+                    f"run {run.name!r}: init_from phase {phase!r} is not a phase of run "
+                    f"{source!r} ({', '.join(phases)})"
+                )
+            if by_name[source].target != run.target:
+                raise ValueError(
+                    f"run {run.name!r}: init_from {run.init_from!r} has target "
+                    f"{by_name[source].target}, not {run.target}"
+                )
         for run in self.runs:
             if run.recipe not in self.recipes:
                 raise ValueError(
                     f"run {run.name!r} names recipe {run.recipe!r}, not one of train.recipes: "
                     f"{', '.join(self.recipes)}"
                 )
-            allowed = PRESETS_BY_TRUNK[run.trunk]
+            allowed = PRESETS_BY_TARGET[run.target]
             wrong = [p.preset for p in self.recipes[run.recipe] if p.preset not in allowed]
             if wrong:
                 raise ValueError(
-                    f"run {run.name!r} (trunk: {run.trunk}) uses recipe {run.recipe!r}, whose "
-                    f"preset(s) {', '.join(wrong)} are not trunk-{run.trunk} presets "
+                    f"run {run.name!r} (target: {run.target}) uses recipe {run.recipe!r}, whose "
+                    f"preset(s) {', '.join(wrong)} are not {run.target} presets "
                     f"({', '.join(allowed)})"
                 )
         for label, settings in [

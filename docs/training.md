@@ -43,17 +43,19 @@ its trunk is used, what it predicts, and the `recipe` (phase chain) it follows:
 
 | field | values | meaning |
 |---|---|---|
-| `backbone` | `{type: borzoi\|enformer\|alphagenome, pretrained: ...}` | the pretrained trunk |
+| `backbone` | `{type: borzoi\|enformer\|alphagenome, pretrained: ...}` | the pretrained trunk; AlphaGenome also takes `features: encoder` (region counts only) |
 | `trunk` | `live` (default) | the trunk runs every step, frozen or fine-tuned per phase preset |
 | | `cached` | the trunk runs once; a head trains on its cached embeddings |
 | `target` | `profile` (default) | binned coverage over `targets.profile` (bigWigs) |
 | | `region_counts` | one count per region over `targets.region_counts` (BAMs) |
 | `recipe` | a `train.recipes` name | the ordered phases, each a preset plus settings |
+| `init_from` | `<run>/<phase>` (optional) | warm-start the first phase from another run's phase |
 
-Implemented pairs are `live`/`profile` and `cached`/`region_counts`. Live recipes
-use the `python/configs/experiment/` presets (`head_only`, `unfreeze_output`,
-`deep_finetune`, `peak_finetune`, `lora_finetune`); cached recipes use
-`python/configs/region_experiment/` (`pretrain`, `specific`, `target`).
+Implemented pairs are `live`/`profile`, `cached`/`region_counts` and
+`live`/`region_counts`. Profile recipes use the `python/configs/experiment/` presets
+(`head_only`, `unfreeze_output`, `deep_finetune`, `peak_finetune`, `lora_finetune`);
+region-count recipes, cached or live, use `python/configs/region_experiment/`
+(`pretrain`, `specific`, `target`).
 
 ```yaml
 targets:
@@ -86,8 +88,8 @@ train:
 
 Use `examples/flashzoi_four_replicates.yaml` for the complete file, including
 dataset construction and normalization, and
-`examples/2026-09-26-hl60-region-counts-alphagenome.yaml` for cached-trunk runs on
-region counts (see [region-counts.md](region-counts.md)).
+`examples/2026-09-26-hl60-region-counts-alphagenome.yaml` for cached- and live-trunk
+runs on region counts (see [region-counts.md](region-counts.md)).
 
 Swapping a model is an edit to one run. Datasets and embedding caches are derived
 from the runs: the profile dataset is built only for `target: profile` runs, the
