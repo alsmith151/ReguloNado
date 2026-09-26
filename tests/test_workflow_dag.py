@@ -28,14 +28,15 @@ def test_dataset_sentinel_is_readme_md(tmp_path):
         f"""
 results_dir: {results}
 inputs:
-  intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-dataset:
-  context_length: 100
-  bin_size: 10
-  n_pred_bins: 4
-  shift_max_bp: 0
+targets:
+  profile:
+    intervals: {intervals}
+    context_length: 100
+    bin_size: 10
+    n_pred_bins: 4
+    shift_max_bp: 0
 scaling:
   method: tmm
 """
@@ -115,14 +116,15 @@ def test_parameter_sweep_stage_does_not_require_train_config(tmp_path):
         f"""
 results_dir: {results}
 inputs:
-  intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-dataset:
-  context_length: 100
-  bin_size: 10
-  n_pred_bins: 4
-  shift_max_bp: 0
+targets:
+  profile:
+    intervals: {intervals}
+    context_length: 100
+    bin_size: 10
+    n_pred_bins: 4
+    shift_max_bp: 0
 scaling:
   method: tmm
 parameter_sweep:
@@ -194,7 +196,9 @@ parameter_sweep:
         ("  tracks: [H3K27ac, CTCF]\n", "--tracks H3K27ac,CTCF"),
     ],
 )
-def test_prediction_stage_writes_all_tracks_or_one_selected_track(tmp_path, track_config, expected_flag):
+def test_prediction_stage_writes_all_tracks_or_one_selected_track(
+    tmp_path, track_config, expected_flag
+):
     """The optional prediction stage resolves the final run checkpoint once."""
     snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
     if snakemake is None:
@@ -210,22 +214,24 @@ def test_prediction_stage_writes_all_tracks_or_one_selected_track(tmp_path, trac
         f"""
 results_dir: {results}
 inputs:
-  intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-dataset:
-  context_length: 100
-  bin_size: 10
-  n_pred_bins: 4
-  shift_max_bp: 0
+targets:
+  profile:
+    intervals: {intervals}
+    context_length: 100
+    bin_size: 10
+    n_pred_bins: 4
+    shift_max_bp: 0
 scaling:
   method: tmm
 train:
   nproc_per_node: 1
-  phases:
-    - {{name: finetune, preset: head_only}}
+  recipes:
+    finetune:
+      - {{name: finetune, preset: head_only}}
   runs:
-    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
+    - {{name: fold_0, seed: 10, recipe: finetune, backbone: {{type: borzoi, pretrained: model/a}}}}
 prediction:
   run: fold_0
 {track_config}  whole_genome: true
@@ -277,29 +283,31 @@ def test_two_runs_form_independent_phase_chains(tmp_path):
         f"""
 results_dir: {tmp_path / "results"}
 inputs:
-  intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-dataset:
-  context_length: 100
-  bin_size: 10
-  n_pred_bins: 4
-  shift_max_bp: 0
-  extract_threads: 1
-  write_threads: 1
-  stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
+targets:
+  profile:
+    intervals: {intervals}
+    context_length: 100
+    bin_size: 10
+    n_pred_bins: 4
+    shift_max_bp: 0
+    extract_threads: 1
+    write_threads: 1
+    stage_to_scratch: false
 scaling:
   method: tmm
 train:
   nproc_per_node: 1
-  phases:
-    - {{name: first, preset: head_only}}
-    - {{name: second, preset: unfreeze_output}}
+  recipes:
+    finetune:
+      - {{name: first, preset: head_only}}
+      - {{name: second, preset: unfreeze_output}}
   runs:
-    - {{name: run_a, seed: 10, pretrained_model: model/a}}
-    - {{name: run_b, seed: 20, pretrained_model: model/b}}
+    - {{name: run_a, seed: 10, recipe: finetune, backbone: {{type: borzoi, pretrained: model/a}}}}
+    - {{name: run_b, seed: 20, recipe: finetune, backbone: {{type: borzoi, pretrained: model/b}}}}
 """
     )
 
@@ -408,28 +416,30 @@ def test_selective_activation_design_flags_reach_pipeline_command(tmp_path):
         f"""
 results_dir: {tmp_path / "results"}
 inputs:
-  intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-dataset:
-  context_length: 100
-  bin_size: 10
-  n_pred_bins: 4
-  shift_max_bp: 0
-  extract_threads: 1
-  write_threads: 1
-  stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
+targets:
+  profile:
+    intervals: {intervals}
+    context_length: 100
+    bin_size: 10
+    n_pred_bins: 4
+    shift_max_bp: 0
+    extract_threads: 1
+    write_threads: 1
+    stage_to_scratch: false
 scaling:
   method: tmm
 train:
   nproc_per_node: 1
-  phases:
-    - {{name: head, preset: head_only}}
+  recipes:
+    finetune:
+      - {{name: head, preset: head_only}}
   runs:
-    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
-    - {{name: fold_1, seed: 20, pretrained_model: model/b}}
+    - {{name: fold_0, seed: 10, recipe: finetune, backbone: {{type: borzoi, pretrained: model/a}}}}
+    - {{name: fold_1, seed: 20, recipe: finetune, backbone: {{type: borzoi, pretrained: model/b}}}}
 design:
   candidates: {candidates}
   checkpoint_dirs:
@@ -545,28 +555,30 @@ def test_attribution_stage_chains_into_design(tmp_path):
         f"""
 results_dir: {results}
 inputs:
-  intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-dataset:
-  context_length: 100
-  bin_size: 10
-  n_pred_bins: 4
-  shift_max_bp: 0
-  extract_threads: 1
-  write_threads: 1
-  stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
+targets:
+  profile:
+    intervals: {intervals}
+    context_length: 100
+    bin_size: 10
+    n_pred_bins: 4
+    shift_max_bp: 0
+    extract_threads: 1
+    write_threads: 1
+    stage_to_scratch: false
 scaling:
   method: tmm
 train:
   nproc_per_node: 1
-  phases:
-    - {{name: first, preset: head_only}}
+  recipes:
+    finetune:
+      - {{name: first, preset: head_only}}
   runs:
-    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
-    - {{name: fold_1, seed: 20, pretrained_model: model/b}}
+    - {{name: fold_0, seed: 10, recipe: finetune, backbone: {{type: borzoi, pretrained: model/a}}}}
+    - {{name: fold_1, seed: 20, recipe: finetune, backbone: {{type: borzoi, pretrained: model/b}}}}
 attribution:
   candidates: {candidates}
   shards: 2
@@ -648,28 +660,30 @@ def test_design_from_attribution_resolves_the_same_core_regions_path(tmp_path):
         f"""
 results_dir: {results}
 inputs:
-  intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-dataset:
-  context_length: 100
-  bin_size: 10
-  n_pred_bins: 4
-  shift_max_bp: 0
-  extract_threads: 1
-  write_threads: 1
-  stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
+targets:
+  profile:
+    intervals: {intervals}
+    context_length: 100
+    bin_size: 10
+    n_pred_bins: 4
+    shift_max_bp: 0
+    extract_threads: 1
+    write_threads: 1
+    stage_to_scratch: false
 scaling:
   method: tmm
 train:
   nproc_per_node: 1
-  phases:
-    - {{name: first, preset: head_only}}
+  recipes:
+    finetune:
+      - {{name: first, preset: head_only}}
   runs:
-    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
-    - {{name: fold_1, seed: 20, pretrained_model: model/b}}
+    - {{name: fold_0, seed: 10, recipe: finetune, backbone: {{type: borzoi, pretrained: model/a}}}}
+    - {{name: fold_1, seed: 20, recipe: finetune, backbone: {{type: borzoi, pretrained: model/b}}}}
 attribution:
   candidates: {candidates}
   shards: 1
@@ -729,28 +743,30 @@ def test_design_from_attribution_rejects_an_unknown_target_name(tmp_path):
         f"""
 results_dir: {results}
 inputs:
-  intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-dataset:
-  context_length: 100
-  bin_size: 10
-  n_pred_bins: 4
-  shift_max_bp: 0
-  extract_threads: 1
-  write_threads: 1
-  stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
+targets:
+  profile:
+    intervals: {intervals}
+    context_length: 100
+    bin_size: 10
+    n_pred_bins: 4
+    shift_max_bp: 0
+    extract_threads: 1
+    write_threads: 1
+    stage_to_scratch: false
 scaling:
   method: tmm
 train:
   nproc_per_node: 1
-  phases:
-    - {{name: first, preset: head_only}}
+  recipes:
+    finetune:
+      - {{name: first, preset: head_only}}
   runs:
-    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
-    - {{name: fold_1, seed: 20, pretrained_model: model/b}}
+    - {{name: fold_0, seed: 10, recipe: finetune, backbone: {{type: borzoi, pretrained: model/a}}}}
+    - {{name: fold_1, seed: 20, recipe: finetune, backbone: {{type: borzoi, pretrained: model/b}}}}
 attribution:
   candidates: {candidates}
   shards: 1
@@ -811,29 +827,31 @@ def test_attribution_target_group_and_track_annotations_reach_the_pipeline(tmp_p
         f"""
 results_dir: {results}
 inputs:
-  intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
   track_annotations: {annotations}
-dataset:
-  context_length: 100
-  bin_size: 10
-  n_pred_bins: 4
-  shift_max_bp: 0
-  extract_threads: 1
-  write_threads: 1
-  stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
+targets:
+  profile:
+    intervals: {intervals}
+    context_length: 100
+    bin_size: 10
+    n_pred_bins: 4
+    shift_max_bp: 0
+    extract_threads: 1
+    write_threads: 1
+    stage_to_scratch: false
 scaling:
   method: tmm
 train:
   nproc_per_node: 1
-  phases:
-    - {{name: first, preset: head_only}}
+  recipes:
+    finetune:
+      - {{name: first, preset: head_only}}
   runs:
-    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
-    - {{name: fold_1, seed: 20, pretrained_model: model/b}}
+    - {{name: fold_0, seed: 10, recipe: finetune, backbone: {{type: borzoi, pretrained: model/a}}}}
+    - {{name: fold_1, seed: 20, recipe: finetune, backbone: {{type: borzoi, pretrained: model/b}}}}
 attribution:
   candidates: {candidates}
   shards: 1
@@ -901,27 +919,29 @@ def test_attribution_stage_is_absent_unless_configured(tmp_path):
         f"""
 results_dir: {tmp_path / "results"}
 inputs:
-  intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-dataset:
-  context_length: 100
-  bin_size: 10
-  n_pred_bins: 4
-  shift_max_bp: 0
-  extract_threads: 1
-  write_threads: 1
-  stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
+targets:
+  profile:
+    intervals: {intervals}
+    context_length: 100
+    bin_size: 10
+    n_pred_bins: 4
+    shift_max_bp: 0
+    extract_threads: 1
+    write_threads: 1
+    stage_to_scratch: false
 scaling:
   method: tmm
 train:
   nproc_per_node: 1
-  phases:
-    - {{name: first, preset: head_only}}
+  recipes:
+    finetune:
+      - {{name: first, preset: head_only}}
   runs:
-    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
+    - {{name: fold_0, seed: 10, recipe: finetune, backbone: {{type: borzoi, pretrained: model/a}}}}
 """
     )
     result = subprocess.run(
@@ -975,27 +995,29 @@ def test_design_shard_count_is_stable_across_runs_once_candidates_exist(tmp_path
         f"""
 results_dir: {tmp_path / "results"}
 inputs:
-  intervals: {intervals}
   fasta: {fasta}
   bigwig_dir: {tmp_path / "bigwigs"}
-dataset:
-  context_length: 100
-  bin_size: 10
-  n_pred_bins: 4
-  shift_max_bp: 0
-  extract_threads: 1
-  write_threads: 1
-  stage_to_scratch: false
   drop_missing: true
   dedupe_tracks: content
+targets:
+  profile:
+    intervals: {intervals}
+    context_length: 100
+    bin_size: 10
+    n_pred_bins: 4
+    shift_max_bp: 0
+    extract_threads: 1
+    write_threads: 1
+    stage_to_scratch: false
 scaling:
   method: tmm
 train:
   nproc_per_node: 1
-  phases:
-    - {{name: first, preset: head_only}}
+  recipes:
+    finetune:
+      - {{name: first, preset: head_only}}
   runs:
-    - {{name: fold_0, seed: 10, pretrained_model: model/a}}
+    - {{name: fold_0, seed: 10, recipe: finetune, backbone: {{type: borzoi, pretrained: model/a}}}}
 design:
   candidates: {candidates}
   shards: 2
@@ -1061,90 +1083,10 @@ design:
     assert sorted(p.name for p in shards_dir.glob("*.bed")) == ["0.bed", "1.bed"]
 
 
-def _regions_config_yaml(tmp_path: Path) -> Path:
-    """A small synthetic 'regions:' config: 2 chromosomes, 1 embedding, 3 phases.
-
-    Region-count modelling on cached, frozen backbone embeddings
-    (``workflow/rules/regions.smk``). Mirrors the two-chromosome/one-embedding shape
-    of ``examples/2026-09-26-hl60-region-counts-alphagenome.yaml`` without needing
-    real BAMs/bigwigs/genome content -- a dry run never executes the shell commands
-    it plans, only the config models' own validation and the DAG's structure.
-    """
-    intervals = tmp_path / "intervals.bed"
-    fasta = tmp_path / "genome.fa"
-    regions = tmp_path / "regions.bed"
-    anchor = tmp_path / "anchor.bed"
-    background = tmp_path / "background.bed"
-    intervals.touch()
-    fasta.touch()
-    regions.write_text("chr1\t0\t1000\nchr2\t0\t1000\n")
-    anchor.touch()
-    background.touch()
-
-    config = tmp_path / "regions-config.yaml"
-    config.write_text(
-        f"""
-results_dir: {tmp_path / "results"}
-inputs:
-  intervals: {intervals}
-  fasta: {fasta}
-  bigwig_dir: {tmp_path / "bigwigs"}
-dataset:
-  context_length: 100
-  bin_size: 10
-  n_pred_bins: 4
-  shift_max_bp: 0
-scaling:
-  method: tmm
-regions:
-  inputs:
-    regions: {regions}
-    anchor_regions: {anchor}
-    background_regions: {background}
-  counts:
-    target_width: 200
-    threads: 2
-    val_chroms: [chr2]
-  embeddings:
-    - name: alphagenome
-      backbone: alphagenome
-      pretrained: all_folds
-      context: 1048576
-      stride: 524288
-  train:
-    nproc_per_node: 1
-    common:
-      trainer:
-        report_to: [wandb]
-    phases:
-      - name: pretrain
-        preset: pretrain
-      - name: specific
-        preset: specific
-        settings:
-          data:
-            specific_only: true
-      - name: target
-        preset: target
-    runs:
-      - name: run_a
-        seed: 7
-        embedding: alphagenome
-        target_group: HL-60
-"""
-    )
-    return config
-
-
-def test_regions_stage_plans_counts_embeddings_and_chained_train_phases(tmp_path):
-    """A 'regions:' config plans the full counts -> embed -> train-regions DAG."""
+def _snakemake_dry_run(tmp_path, config, *targets):
     snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
     if snakemake is None:
         pytest.skip("Snakemake is an optional workflow dependency")
-
-    config = _regions_config_yaml(tmp_path)
-    results = tmp_path / "results"
-
     result = subprocess.run(
         [
             snakemake,
@@ -1156,119 +1098,248 @@ def test_regions_stage_plans_counts_embeddings_and_chained_train_phases(tmp_path
             "1",
             "--dry-run",
             "--printshellcmds",
+            *targets,
         ],
         check=False,
         capture_output=True,
         text=True,
         env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
     )
-    output = result.stdout + result.stderr
-    assert result.returncode == 0, output
+    return result.stdout + result.stderr, result.returncode
 
-    # Counting: a checkpoint fans out per-track jobs from track_assemble's real
-    # (not-yet-known) track list, so the per-track rule and its downstream gather
-    # show up as pending/"<TBD>" rather than a resolved job count (see
-    # test_design_shard_count_is_stable_across_runs_once_candidates_exist for the
-    # same pattern with 'design:'s shard_candidates checkpoint).
-    assert "checkpoint region_count_track_names:" in output
-    assert re.search(r"rule region_counts_gather:\n\s+input: .*<TBD>", output)
-    assert "regulonado counts gather" in output
-    assert str(results / "regions" / "dataset" / "regions.parquet") in output
-    assert "will result in alteration of the DAG of jobs" in output
 
-    # Embedding: one job per (embedding, chrom) -- 1 embedding x 2 chromosomes here.
-    assert re.search(r"region_embed_chrom\s+2", output)
-    assert "regulonado embed regions" in output
-    assert "--backbone alphagenome" in output
-    assert "--context 1048576" in output
-    assert "--stride 524288" in output
-    assert str(results / "regions" / "embeddings" / "alphagenome" / "chr1.parquet") in output
-    assert str(results / "regions" / "embeddings" / "alphagenome" / "chr2.parquet") in output
-    assert re.search(r"region_embed_done\s+1", output)
-
-    # Training: 1 run x 3 phases, chained like train_phase's warm starts.
-    assert re.search(r"region_train_phase\s+3", output)
-    assert "regulonado train-regions" in output
-    assert "--embeddings" in output
-    assert str(results / "regions" / "embeddings" / "alphagenome") in output
-    assert "--preset pretrain" in output
-    assert "--preset specific" in output
-    assert "--preset target" in output
-    assert "--target-group HL-60" in output
-    assert "--set seed=7" in output
-    assert "++data.specific_only=true" in output
-    # Phase 2/3 warm-start from the previous phase's resolved checkpoint, using
-    # train-regions' real --init-weights-from-checkpoint flag (not a --set override).
-    assert "Warm-starting regions/run_a/specific from" in output
-    assert "Warm-starting regions/run_a/target from" in output
-    assert "--init-weights-from-checkpoint" in output
-    assert "trainer.init_weights_from_checkpoint" not in output
-    assert str(results / "regions" / "train" / "run_a" / "target" / "trainer_state.json") in output
-
-    # rule all's regions target is the final phase of every configured run.
-    assert re.search(
-        r"rule all:\n\s+input: .*run_a/target/trainer_state\.json",
-        output,
-    )
-
-    cli_result = subprocess.run(
-        [sys.executable, "-m", "regulonado", "pipeline", str(config), "--dry-run"],
+def _pipeline_dry_run(tmp_path, config, stage="train"):
+    return subprocess.run(
+        [sys.executable, "-m", "regulonado", "pipeline", str(config), stage, "--dry-run"],
         check=False,
         capture_output=True,
         text=True,
         cwd=tmp_path,
         env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
     )
-    cli_output = cli_result.stdout + cli_result.stderr
-    assert cli_result.returncode == 0, cli_output
-    assert re.search(r"region_train_phase\s+3", cli_output)
 
 
-def test_regions_stage_is_absent_unless_configured(tmp_path):
-    """No 'regions:' key means the region rules are never defined and rule all is unaffected."""
-    snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
-    if snakemake is None:
-        pytest.skip("Snakemake is an optional workflow dependency")
+def _region_count_files(tmp_path):
+    """A two-chromosome region set plus anchor/background/candidate files and a genome."""
+    import polars as pl
 
-    intervals = tmp_path / "intervals.bed"
-    fasta = tmp_path / "genome.fa"
-    intervals.touch()
-    fasta.touch()
+    regions = tmp_path / "regions.parquet"
+    pl.DataFrame(
+        {"chrom": ["chr1", "chr2"], "start": [1000, 1000], "end": [3114, 3114]}
+    ).write_parquet(regions)
+    for name in ("genome.fa", "anchor.bed", "background.bed", "candidates.bed"):
+        (tmp_path / name).touch()
+    return regions
+
+
+CURRICULUM = """
+    curriculum:
+      - {name: pretrain, preset: pretrain}
+      - {name: specific, preset: specific}
+      - {name: target, preset: target}
+"""
+
+
+def _cached_run(name, *, seed=0, backbone="type: alphagenome, pretrained: all_folds", cache=""):
+    return f"""
+    - name: {name}
+      seed: {seed}
+      recipe: curriculum
+      backbone: {{{backbone}}}
+      trunk: cached
+      target: region_counts
+      target_group: HL-60
+{cache}"""
+
+
+def _count_only_config(tmp_path, *, runs=None, recipe_settings=""):
+    """Region counts from BAMs only: no bigWig source, profile target or scaling."""
+    regions = _region_count_files(tmp_path)
+    (tmp_path / "tracks.csv").write_text("track_name,sample_id,group,assay\na,SRR1,hl60,atac\n")
+    train = ""
+    if runs is not None:
+        train = "train:\n  recipes:" + CURRICULUM + recipe_settings + "  runs:" + "".join(runs)
     config = tmp_path / "config.yaml"
     config.write_text(
         f"""
 results_dir: {tmp_path / "results"}
 inputs:
-  intervals: {intervals}
-  fasta: {fasta}
-  bigwig_dir: {tmp_path / "bigwigs"}
-dataset:
-  context_length: 100
-  bin_size: 10
-  n_pred_bins: 4
-  shift_max_bp: 0
+  fasta: {tmp_path / "genome.fa"}
+  track_sheet: {tmp_path / "tracks.csv"}
+  bam_dir: {tmp_path / "bams"}
+targets:
+  region_counts:
+    regions: {regions}
+    anchor_regions: {tmp_path / "anchor.bed"}
+    background_regions: {tmp_path / "background.bed"}
+    exclude_regions: {tmp_path / "candidates.bed"}
+{train}"""
+    )
+    return config
+
+
+def test_cached_run_plans_counts_embeddings_and_chained_phases(tmp_path):
+    """A trunk: cached run pulls in BAM tracks, region counts, its cache and its recipe."""
+    pytest.importorskip("hydra")
+    config = _count_only_config(tmp_path, runs=[_cached_run("run_a", seed=7)])
+    results = tmp_path / "results"
+    output, code = _snakemake_dry_run(tmp_path, config)
+    assert code == 0, output
+
+    # Tracks come from BAMs; no bigWig stage is defined at all.
+    assert "--format bam" in output
+    for bigwig_rule in ("track_interval_means", "scale_factors", "track_qc", "build_dataset"):
+        assert not re.search(rf"(?<![a-z_]){bigwig_rule}\b", output)
+
+    # Counting fans out per track from a checkpoint, so its gather is still <TBD>.
+    assert "checkpoint region_count_track_names:" in output
+    assert re.search(r"rule region_counts_gather:\n\s+input: .*<TBD>", output)
+    assert str(results / "region_counts" / "dataset" / "counts.parquet") in output
+
+    # Embedding: one job per chromosome, reading only the region set.
+    cache = results / "embeddings" / "alphagenome-all_folds-ctx1048576-stride524288"
+    assert re.search(r"embed_chrom\s+2", output)
+    assert re.search(r"embed_done\s+1", output)
+    assert str(cache / "chr1.parquet") in output
+    embed_inputs = re.findall(r"rule embed_chrom:\n\s+input: (.*)", output)
+    assert embed_inputs and all("region_set.parquet" in line for line in embed_inputs)
+    assert "--backbone alphagenome --pretrained all_folds" in output
+
+    # Training: the recipe's three phases, chained by warm starts, through one CLI.
+    assert re.search(r"train_phase\s+3", output)
+    assert "train_schedule_preflight" not in output
+    assert f"--trunk cached --embeddings {cache} --target-group HL-60" in output
+    for preset in ("pretrain", "specific", "target"):
+        assert f"--preset {preset}" in output
+    assert "--set seed=7" in output
+    assert f'++data.exclude_regions="{tmp_path / "candidates.bed"}"' in output
+    assert "Warm-starting run_a/specific from" in output
+    assert "Warm-starting run_a/target from" in output
+    assert re.search(r"rule all:\n\s+input: .*run_a/target/trainer_state\.json", output)
+
+    cli = _pipeline_dry_run(tmp_path, config)
+    assert cli.returncode == 0, cli.stdout + cli.stderr
+    assert re.search(r"train_phase\s+3", cli.stdout + cli.stderr)
+
+
+def test_runs_on_one_trunk_share_an_embedding_cache(tmp_path):
+    runs = [
+        _cached_run("seed_0", seed=0),
+        _cached_run("seed_1", seed=1),
+        _cached_run(
+            "flashzoi",
+            backbone="type: borzoi, pretrained: johahi/flashzoi-replicate-0",
+            cache="      cache: {pool_to: 128}\n",
+        ),
+    ]
+    output, code = _snakemake_dry_run(tmp_path, _count_only_config(tmp_path, runs=runs))
+    assert code == 0, output
+    assert re.search(r"embed_done\s+2", output)
+    assert re.search(r"embed_chrom\s+4", output)
+    assert "borzoi-johahi_flashzoi-replicate-0-pool128" in output
+
+
+def test_region_counts_without_runs_builds_the_dataset(tmp_path):
+    output, code = _snakemake_dry_run(tmp_path, _count_only_config(tmp_path))
+    assert code == 0, output
+    assert "region_counts_gather" in output
+    assert "embed_chrom" not in output
+    assert "train_phase" not in output
+
+
+def test_training_typos_fail_before_scheduling(tmp_path):
+    pytest.importorskip("hydra")
+    typo = """      - name: extra
+        preset: target
+        settings:
+          data:
+            exclude_region: typo.bed
+"""
+    config = _count_only_config(tmp_path, runs=[_cached_run("run_a")], recipe_settings=typo)
+    result = _pipeline_dry_run(tmp_path, config)
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "data.exclude_region" in output
+    assert "Building DAG" not in output
+
+
+def test_live_and_cached_runs_share_one_track_table(tmp_path):
+    """A profile target discovers bigWig tracks carrying their BAMs; region counts count
+    those same tracks, with anchors shared from scaling."""
+    pytest.importorskip("hydra")
+    regions = _region_count_files(tmp_path)
+    (tmp_path / "intervals.bed").touch()
+    (tmp_path / "tracks.csv").write_text(
+        "track_name,bigwig,bam,group,assay\na,a.bw,a.bam,hl60,atac\n"
+    )
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"""
+results_dir: {tmp_path / "results"}
+inputs:
+  fasta: {tmp_path / "genome.fa"}
+  track_sheet: {tmp_path / "tracks.csv"}
+targets:
+  profile:
+    intervals: {tmp_path / "intervals.bed"}
+    context_length: 100
+    bin_size: 10
+    n_pred_bins: 4
+    shift_max_bp: 0
+  region_counts:
+    regions: {regions}
 scaling:
-  method: tmm
+  method: anchor
+  anchor_regions: {tmp_path / "anchor.bed"}
+  background_regions: {tmp_path / "background.bed"}
+train:
+  common:
+    data:
+      apply_squash: false
+  recipes:
+    finetune:
+      - {{name: head, preset: head_only}}
+{CURRICULUM}
+  runs:
+    - name: profile_run
+      seed: 0
+      recipe: finetune
+      backbone: {{type: borzoi, pretrained: model/a}}
+{_cached_run("counts_run")}"""
+    )
+    output, code = _snakemake_dry_run(tmp_path, config)
+    assert code == 0, output
+    assert "--format bigwig" in output
+    assert re.search(
+        r"checkpoint region_count_track_names:\n\s+input: \S+/tracks/tracks\.parquet", output
+    )# Only the live run gets a CPU schedule preflight; both train through one rule.
+    assert re.search(r"train_schedule_preflight\s+1", output)
+    assert re.search(r"train_phase\s+4", output)
+    assert "--metadata" in output and "--trunk cached" in output
+    assert 'backbone="borzoi"' in output
+
+
+def test_region_count_rules_are_absent_for_profile_only_configs(tmp_path):
+    (tmp_path / "intervals.bed").touch()
+    (tmp_path / "genome.fa").touch()
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"""
+results_dir: {tmp_path / "results"}
+inputs:
+  fasta: {tmp_path / "genome.fa"}
+  bigwig_dir: {tmp_path / "bigwigs"}
+targets:
+  profile:
+    intervals: {tmp_path / "intervals.bed"}
+    context_length: 100
+    bin_size: 10
+    n_pred_bins: 4
+    shift_max_bp: 0
 """
     )
-    result = subprocess.run(
-        [
-            snakemake,
-            "--snakefile",
-            str(WORKFLOW),
-            "--configfile",
-            str(config),
-            "--cores",
-            "1",
-            "--dry-run",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
-    )
-    assert result.returncode == 0, result.stderr
-    assert "region_embed_chrom" not in result.stdout
-    assert "region_train_phase" not in result.stdout
-    assert "region_count_track_names" not in result.stdout
-    assert "regulonado train-regions" not in result.stdout
+    output, code = _snakemake_dry_run(tmp_path, config)
+    assert code == 0, output
+    assert "build_dataset" in output
+    for rule in ("region_set", "embed_chrom", "region_count_track_names"):
+        assert rule not in output

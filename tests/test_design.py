@@ -677,11 +677,13 @@ def test_design_config_parses_example_workflow_config():
 def test_design_config_unknown_holdout_run_raises():
     import pydantic
     from regulonado.config.models import (
-        DatasetConfig,
+        BackboneConfig,
         DesignConfig,
         DesignTarget,
         InputsConfig,
+        ProfileTargetConfig,
         ScalingConfig,
+        TargetsConfig,
         TrainConfig,
         TrainPhase,
         TrainRun,
@@ -691,12 +693,19 @@ def test_design_config_unknown_holdout_run_raises():
     with pytest.raises(pydantic.ValidationError, match="holdout_run"):
         WorkflowConfig(
             results_dir="results",
-            inputs=InputsConfig(intervals="i.bed", fasta="g.fa", bigwig_dir="bw"),
-            dataset=DatasetConfig(),
+            inputs=InputsConfig(fasta="g.fa", bigwig_dir="bw"),
+            targets=TargetsConfig(profile=ProfileTargetConfig(intervals="i.bed")),
             scaling=ScalingConfig(),
             train=TrainConfig(
-                phases=[TrainPhase(name="head", preset="head_only")],
-                runs=[TrainRun(name="fold_0", seed=0, pretrained_model="model/a")],
+                recipes={"finetune": [TrainPhase(name="head", preset="head_only")]},
+                runs=[
+                    TrainRun(
+                        name="fold_0",
+                        seed=0,
+                        recipe="finetune",
+                        backbone=BackboneConfig(pretrained="model/a"),
+                    )
+                ],
             ),
             design=DesignConfig(
                 candidates="c.bed",

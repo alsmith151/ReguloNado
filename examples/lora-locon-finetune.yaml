@@ -32,10 +32,11 @@
 results_dir: /path/to/regulonado-results
 
 inputs:
-  intervals: /path/to/intervals.bed.gz
   fasta: /path/to/genome.fa
   bigwig_dir: /path/to/bigwigs
   track_annotations: /path/to/track_annotations.parquet
+  drop_missing: true
+  dedupe_tracks: content
 
 qc:
   checks: [anchor]
@@ -49,20 +50,20 @@ scaling:
   heldout_regions: /path/to/common_essential_windows_heldout.bed
   background_sample: 5000
 
-dataset:
-  context_length: 524288
-  bin_size: 32
-  n_pred_bins: 6144
-  shift_max_bp: 64
-  extract_threads: 32
-  write_threads: 4
-  zstd_level: 3
-  rows_per_row_group: 1
-  stage_to_scratch: true
-  drop_missing: true
-  dedupe_tracks: content
-  bin_denominator: bin_width
-  missing_bins: nan
+targets:
+  profile:
+    intervals: /path/to/intervals.bed.gz
+    context_length: 524288
+    bin_size: 32
+    n_pred_bins: 6144
+    shift_max_bp: 64
+    extract_threads: 32
+    write_threads: 4
+    zstd_level: 3
+    rows_per_row_group: 1
+    stage_to_scratch: true
+    bin_denominator: bin_width
+    missing_bins: nan
 
 train:
   nproc_per_node: 1
@@ -138,17 +139,21 @@ train:
       report_to: [wandb]
       wandb_project: regulonado-lora-locon
 
-  phases:
-    - name: lora_locon
-      preset: lora_finetune
-      settings:
-        head: film
-        loss: poisson_multinomial_binwise
+  recipes:
+    finetune:
+      - name: lora_locon
+        preset: lora_finetune
+        settings:
+          head: film
+          loss: poisson_multinomial_binwise
 
   runs:
     - name: fold_3_lora_locon
       seed: 3
-      pretrained_model: johahi/flashzoi-replicate-3
+      recipe: finetune
+      backbone:
+        type: borzoi
+        pretrained: johahi/flashzoi-replicate-3
 
 prediction:
   run: fold_3_lora_locon

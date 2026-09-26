@@ -1,91 +1,119 @@
-# HL-60 region-count modelling on cached, frozen backbone embeddings.
+# HL-60 region counts from BAMs, with heads trained on cached trunk embeddings.
+#
+# Paths are relative to the UEF repo root (2026-08-19-unique-enhancer-finding),
+# which is where to run it from:
+#
+#   regulonado pipeline /path/to/ReguloNado/examples/2026-09-26-hl60-region-counts-alphagenome.yaml train
 #
 # Transfer learning from a pretrained trunk instead of training a small CNN from
-# scratch: the trunk runs frozen, once, over the UEF region set at long context
-# (`embed regions`), and a small region-level NB count head is trained on the
-# cached features (`train-regions`). See docs/region-counts.md and the plan at
-# `2026-08-19-unique-enhancer-finding`'s notes for why (HL-60 replicate ceiling
-# is >0.9; the from-scratch CNNs plateau around contrast Pearson .5).
+# scratch: each `trunk: cached` run's trunk runs once, at long context, over the UEF
+# region set, and a small region-level NB count head trains on the cached embeddings.
+# Runs on the same backbone/checkpoint share one cache. See docs/region-counts.md.
 #
-# `inputs.bigwig_dir`/`track_sheet` are placeholders -- point them at the HL-60/
-# AML-BM atlas bigwigs (or a track sheet) before running. `inputs.intervals` is
-# unused by the regions stage itself (InputsConfig requires it for the
-# unconditionally-defined `track_assemble`/`build_dataset` rules) and is set to
-# the cCRE catalogue the region set was built from.
-results_dir: results
+# Only targets.region_counts is configured, so tracks are discovered from BAMs and no
+# bigWig, scaling or profile-dataset rule runs. To also fine-tune a profile model on
+# the same tracks, give the sheet a bigwig column, add targets.profile and a
+# `trunk: live` run: tracks are then discovered from bigWigs, each still carrying its
+# BAM, and both kinds of run train on exactly the same tracks.
+#
+# The track sheet is UEF's informative tracks (116 tracks / 52 cell types). Each
+# row's sample_id is its run accession, which `bam_dir` resolves to a BAM anywhere
+# below it whose name contains that accession. From the UEF repo root:
+#
+#   from unique_enhancer_finding.grammar import informative_tracks
+#   manifest = pl.read_parquet("data/interim/00-collate/bigwig-manifest.parquet")
+#   informative_tracks(manifest, pl.read_parquet(
+#       "data/interim/01-track-qc/scale-factors-background_to_anchor.parquet"))
+#   .join(manifest.select("track_id", "run"), on="track_id")
+#   .select(
+#       pl.col("track_id").alias("track_name"),
+#       pl.col("run").alias("sample_id"),
+#       pl.col("cell_type").alias("group"),
+#       # sheet labels are [A-Za-z0-9_-]; see counts.bam.ASSAY_CLASS_ALIASES
+#       pl.col("assay_class").replace({"CUT&RUN": "cutandrun"}).alias("assay"),
+#   )
+#   .write_csv("data/interim/05-model-dataset/count-tracks.csv")
+results_dir: results/2026-09-26-hl60-region-counts
 
 inputs:
-  intervals: /Users/asmith/Documents/2026-oxford-notice-period/2026-08-19-unique-enhancer-finding/resources/GRCh38-cCREs.bed
-  fasta: /Users/asmith/Documents/reference/hg38.fa
-  bigwig_dir: /path/to/hl60-atlas-bigwigs
+  fasta: /path/to/hg38.fa
+  track_sheet: data/interim/05-model-dataset/count-tracks.csv
+  bam_dir: /path/to/atlas-bams
 
-# Unused by the regions stage (build_dataset/train are never targeted here since
-# top-level 'train:' is absent), but InputsConfig/DatasetConfig still validate
-# these sections, so they carry the repo's usual defaults for context/parity.
-dataset:
-  context_length: 524288
-  bin_size: 32
-  n_pred_bins: 6144
-  shift_max_bp: 64
-
-scaling:
-  method: tmm
-
-regions:
-  inputs:
+targets:
+  region_counts:
     # Already carries a 'split' column (979,917 train / 109,415 val / 73,122 test
-    # over 23 chromosomes), so regions.counts.val_chroms/test_chroms are unused.
-    regions: /Users/asmith/Documents/2026-oxford-notice-period/2026-08-19-unique-enhancer-finding/data/interim/05-model-dataset/regions-ccre-signal-min1-full/regions.parquet
-    anchor_regions: /Users/asmith/Documents/2026-oxford-notice-period/2026-08-19-unique-enhancer-finding/resources/common_essential_windows.bed
-    background_regions: /Users/asmith/Documents/2026-oxford-notice-period/2026-08-19-unique-enhancer-finding/data/interim/01-track-qc/background-windows.parquet
-
-  counts:
+    # over 23 chromosomes) and UEF's own target windows, so count targets line up
+    # row-for-row with UEF's signal targets.
+    regions: data/interim/05-model-dataset/regions-ccre-signal-min1-full/regions.parquet
     target_width: 1000
     threads: 4
+    # Same anchor/null windows as UEF's count size factors (bam_counts.load_count_inputs).
+    anchor_regions: resources/common_essential_windows.bed
+    background_regions: data/interim/01-track-qc/null-windows.parquet
+    # All 514 candidate peaks leave training at every phase (UEF --exclude_bed).
+    exclude_regions: data/interim/04-examined-outputs/all-kmeans-peak-groups.parquet
 
-  embeddings:
-    # Frozen AlphaGenome trunk, flexible-length input: 1 Mb context, keeping the
-    # central 512 kb per window (>= 256 kb of context on each side of every kept bin).
-    - name: alphagenome
-      backbone: alphagenome
-      pretrained: all_folds
-      context: 1048576
-      stride: 524288
-      batch_size: 1
+train:
+  nproc_per_node: 1
+  common:
+    trainer:
+      num_workers: 8
+      report_to: [wandb]
 
-    # Optional second baseline through the same cache/head path -- Flashzoi's fixed
-    # 524,288 bp input tiles by its own output span, so context/stride don't apply.
-    - name: flashzoi
-      backbone: borzoi
-      pretrained: johahi/flashzoi-replicate-0
-      pool_to: 128
-
-  train:
-    nproc_per_node: 1
-    common:
-      trainer:
-        num_workers: 8
-        report_to: [wandb]
-
-    # pretrain -> specific -> target: the same three-stage curriculum as UEF v2
-    # (python/configs/regions_experiment/{pretrain,specific,target}.yaml already set
-    # each stage's data.specific_only/contrast_weighting; no per-phase overrides needed).
-    phases:
+  recipes:
+    # pretrain -> specific -> target, the UEF v2 curriculum. The presets
+    # (python/configs/cached_experiment/) set each stage's filtering/weighting; the
+    # settings carry over UEF's per-stage selection metric and stage-3 contrast
+    # emphasis (configs/train-stage{2,3}-*.args).
+    curriculum:
       - name: pretrain
         preset: pretrain
       - name: specific
         preset: specific
+        settings:
+          trainer:
+            metric_for_best_model: eval_contrast_pearson_HL-60
       - name: target
         preset: target
+        settings:
+          data:
+            specific_only: true
+            gini_std_threshold: 0.5
+          loss:
+            contrast_weight: 4.0
+            contrast_task_weight: 20.0
+          trainer:
+            metric_for_best_model: eval_contrast_pearson_top_decile_HL-60
+            early_stopping_patience: 8
 
-    # target_group reaches every phase as --target-group HL-60 (data.target_group):
-    # stage 2 filters to HL-60-specific regions, stage 3 weights by |HL-60 contrast|.
-    runs:
-      - name: hl60_alphagenome
-        seed: 0
-        embedding: alphagenome
-        target_group: HL-60
-      - name: hl60_flashzoi
-        seed: 0
-        embedding: flashzoi
-        target_group: HL-60
+  # Swapping a model is an edit to one run: its backbone, trunk, target or recipe.
+  runs:
+    - name: hl60_alphagenome
+      seed: 0
+      recipe: curriculum
+      backbone:
+        type: alphagenome
+        pretrained: all_folds
+      trunk: cached
+      target: region_counts
+      target_group: HL-60
+      # 1 Mb context, keeping the central 512 kb per window (>= 256 kb of context on
+      # each side of every kept bin).
+      cache:
+        context: 1048576
+        stride: 524288
+
+    # Flashzoi baseline through the same path; its fixed 524,288 bp input tiles by
+    # its own output span, so context/stride don't apply.
+    - name: hl60_flashzoi
+      seed: 0
+      recipe: curriculum
+      backbone:
+        type: borzoi
+        pretrained: johahi/flashzoi-replicate-0
+      trunk: cached
+      target: region_counts
+      target_group: HL-60
+      cache:
+        pool_to: 128

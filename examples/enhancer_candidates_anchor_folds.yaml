@@ -9,22 +9,23 @@
 results_dir: /path/to/regulonado_models
 
 inputs:
-  intervals: /path/to/intervals.bed.gz
   fasta: /path/to/genome.fa
   bigwig_dir: /path/to/bigwigs
-
-dataset:
-  context_length: 524288
-  bin_size: 32
-  n_pred_bins: 6144
-  shift_max_bp: 64
-  extract_threads: 32
-  write_threads: 4
-  zstd_level: 3
-  rows_per_row_group: 1
-  stage_to_scratch: true
   drop_missing: true
   dedupe_tracks: content
+
+targets:
+  profile:
+    intervals: /path/to/intervals.bed.gz
+    context_length: 524288
+    bin_size: 32
+    n_pred_bins: 6144
+    shift_max_bp: 64
+    extract_threads: 32
+    write_threads: 4
+    zstd_level: 3
+    rows_per_row_group: 1
+    stage_to_scratch: true
 
 
 scaling:
@@ -38,30 +39,44 @@ scaling:
 train:
   nproc_per_node: 2
   common:
-    data.apply_squash: false
+    data:
+      apply_squash: false
     trainer:
       num_workers: 8
       report_to: [wandb]
 
-  phases:
-    - name: head_only
-      preset: head_only
-    - name: unfreeze_output
-      preset: unfreeze_output
+  recipes:
+    finetune:
+      - name: head_only
+        preset: head_only
+      - name: unfreeze_output
+        preset: unfreeze_output
 
   runs:
     - name: fold_0
       seed: 0
-      pretrained_model: johahi/flashzoi-replicate-0
+      recipe: finetune
+      backbone:
+        type: borzoi
+        pretrained: johahi/flashzoi-replicate-0
     - name: fold_1
       seed: 1
-      pretrained_model: johahi/flashzoi-replicate-1
+      recipe: finetune
+      backbone:
+        type: borzoi
+        pretrained: johahi/flashzoi-replicate-1
     - name: fold_2
       seed: 2
-      pretrained_model: johahi/flashzoi-replicate-2
+      recipe: finetune
+      backbone:
+        type: borzoi
+        pretrained: johahi/flashzoi-replicate-2
     - name: fold_3
       seed: 3
-      pretrained_model: johahi/flashzoi-replicate-3
+      recipe: finetune
+      backbone:
+        type: borzoi
+        pretrained: johahi/flashzoi-replicate-3
 
 attribution:
   # Pre-select the signal-driving core of each candidate before design.

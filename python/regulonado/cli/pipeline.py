@@ -124,60 +124,60 @@ def _key_value_config(values: list[str]) -> dict[str, str]:
 
 
 def _validate_training_matrix(configfile: Path) -> None:
-    """Compose every configured job so bad settings fail before scheduling."""
+    """Compose every configured run x recipe phase, as the workflow will, before scheduling.
+
+    Live-trunk phases compose over ``train.yaml``, cached-trunk phases over
+    ``train_cached.yaml``; either way a misspelt or mistyped setting fails here rather
+    than on a GPU node.
+    """
     import yaml
     from regulonado.config.models import RegulonadoConfig
     from regulonado.training.overrides import hydra_override_items, merge_training_settings
 
     raw = yaml.safe_load(configfile.read_text()) or {}
     try:
-        RegulonadoConfig.model_validate(raw)
+        config = RegulonadoConfig.model_validate(raw)
     except Exception as exc:
         raise typer.BadParameter(
             f"Invalid workflow configuration: {exc}", param_hint="CONFIGFILE"
         ) from exc
-    train = raw.get("train")
-    if not isinstance(train, dict):
-        return  # The workflow's JSON Schema reports structural errors.
-    phases = train.get("phases")
-    runs = train.get("runs")
-    if not isinstance(phases, list) or not isinstance(runs, list):
+    if config.train is None:
         return
 
     try:
+        from regulonado.training.cached.runner import resolved_cached_config
         from regulonado.training.compose import resolved_training_config
     except ImportError as exc:
         raise typer.BadParameter(
             "Training configuration requires regulonado[train].", param_hint="CONFIGFILE"
         ) from exc
 
-    for phase in phases:
-        if not isinstance(phase, dict) or "preset" not in phase:
-            continue
-        for run in runs:
-            if not isinstance(run, dict):
-                continue
-            layers = (
-                train.get("common", {}),
-                phase.get("settings", {}),
-                run.get("settings", {}),
-            )
+    counts = config.targets.region_counts
+    for run in config.train.runs:
+        cached = run.trunk == "cached"
+        for phase in config.train.recipes[run.recipe]:
             settings = merge_training_settings(
-                [layer for layer in layers if isinstance(layer, dict)],
-                seed=run.get("seed"),
-                pretrained_model=run.get("pretrained_model"),
+                [config.train.common, phase.settings, run.settings],
+                seed=run.seed,
+                pretrained_model=None if cached else run.backbone.pretrained,
+                backbone_type=None if cached else run.backbone.type,
             )
+            if cached and counts is not None and counts.exclude_regions:
+                settings.setdefault("data.exclude_regions", counts.exclude_regions)
             overrides = [
                 "data.path=/config-validation",
                 "output_dir=/config-validation",
+                *(["data.embeddings_dir=/config-validation"] if cached else []),
+                *([f"data.target_group={run.target_group}"] if run.target_group else []),
                 *hydra_override_items(settings),
             ]
+            compose = resolved_cached_config if cached else resolved_training_config
             try:
-                resolved_training_config(str(phase["preset"]), overrides)
+                compose(phase.preset, overrides)
             except Exception as exc:
-                label = f"{run.get('name', '<unnamed>')}/{phase.get('name', '<unnamed>')}"
                 raise typer.BadParameter(
-                    f"Invalid training settings for {label}: {exc}", param_hint="CONFIGFILE"
+                    f"Invalid training settings for {run.name}/{phase.name}: {exc}",
+                    param_hint="CONFIGFILE",
                 ) from exc
 
 
@@ -185,7 +185,9 @@ def pipeline(
     configfile: Annotated[Path, typer.Argument(help="Workflow YAML config")],
     stage: Annotated[
         Optional[str],
-        typer.Argument(help="Stage to run: train, parameter-sweep, attribution, or design."),
+        typer.Argument(
+            help="Stage to run: train, parameter-sweep, attribution, or design."
+        ),
     ] = None,
     cores: Annotated[int, typer.Option("--cores", "-c", min=1, help="Local execution cores.")] = 1,
     jobs: Annotated[
@@ -329,14 +331,20 @@ def pipeline(
         raw = yaml.safe_load(configfile.read_text()) or {}
         results = Path(raw["results_dir"])
         if stage == "train":
-            train = raw.get("train") or {}
-            phases, runs = train.get("phases") or [], train.get("runs") or []
-            if not phases or not runs:
-                raise typer.BadParameter("Config has no train phases/runs", param_hint="stage")
-            final_phase = phases[-1]["name"]
+            from regulonado.config.models import RegulonadoConfig
+
+            config = RegulonadoConfig.model_validate(raw)
+            if config.train is None:
+                raise typer.BadParameter("Config has no train runs", param_hint="stage")
             selected_targets.update(
-                str(results / "train" / run["name"] / final_phase / "trainer_state.json")
-                for run in runs
+                str(
+                    results
+                    / "train"
+                    / run.name
+                    / config.train.final_phase(run.name)
+                    / "trainer_state.json"
+                )
+                for run in config.train.runs
             )
         elif stage == "parameter-sweep":
             parameter_sweep = raw.get("parameter_sweep") or {}

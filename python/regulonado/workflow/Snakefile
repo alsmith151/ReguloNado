@@ -1,8 +1,9 @@
 """ReguloNado dataset and multi-run training workflow.
 
-Each configured run gets its own ordered phase chain. Runs are independent, so
-Snakemake can schedule them concurrently while still enforcing warm starts
-between phases of the same run.
+Each configured run follows its recipe's ordered phase chain. Runs are independent,
+so Snakemake can schedule them concurrently while still enforcing warm starts between
+phases of the same run. A run's backbone, trunk mode (live or cached embeddings) and
+target (profile or region counts) decide which datasets and caches it pulls in.
 """
 
 from pathlib import Path
@@ -12,8 +13,19 @@ from snakemake.utils import validate
 from regulonado.config.models import RegulonadoConfig
 
 
-RegulonadoConfig.model_validate(config)
+# Validate the config as written, before the schema fills in defaults: several model
+# validators reject options that are set but unused, and a filled-in default looks set.
+_VALIDATED = RegulonadoConfig.model_validate(config)
 validate(config, str(Path(workflow.basedir) / "schemas" / "config.schema.yaml"))
+# The schema only fills defaults inside sections that are present; these may be omitted.
+for _section in ("scaling", "qc", "targets"):
+    config[_section] = getattr(_VALIDATED, _section).model_dump(mode="json")
+
+# One track table serves every run: bigWigs when a profile target is configured (rows
+# also carry their BAM for region-count runs), otherwise BAMs.
+TRACK_FORMAT = _VALIDATED.track_format()
+PROFILE = config["targets"]["profile"]
+REGION_COUNTS = config["targets"]["region_counts"]
 
 if config["scaling"]["method"] == "bamnado" and not config["inputs"].get("bam_dir"):
     raise ValueError("inputs.bam_dir is required when scaling.method is 'bamnado'")
@@ -49,49 +61,53 @@ def seqnado_scaling_project():
     return SEQNADO_PROJECTS[0]["path"]
 
 
-def _require_unique_names(items, section):
-    names = [item["name"] for item in items]
-    duplicates = sorted({name for name in names if names.count(name) > 1})
-    if duplicates:
-        raise ValueError(
-            f"{section} names must be unique; repeated: {', '.join(duplicates)}"
-        )
-
-
 RESULTS = Path(config["results_dir"])
 DATASET_DIR = RESULTS / "dataset"
 TRAIN_DIR = RESULTS / "train"
 
 TRAIN = config.get("train")
-PHASES = TRAIN["phases"] if TRAIN else []
 RUNS = TRAIN["runs"] if TRAIN else []
-if TRAIN:
-    _require_unique_names(PHASES, "train.phases")
-    _require_unique_names(RUNS, "train.runs")
-
-PHASE_NAMES = [phase["name"] for phase in PHASES]
+RECIPES = TRAIN["recipes"] if TRAIN else {}
 RUN_NAMES = [run["name"] for run in RUNS]
-PHASE_BY_NAME = {phase["name"]: phase for phase in PHASES}
 RUN_BY_NAME = {run["name"]: run for run in RUNS}
+# Every phase name any recipe uses: the train rules' {phase} wildcard.
+PHASE_NAMES = sorted({phase["name"] for phases in RECIPES.values() for phase in phases})
+CACHED_RUNS = [run for run in RUNS if run.get("trunk", "live") == "cached"]
+# Prediction, attribution and design read profile models; they default to all of them.
+PROFILE_RUN_NAMES = [run["name"] for run in RUNS if run.get("target", "profile") == "profile"]
 
 
-def phase_index(name):
-    return PHASE_NAMES.index(name)
+def run_phases(run):
+    """*run*'s phases, in recipe order."""
+    return RECIPES[RUN_BY_NAME[run]["recipe"]]
+
+
+def run_phase(run, phase):
+    return next(item for item in run_phases(run) if item["name"] == phase)
+
+
+def phase_index(run, phase):
+    return [item["name"] for item in run_phases(run)].index(phase)
+
+
+def final_phase(run):
+    """The last phase of *run*'s recipe: the checkpoint downstream stages read."""
+    return run_phases(run)[-1]["name"]
 
 
 def phase_run_dir(run, phase):
     return TRAIN_DIR / run / phase
 
 
+def previous_phase_dir(run, phase):
+    index = phase_index(run, phase)
+    return None if index == 0 else phase_run_dir(run, run_phases(run)[index - 1]["name"])
+
+
 def previous_phase_state(wildcards):
     """Chain a phase only to the preceding phase of the same run."""
-    index = phase_index(wildcards.phase)
-    if index == 0:
-        return []
-    return str(
-        phase_run_dir(wildcards.run, PHASE_NAMES[index - 1])
-        / "trainer_state.json"
-    )
+    previous = previous_phase_dir(wildcards.run, wildcards.phase)
+    return [] if previous is None else str(previous / "trainer_state.json")
 
 
 def training_dataset_dir():
@@ -102,18 +118,20 @@ DESIGN = config.get("design")
 ATTRIBUTION = config.get("attribution")
 PARAMETER_SWEEP = config.get("parameter_sweep")
 PREDICTION = config.get("prediction")
-REGIONS_CONFIG = config.get("regions")
-_QC_ENABLED = bool((config.get("qc") or {}).get("checks"))
+_QC_ENABLED = bool(config["qc"].get("checks"))
 
 
 rule all:
     input:
         *(
-            expand(
-                str(TRAIN_DIR / "{run}" / PHASE_NAMES[-1] / "trainer_state.json"),
-                run=RUN_NAMES,
-            )
-            if TRAIN
+            str(TRAIN_DIR / run / final_phase(run) / "trainer_state.json")
+            for run in RUN_NAMES
+        ),
+        # With no runs, build what training would consume.
+        *([str(DATASET_DIR / "README.md")] if PROFILE and not TRAIN else []),
+        *(
+            [str(RESULTS / "region_counts" / "dataset" / "counts.parquet")]
+            if REGION_COUNTS and not TRAIN
             else []
         ),
         *([str(RESULTS / "tracks" / "_stages" / "qc_report.parquet")] if _QC_ENABLED else []),
@@ -143,24 +161,22 @@ rule all:
             if ATTRIBUTION
             else []
         ),
-        *(
-            expand(
-                str(RESULTS / "regions" / "train" / "{run}" / REGIONS_CONFIG["train"]["phases"][-1]["name"] / "trainer_state.json"),
-                run=[run["name"] for run in REGIONS_CONFIG["train"]["runs"]],
-            )
-            if REGIONS_CONFIG and REGIONS_CONFIG.get("train")
-            else []
-        ),
 
 
-include: "rules/tracks.smk"
-include: "rules/dataset.smk"
-include: "rules/scaling.smk"
+
+if PROFILE or REGION_COUNTS:
+    include: "rules/tracks.smk"
+if TRACK_FORMAT == "bigwig":
+    include: "rules/scaling.smk"
+if PROFILE:
+    include: "rules/dataset.smk"
+if REGION_COUNTS:
+    include: "rules/region_counts.smk"
+if CACHED_RUNS:
+    include: "rules/embeddings.smk"
 if TRAIN:
     include: "rules/train.smk"
 include: "rules/predict.smk"
 include: "rules/parameter_sweep.smk"
 include: "rules/attribute.smk"
 include: "rules/design.smk"
-if REGIONS_CONFIG:
-    include: "rules/regions.smk"

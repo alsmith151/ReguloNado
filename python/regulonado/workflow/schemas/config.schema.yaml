@@ -260,80 +260,26 @@ $defs:
     - name
     title: AttributionTarget
     type: object
-  DatasetConfig:
+  BackboneConfig:
     additionalProperties: false
+    description: The pretrained trunk a run starts from.
     properties:
-      context_length:
-        default: 524288
-        minimum: 1
-        title: Context Length
-        type: integer
-      bin_size:
-        default: 32
-        minimum: 1
-        title: Bin Size
-        type: integer
-      n_pred_bins:
-        default: 6144
-        minimum: 1
-        title: N Pred Bins
-        type: integer
-      shift_max_bp:
-        default: 64
-        minimum: 0
-        title: Shift Max Bp
-        type: integer
-      extract_threads:
-        default: 32
-        minimum: 1
-        title: Extract Threads
-        type: integer
-      write_threads:
-        default: 4
-        minimum: 1
-        title: Write Threads
-        type: integer
-      zstd_level:
-        default: 3
-        minimum: 1
-        title: Zstd Level
-        type: integer
-      rows_per_row_group:
-        default: 1
-        minimum: 1
-        title: Rows Per Row Group
-        type: integer
-      stage_to_scratch:
-        default: true
-        title: Stage To Scratch
-        type: boolean
-      drop_missing:
-        default: true
-        title: Drop Missing
-        type: boolean
-      dedupe_tracks:
-        default: content
+      type:
+        default: borzoi
         enum:
-        - none
-        - identity
-        - content
-        title: Dedupe Tracks
+        - borzoi
+        - enformer
+        - alphagenome
+        title: Type
         type: string
-      bin_denominator:
-        default: bin_width
-        enum:
-        - bin_width
-        - covered_bases
-        title: Bin Denominator
+      pretrained:
+        description: Checkpoint name or path (see python/configs/backbone/).
+        minLength: 1
+        title: Pretrained
         type: string
-      missing_bins:
-        default: nan
-        enum:
-        - nan
-        - zero
-        title: Missing Bins
-        type: string
-    title: DatasetConfig
+    required:
+    - pretrained
+    title: BackboneConfig
     type: object
   DesignConfig:
     additionalProperties: false
@@ -660,10 +606,16 @@ $defs:
     type: object
   InputsConfig:
     additionalProperties: false
+    description: 'The genome and the tracks, shared by every run.
+
+
+      Tracks are discovered once, from bigWigs when a run predicts ``profile`` targets
+
+      (rows then also carry a ``bam`` for ``region_counts`` runs), otherwise from
+      BAMs --
+
+      see :meth:`RegulonadoConfig.track_format`. A track sheet can list both files.'
     properties:
-      intervals:
-        title: Intervals
-        type: string
       fasta:
         title: Fasta
         type: string
@@ -678,7 +630,9 @@ $defs:
         - type: string
         - type: 'null'
         default: null
-        description: One BAM per track, named <track-stem>.bam. Needed for scaling
+        description: BAM directory. Tracks find their BAM here as <sample_id or bigWig
+          stem>.bam, or the one file naming sample_id as a token; discovered from
+          BAMs, every *.bam is a track unless a sheet names them. Needed for scaling
           'bamnado'.
         title: Bam Dir
       track_sheet:
@@ -686,8 +640,8 @@ $defs:
         - type: string
         - type: 'null'
         default: null
-        description: CSV mapping tracks to annotation; supplies the ordered track
-          list.
+        description: CSV mapping tracks to annotation (bigwig and/or bam per row);
+          supplies the ordered track list.
         title: Track Sheet
       seqnado_projects:
         description: SeqNado projects to draw tracks from, in order.
@@ -711,8 +665,19 @@ $defs:
           \ in at 'tracks assemble' \u2014 a separate DAG input from track_sheet/bigwig_dir,\
           \ so editing it re-runs only assembly, not discovery."
         title: Track Annotations
+      drop_missing:
+        default: true
+        title: Drop Missing
+        type: boolean
+      dedupe_tracks:
+        default: content
+        enum:
+        - none
+        - identity
+        - content
+        title: Dedupe Tracks
+        type: string
     required:
-    - intervals
     - fasta
     title: InputsConfig
     type: object
@@ -827,6 +792,77 @@ $defs:
     - run
     title: PredictionConfig
     type: object
+  ProfileTargetConfig:
+    additionalProperties: false
+    description: 'Binned coverage profiles over ``intervals``, from bigWigs: the ``profile``
+      dataset.'
+    properties:
+      intervals:
+        minLength: 1
+        title: Intervals
+        type: string
+      context_length:
+        default: 524288
+        minimum: 1
+        title: Context Length
+        type: integer
+      bin_size:
+        default: 32
+        minimum: 1
+        title: Bin Size
+        type: integer
+      n_pred_bins:
+        default: 6144
+        minimum: 1
+        title: N Pred Bins
+        type: integer
+      shift_max_bp:
+        default: 64
+        minimum: 0
+        title: Shift Max Bp
+        type: integer
+      extract_threads:
+        default: 32
+        minimum: 1
+        title: Extract Threads
+        type: integer
+      write_threads:
+        default: 4
+        minimum: 1
+        title: Write Threads
+        type: integer
+      zstd_level:
+        default: 3
+        minimum: 1
+        title: Zstd Level
+        type: integer
+      rows_per_row_group:
+        default: 1
+        minimum: 1
+        title: Rows Per Row Group
+        type: integer
+      stage_to_scratch:
+        default: true
+        title: Stage To Scratch
+        type: boolean
+      bin_denominator:
+        default: bin_width
+        enum:
+        - bin_width
+        - covered_bases
+        title: Bin Denominator
+        type: string
+      missing_bins:
+        default: nan
+        enum:
+        - nan
+        - zero
+        title: Missing Bins
+        type: string
+    required:
+    - intervals
+    title: ProfileTargetConfig
+    type: object
   QCConfig:
     additionalProperties: false
     description: Opt-in track QC, run before the Arrow build. Empty/absent ``checks``
@@ -871,42 +907,17 @@ $defs:
         type: integer
     title: QCConfig
     type: object
-  RegionsConfig:
+  RegionCountsTargetConfig:
     additionalProperties: false
-    description: 'Region-count modelling on cached, frozen backbone embeddings.
-
-
-      Counting (``counts bam``/``counts gather``) reuses the top-level ``inputs.fasta``
-
-      and the track table ``track_assemble`` already produces; embedding caches
-
-      (:class:`RegionsEmbeddingConfig`) can name several backbones over the same
-
-      region set, and each :class:`RegionsTrainRun` names which one it trains on.'
+    description: 'One count per region per track, from BAMs: the ``region_counts``
+      dataset.'
     properties:
-      inputs:
-        $ref: '#/$defs/RegionsInputsConfig'
-      counts:
-        $ref: '#/$defs/RegionsCountsConfig'
-      embeddings:
-        items:
-          $ref: '#/$defs/RegionsEmbeddingConfig'
-        minItems: 1
-        title: Embeddings
-        type: array
-      train:
-        anyOf:
-        - $ref: '#/$defs/RegionsTrainConfig'
-        - type: 'null'
-    required:
-    - inputs
-    - embeddings
-    title: RegionsConfig
-    type: object
-  RegionsCountsConfig:
-    additionalProperties: false
-    description: '``counts bam``/``counts gather`` overrides.'
-    properties:
+      regions:
+        description: BED/parquet region set; its 'split' column, and target_start/target_end
+          if present, are used as-is.
+        minLength: 1
+        title: Regions
+        type: string
       target_width:
         default: 1000
         minimum: 1
@@ -917,12 +928,6 @@ $defs:
         description: htslib decompression threads per BAM.
         minimum: 1
         title: Threads
-        type: integer
-      workers:
-        default: 1
-        description: Parallel BAMs per counting job.
-        minimum: 1
-        title: Workers
         type: integer
       chrom_sizes:
         anyOf:
@@ -944,182 +949,31 @@ $defs:
           type: string
         title: Test Chroms
         type: array
-    title: RegionsCountsConfig
-    type: object
-  RegionsEmbeddingConfig:
-    additionalProperties: false
-    description: One ``embed regions`` cache; several can run side by side over the
-      same regions.
-    properties:
-      name:
-        title: Name
-        type: string
-      backbone:
-        enum:
-        - borzoi
-        - enformer
-        - alphagenome
-        title: Backbone
-        type: string
-      pretrained:
+      anchor_regions:
         anyOf:
         - type: string
         - type: 'null'
         default: null
-        description: Pretrained checkpoint name/path passed to --pretrained.
-        title: Pretrained
-      context:
-        anyOf:
-        - minimum: 1
-          type: integer
-        - type: 'null'
-        default: null
-        description: Flexible-backbone input length (bp); AlphaGenome only.
-        title: Context
-      stride:
-        anyOf:
-        - minimum: 1
-          type: integer
-        - type: 'null'
-        default: null
-        description: Flexible-backbone central kept span (bp); AlphaGenome only.
-        title: Stride
-      pool_to:
-        anyOf:
-        - minimum: 1
-          type: integer
-        - type: 'null'
-        default: null
-        description: Average adjacent bins to this bp width.
-        title: Pool To
-      rc:
-        default: false
-        description: Also cache a reverse-complement pass.
-        title: Rc
-        type: boolean
-      batch_size:
-        default: 1
-        minimum: 1
-        title: Batch Size
-        type: integer
-    required:
-    - name
-    - backbone
-    title: RegionsEmbeddingConfig
-    type: object
-  RegionsInputsConfig:
-    additionalProperties: false
-    description: 'Region-count-specific inputs; ``inputs.fasta`` and ``track_assemble``''s
-
-      ``tracks.parquet`` are reused from the top-level ``inputs:`` section.'
-    properties:
-      regions:
-        description: BED/parquet region set; a 'split' column, if present, is used
-          as-is.
-        minLength: 1
-        title: Regions
-        type: string
-      anchor_regions:
-        description: High-anchor BED/parquet.
-        minLength: 1
+        description: High-anchor BED/parquet for size factors; defaults to scaling.anchor_regions.
         title: Anchor Regions
-        type: string
       background_regions:
-        description: Background BED/parquet.
-        minLength: 1
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        description: Background BED/parquet; defaults to scaling.background_regions.
         title: Background Regions
-        type: string
+      exclude_regions:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        description: BED/parquet of held-out sequences (e.g. benchmark candidates);
+          train regions overlapping one are dropped in every phase (data.exclude_regions).
+        title: Exclude Regions
     required:
     - regions
-    - anchor_regions
-    - background_regions
-    title: RegionsInputsConfig
-    type: object
-  RegionsTrainConfig:
-    additionalProperties: false
-    properties:
-      nproc_per_node:
-        default: 1
-        minimum: 1
-        title: Nproc Per Node
-        type: integer
-      common:
-        additionalProperties: true
-        title: Common
-        type: object
-      phases:
-        items:
-          $ref: '#/$defs/RegionsTrainPhase'
-        minItems: 1
-        title: Phases
-        type: array
-      runs:
-        items:
-          $ref: '#/$defs/RegionsTrainRun'
-        minItems: 1
-        title: Runs
-        type: array
-    required:
-    - phases
-    - runs
-    title: RegionsTrainConfig
-    type: object
-  RegionsTrainPhase:
-    additionalProperties: false
-    description: 'Like ``TrainPhase``, but ``preset`` names a ``python/configs/regions_experiment/*.yaml``
-
-      preset (e.g. ``pretrain``/``specific``/``target``) instead of a backbone fine-tuning
-      preset.'
-    properties:
-      name:
-        title: Name
-        type: string
-      preset:
-        minLength: 1
-        title: Preset
-        type: string
-      settings:
-        additionalProperties: true
-        title: Settings
-        type: object
-    required:
-    - name
-    - preset
-    title: RegionsTrainPhase
-    type: object
-  RegionsTrainRun:
-    additionalProperties: false
-    properties:
-      name:
-        title: Name
-        type: string
-      seed:
-        minimum: 0
-        title: Seed
-        type: integer
-      embedding:
-        description: Name of one of regions.embeddings.
-        minLength: 1
-        title: Embedding
-        type: string
-      target_group:
-        anyOf:
-        - type: string
-        - type: 'null'
-        default: null
-        description: Cell-type target group this run trains for (e.g. 'HL-60'), passed
-          to 'train-regions' as --target-group; required by the 'target' preset's
-          contrast objective.
-        title: Target Group
-      settings:
-        additionalProperties: true
-        title: Settings
-        type: object
-    required:
-    - name
-    - seed
-    - embedding
-    title: RegionsTrainRun
+    title: RegionCountsTargetConfig
     type: object
   ScalingConfig:
     additionalProperties: false
@@ -1238,6 +1092,21 @@ $defs:
     - path
     title: SeqNadoProjectRef
     type: object
+  TargetsConfig:
+    additionalProperties: false
+    description: What runs can be trained to predict; each dataset is built only if
+      a run uses it.
+    properties:
+      profile:
+        anyOf:
+        - $ref: '#/$defs/ProfileTargetConfig'
+        - type: 'null'
+      region_counts:
+        anyOf:
+        - $ref: '#/$defs/RegionCountsTargetConfig'
+        - type: 'null'
+    title: TargetsConfig
+    type: object
   TrainConfig:
     additionalProperties: false
     properties:
@@ -1250,12 +1119,15 @@ $defs:
         additionalProperties: true
         title: Common
         type: object
-      phases:
-        items:
-          $ref: '#/$defs/TrainPhase'
-        minItems: 1
-        title: Phases
-        type: array
+      recipes:
+        additionalProperties:
+          items:
+            $ref: '#/$defs/TrainPhase'
+          type: array
+        description: Named phase chains; each run follows one.
+        minProperties: 1
+        title: Recipes
+        type: object
       runs:
         items:
           $ref: '#/$defs/TrainRun'
@@ -1263,23 +1135,23 @@ $defs:
         title: Runs
         type: array
     required:
-    - phases
+    - recipes
     - runs
     title: TrainConfig
     type: object
   TrainPhase:
     additionalProperties: false
+    description: 'One step of a recipe. ``preset`` must suit the trunk mode of every
+      run using it:
+
+      :data:`LIVE_PRESETS` for ``trunk: live``, :data:`CACHED_PRESETS` for ``trunk:
+      cached``.'
     properties:
       name:
         title: Name
         type: string
       preset:
-        enum:
-        - head_only
-        - unfreeze_output
-        - deep_finetune
-        - peak_finetune
-        - lora_finetune
+        minLength: 1
         title: Preset
         type: string
       settings:
@@ -1293,6 +1165,8 @@ $defs:
     type: object
   TrainRun:
     additionalProperties: false
+    description: 'One model: a backbone, how its trunk is used, what it predicts,
+      and its recipe.'
     properties:
       name:
         title: Name
@@ -1301,9 +1175,42 @@ $defs:
         minimum: 0
         title: Seed
         type: integer
-      pretrained_model:
-        title: Pretrained Model
+      recipe:
+        description: Name of one of train.recipes.
+        minLength: 1
+        title: Recipe
         type: string
+      backbone:
+        $ref: '#/$defs/BackboneConfig'
+      trunk:
+        default: live
+        description: 'live: the trunk runs every step (and can be fine-tuned); cached:
+          it runs once and a head trains on its stored embeddings.'
+        enum:
+        - live
+        - cached
+        title: Trunk
+        type: string
+      target:
+        default: profile
+        description: Which targets.* dataset the run predicts.
+        enum:
+        - profile
+        - region_counts
+        title: Target
+        type: string
+      target_group:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        description: Cell-type group stage-specific presets are relative to (data.target_group).
+        title: Target Group
+      cache:
+        anyOf:
+        - $ref: '#/$defs/TrunkCacheConfig'
+        - type: 'null'
+        description: 'Embedding settings; trunk: cached only.'
       settings:
         additionalProperties: true
         title: Settings
@@ -1311,8 +1218,51 @@ $defs:
     required:
     - name
     - seed
-    - pretrained_model
+    - recipe
+    - backbone
     title: TrainRun
+    type: object
+  TrunkCacheConfig:
+    additionalProperties: false
+    description: 'How a ``trunk: cached`` run''s embeddings are computed (``regulonado
+      embed regions``).'
+    properties:
+      context:
+        anyOf:
+        - minimum: 1
+          type: integer
+        - type: 'null'
+        default: null
+        description: Input length (bp); AlphaGenome only.
+        title: Context
+      stride:
+        anyOf:
+        - minimum: 1
+          type: integer
+        - type: 'null'
+        default: null
+        description: Central kept span per window (bp); AlphaGenome only.
+        title: Stride
+      pool_to:
+        anyOf:
+        - minimum: 1
+          type: integer
+        - type: 'null'
+        default: null
+        description: Average adjacent bins to this bp width.
+        title: Pool To
+      rc:
+        default: false
+        description: Also cache a reverse-complement pass.
+        title: Rc
+        type: boolean
+      batch_size:
+        default: 1
+        description: Windows per forward pass.
+        minimum: 1
+        title: Batch Size
+        type: integer
+    title: TrunkCacheConfig
     type: object
 additionalProperties: false
 description: Top-level workflow config.
@@ -1323,8 +1273,8 @@ properties:
     type: string
   inputs:
     $ref: '#/$defs/InputsConfig'
-  dataset:
-    $ref: '#/$defs/DatasetConfig'
+  targets:
+    $ref: '#/$defs/TargetsConfig'
   scaling:
     $ref: '#/$defs/ScalingConfig'
   qc:
@@ -1348,10 +1298,6 @@ properties:
   attribution:
     anyOf:
     - $ref: '#/$defs/AttributionConfig'
-    - type: 'null'
-  regions:
-    anyOf:
-    - $ref: '#/$defs/RegionsConfig'
     - type: 'null'
 required:
 - results_dir

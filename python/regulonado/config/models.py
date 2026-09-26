@@ -18,7 +18,17 @@ from regulonado.training.overrides import merge_training_settings
 
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-PHASE_PRESETS = ("head_only", "unfreeze_output", "deep_finetune", "peak_finetune")
+# Phase presets per trunk mode: python/configs/experiment/*.yaml compose over train.yaml
+# (the trunk runs live, every step); python/configs/cached_experiment/*.yaml over
+# train_cached.yaml (a head trained on cached trunk embeddings).
+LIVE_PRESETS = ("head_only", "unfreeze_output", "deep_finetune", "peak_finetune", "lora_finetune")
+CACHED_PRESETS = ("pretrain", "specific", "target")
+PRESETS_BY_TRUNK = {"live": LIVE_PRESETS, "cached": CACHED_PRESETS}
+# (trunk, target) pairs with a training implementation.
+SUPPORTED_RUN_KINDS = {("live", "profile"), ("cached", "region_counts")}
+# AlphaGenome takes flexible-length input; these are embed_regions' defaults.
+ALPHAGENOME_CONTEXT = 1_048_576
+ALPHAGENOME_STRIDE = 524_288
 SCALING_METHODS = ("tmm", "original", "bamnado", "seqnado", "anchor")
 BAMNADO_METHODS = ("tmm", "csaw-background", "cpm", "median-of-ratios", "spike-in")
 QC_CHECKS = ("sparsity", "interval_signal", "replicate_concordance", "anchor")
@@ -47,18 +57,31 @@ class SeqNadoProjectRef(BaseModel):
 
 
 class InputsConfig(BaseModel):
+    """The genome and the tracks, shared by every run.
+
+    Tracks are discovered once, from bigWigs when a run predicts ``profile`` targets
+    (rows then also carry a ``bam`` for ``region_counts`` runs), otherwise from BAMs --
+    see :meth:`RegulonadoConfig.track_format`. A track sheet can list both files.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    intervals: str
     fasta: str
     bigwig_dir: str | None = None
     bam_dir: str | None = Field(
         default=None,
-        description="One BAM per track, named <track-stem>.bam. Needed for scaling 'bamnado'.",
+        description=(
+            "BAM directory. Tracks find their BAM here as <sample_id or bigWig stem>.bam, or "
+            "the one file naming sample_id as a token; discovered from BAMs, every *.bam is "
+            "a track unless a sheet names them. Needed for scaling 'bamnado'."
+        ),
     )
     track_sheet: str | None = Field(
         default=None,
-        description="CSV mapping tracks to annotation; supplies the ordered track list.",
+        description=(
+            "CSV mapping tracks to annotation (bigwig and/or bam per row); supplies the "
+            "ordered track list."
+        ),
     )
     seqnado_projects: list[SeqNadoProjectRef] = Field(
         default_factory=list,
@@ -79,19 +102,22 @@ class InputsConfig(BaseModel):
             "re-runs only assembly, not discovery."
         ),
     )
+    drop_missing: bool = True
+    dedupe_tracks: Literal["none", "identity", "content"] = "content"
 
-    @model_validator(mode="after")
-    def _require_a_track_source(self) -> "InputsConfig":
-        if not (self.bigwig_dir or self.track_sheet or self.seqnado_projects):
-            raise ValueError(
-                "inputs needs one of 'bigwig_dir', 'track_sheet' or 'seqnado_projects'"
-            )
-        return self
+    def has_track_source(self, track_format: str) -> bool:
+        """Whether any configured source yields *track_format* (``bigwig``/``bam``) files."""
+        if self.track_sheet or self.seqnado_projects:
+            return True
+        return bool(self.bigwig_dir if track_format == "bigwig" else self.bam_dir)
 
 
-class DatasetConfig(BaseModel):
+class ProfileTargetConfig(BaseModel):
+    """Binned coverage profiles over ``intervals``, from bigWigs: the ``profile`` dataset."""
+
     model_config = ConfigDict(extra="forbid")
 
+    intervals: str = Field(min_length=1)
     context_length: int = Field(default=524_288, ge=1)
     bin_size: int = Field(default=32, ge=1)
     n_pred_bins: int = Field(default=6_144, ge=1)
@@ -101,21 +127,68 @@ class DatasetConfig(BaseModel):
     zstd_level: int = Field(default=3, ge=1)
     rows_per_row_group: int = Field(default=1, ge=1)
     stage_to_scratch: bool = True
-    drop_missing: bool = True
-    dedupe_tracks: Literal["none", "identity", "content"] = "content"
     # See `regulonado dataset --help`: bin mean over in-contig width vs recorded bases,
     # and the stored value for padding / all-NaN bins.
     bin_denominator: Literal["bin_width", "covered_bases"] = "bin_width"
     missing_bins: Literal["nan", "zero"] = "nan"
 
     @model_validator(mode="after")
-    def _shift_is_whole_bins(self) -> "DatasetConfig":
+    def _shift_is_whole_bins(self) -> "ProfileTargetConfig":
         if self.shift_max_bp % self.bin_size:
             raise ValueError(
                 f"shift_max_bp ({self.shift_max_bp}) must be a multiple of "
                 f"bin_size ({self.bin_size})"
             )
         return self
+
+
+class RegionCountsTargetConfig(BaseModel):
+    """One count per region per track, from BAMs: the ``region_counts`` dataset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    regions: str = Field(
+        min_length=1,
+        description=(
+            "BED/parquet region set; its 'split' column, and target_start/target_end if "
+            "present, are used as-is."
+        ),
+    )
+    target_width: int = Field(default=1000, ge=1)
+    threads: int = Field(default=1, ge=1, description="htslib decompression threads per BAM.")
+    chrom_sizes: str | None = None
+    val_chroms: list[str] = Field(
+        default_factory=list,
+        description="Chromosomes assigned split=val when 'regions' has no 'split' column.",
+    )
+    test_chroms: list[str] = Field(
+        default_factory=list,
+        description="Chromosomes assigned split=test when 'regions' has no 'split' column.",
+    )
+    anchor_regions: str | None = Field(
+        default=None,
+        description="High-anchor BED/parquet for size factors; defaults to scaling.anchor_regions.",
+    )
+    background_regions: str | None = Field(
+        default=None,
+        description="Background BED/parquet; defaults to scaling.background_regions.",
+    )
+    exclude_regions: str | None = Field(
+        default=None,
+        description=(
+            "BED/parquet of held-out sequences (e.g. benchmark candidates); train regions "
+            "overlapping one are dropped in every phase (data.exclude_regions)."
+        ),
+    )
+
+
+class TargetsConfig(BaseModel):
+    """What runs can be trained to predict; each dataset is built only if a run uses it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile: ProfileTargetConfig | None = None
+    region_counts: RegionCountsTargetConfig | None = None
 
 
 class ScalingConfig(BaseModel):
@@ -171,129 +244,8 @@ class QCConfig(BaseModel):
 
 
 class TrainPhase(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    preset: Literal[
-        "head_only", "unfreeze_output", "deep_finetune", "peak_finetune", "lora_finetune"
-    ]
-    settings: dict[str, Any] = Field(default_factory=dict)
-
-    _check_name = field_validator("name")(staticmethod(_validate_name))
-
-
-class TrainRun(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    seed: int = Field(ge=0)
-    pretrained_model: str
-    settings: dict[str, Any] = Field(default_factory=dict)
-
-    _check_name = field_validator("name")(staticmethod(_validate_name))
-
-
-class TrainConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    nproc_per_node: int = Field(default=1, ge=1)
-    common: dict[str, Any] = Field(default_factory=dict)
-    phases: list[TrainPhase] = Field(min_length=1)
-    runs: list[TrainRun] = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _names_are_unique(self) -> "TrainConfig":
-        for label, items in (("phases", self.phases), ("runs", self.runs)):
-            names = [item.name for item in items]
-            duplicates = sorted({name for name in names if names.count(name) > 1})
-            if duplicates:
-                raise ValueError(
-                    f"train.{label} names must be unique; repeated: {', '.join(duplicates)}"
-                )
-        for label, settings in [
-            ("train.common", self.common),
-            *((f"train.phases[{item.name}].settings", item.settings) for item in self.phases),
-            *((f"train.runs[{item.name}].settings", item.settings) for item in self.runs),
-        ]:
-            try:
-                merge_training_settings([settings])
-            except ValueError as exc:
-                raise ValueError(f"{label}: {exc}") from exc
-        return self
-
-
-class RegionsInputsConfig(BaseModel):
-    """Region-count-specific inputs; ``inputs.fasta`` and ``track_assemble``'s
-    ``tracks.parquet`` are reused from the top-level ``inputs:`` section."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    regions: str = Field(
-        min_length=1,
-        description="BED/parquet region set; a 'split' column, if present, is used as-is.",
-    )
-    anchor_regions: str = Field(min_length=1, description="High-anchor BED/parquet.")
-    background_regions: str = Field(min_length=1, description="Background BED/parquet.")
-
-
-class RegionsCountsConfig(BaseModel):
-    """``counts bam``/``counts gather`` overrides."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    target_width: int = Field(default=1000, ge=1)
-    threads: int = Field(default=1, ge=1, description="htslib decompression threads per BAM.")
-    workers: int = Field(default=1, ge=1, description="Parallel BAMs per counting job.")
-    chrom_sizes: str | None = None
-    val_chroms: list[str] = Field(
-        default_factory=list,
-        description="Chromosomes assigned split=val when 'regions' has no 'split' column.",
-    )
-    test_chroms: list[str] = Field(
-        default_factory=list,
-        description="Chromosomes assigned split=test when 'regions' has no 'split' column.",
-    )
-
-
-class RegionsEmbeddingConfig(BaseModel):
-    """One ``embed regions`` cache; several can run side by side over the same regions."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    backbone: Literal["borzoi", "enformer", "alphagenome"]
-    pretrained: str | None = Field(
-        default=None, description="Pretrained checkpoint name/path passed to --pretrained."
-    )
-    context: int | None = Field(
-        default=None, ge=1, description="Flexible-backbone input length (bp); AlphaGenome only."
-    )
-    stride: int | None = Field(
-        default=None,
-        ge=1,
-        description="Flexible-backbone central kept span (bp); AlphaGenome only.",
-    )
-    pool_to: int | None = Field(
-        default=None, ge=1, description="Average adjacent bins to this bp width."
-    )
-    rc: bool = Field(default=False, description="Also cache a reverse-complement pass.")
-    batch_size: int = Field(default=1, ge=1)
-
-    _check_name = field_validator("name")(staticmethod(_validate_name))
-
-    @model_validator(mode="after")
-    def _context_stride_are_alphagenome_only(self) -> "RegionsEmbeddingConfig":
-        if self.backbone != "alphagenome" and (self.context is not None or self.stride is not None):
-            raise ValueError(
-                f"embedding {self.name!r}: 'context'/'stride' only apply to backbone "
-                "'alphagenome' (fixed-input backbones tile by their own output span)"
-            )
-        return self
-
-
-class RegionsTrainPhase(BaseModel):
-    """Like ``TrainPhase``, but ``preset`` names a ``python/configs/regions_experiment/*.yaml``
-    preset (e.g. ``pretrain``/``specific``/``target``) instead of a backbone fine-tuning preset."""
+    """One step of a recipe. ``preset`` must suit the trunk mode of every run using it:
+    :data:`LIVE_PRESETS` for ``trunk: live``, :data:`CACHED_PRESETS` for ``trunk: cached``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -304,53 +256,158 @@ class RegionsTrainPhase(BaseModel):
     _check_name = field_validator("name")(staticmethod(_validate_name))
 
 
-class RegionsTrainRun(BaseModel):
+class BackboneConfig(BaseModel):
+    """The pretrained trunk a run starts from."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["borzoi", "enformer", "alphagenome"] = "borzoi"
+    pretrained: str = Field(
+        min_length=1, description="Checkpoint name or path (see python/configs/backbone/)."
+    )
+
+
+class TrunkCacheConfig(BaseModel):
+    """How a ``trunk: cached`` run's embeddings are computed (``regulonado embed regions``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    context: int | None = Field(
+        default=None, ge=1, description="Input length (bp); AlphaGenome only."
+    )
+    stride: int | None = Field(
+        default=None, ge=1, description="Central kept span per window (bp); AlphaGenome only."
+    )
+    pool_to: int | None = Field(
+        default=None, ge=1, description="Average adjacent bins to this bp width."
+    )
+    rc: bool = Field(default=False, description="Also cache a reverse-complement pass.")
+    batch_size: int = Field(default=1, ge=1, description="Windows per forward pass.")
+
+
+class TrainRun(BaseModel):
+    """One model: a backbone, how its trunk is used, what it predicts, and its recipe."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str
     seed: int = Field(ge=0)
-    embedding: str = Field(min_length=1, description="Name of one of regions.embeddings.")
+    recipe: str = Field(min_length=1, description="Name of one of train.recipes.")
+    backbone: BackboneConfig
+    trunk: Literal["live", "cached"] = Field(
+        default="live",
+        description=(
+            "live: the trunk runs every step (and can be fine-tuned); cached: it runs once "
+            "and a head trains on its stored embeddings."
+        ),
+    )
+    target: Literal["profile", "region_counts"] = Field(
+        default="profile", description="Which targets.* dataset the run predicts."
+    )
     target_group: str | None = Field(
         default=None,
-        description=(
-            "Cell-type target group this run trains for (e.g. 'HL-60'), passed to "
-            "'train-regions' as --target-group; required by the 'target' preset's "
-            "contrast objective."
-        ),
+        description="Cell-type group stage-specific presets are relative to (data.target_group).",
+    )
+    cache: TrunkCacheConfig | None = Field(
+        default=None, description="Embedding settings; trunk: cached only."
     )
     settings: dict[str, Any] = Field(default_factory=dict)
 
     _check_name = field_validator("name")(staticmethod(_validate_name))
 
+    @model_validator(mode="after")
+    def _kind_is_supported(self) -> "TrainRun":
+        if (self.trunk, self.target) not in SUPPORTED_RUN_KINDS:
+            supported = ", ".join(f"{t}/{g}" for t, g in sorted(SUPPORTED_RUN_KINDS))
+            raise ValueError(
+                f"run {self.name!r}: trunk {self.trunk!r} with target {self.target!r} is not "
+                f"implemented (supported trunk/target: {supported})"
+            )
+        if self.target_group is not None and self.trunk != "cached":
+            raise ValueError(
+                f"run {self.name!r}: target_group applies to trunk: cached runs "
+                "(data.target_group); live runs set their target in settings"
+            )
+        if self.cache is not None and self.trunk != "cached":
+            raise ValueError(f"run {self.name!r}: 'cache' only applies to trunk: cached")
+        if (
+            self.cache is not None
+            and self.backbone.type != "alphagenome"
+            and (self.cache.context is not None or self.cache.stride is not None)
+        ):
+            raise ValueError(
+                f"run {self.name!r}: cache.context/stride only apply to backbone 'alphagenome' "
+                "(fixed-input backbones tile by their own output span)"
+            )
+        return self
 
-class RegionsTrainConfig(BaseModel):
+    def cache_name(self) -> str:
+        """Directory name of this run's embedding cache: runs that would compute the same
+        embeddings share one."""
+        cache = self.cache or TrunkCacheConfig()
+        pretrained = re.sub(r"[^A-Za-z0-9._-]+", "_", self.backbone.pretrained).strip("_.")
+        parts = [self.backbone.type, pretrained]
+        if self.backbone.type == "alphagenome":
+            parts += [
+                f"ctx{cache.context or ALPHAGENOME_CONTEXT}",
+                f"stride{cache.stride or ALPHAGENOME_STRIDE}",
+            ]
+        if cache.pool_to:
+            parts.append(f"pool{cache.pool_to}")
+        if cache.rc:
+            parts.append("rc")
+        return "-".join(parts)
+
+
+class TrainConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     nproc_per_node: int = Field(default=1, ge=1)
     common: dict[str, Any] = Field(default_factory=dict)
-    phases: list[RegionsTrainPhase] = Field(min_length=1)
-    runs: list[RegionsTrainRun] = Field(min_length=1)
+    recipes: dict[str, list[TrainPhase]] = Field(
+        min_length=1, description="Named phase chains; each run follows one."
+    )
+    runs: list[TrainRun] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _names_are_unique(self) -> "RegionsTrainConfig":
-        for label, items in (("phases", self.phases), ("runs", self.runs)):
-            names = [item.name for item in items]
-            duplicates = sorted({name for name in names if names.count(name) > 1})
+    def _recipes_and_runs_are_consistent(self) -> "TrainConfig":
+        for name, phases in self.recipes.items():
+            _validate_name(name)
+            if not phases:
+                raise ValueError(f"train.recipes.{name} has no phases")
+            names = [phase.name for phase in phases]
+            duplicates = sorted({n for n in names if names.count(n) > 1})
             if duplicates:
                 raise ValueError(
-                    f"regions.train.{label} names must be unique; repeated: "
+                    f"train.recipes.{name} phase names must be unique; repeated: "
                     f"{', '.join(duplicates)}"
                 )
+        names = [run.name for run in self.runs]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            raise ValueError(f"train.runs names must be unique; repeated: {', '.join(duplicates)}")
+        for run in self.runs:
+            if run.recipe not in self.recipes:
+                raise ValueError(
+                    f"run {run.name!r} names recipe {run.recipe!r}, not one of train.recipes: "
+                    f"{', '.join(self.recipes)}"
+                )
+            allowed = PRESETS_BY_TRUNK[run.trunk]
+            wrong = [p.preset for p in self.recipes[run.recipe] if p.preset not in allowed]
+            if wrong:
+                raise ValueError(
+                    f"run {run.name!r} (trunk: {run.trunk}) uses recipe {run.recipe!r}, whose "
+                    f"preset(s) {', '.join(wrong)} are not trunk-{run.trunk} presets "
+                    f"({', '.join(allowed)})"
+                )
         for label, settings in [
-            ("regions.train.common", self.common),
+            ("train.common", self.common),
             *(
-                (f"regions.train.phases[{item.name}].settings", item.settings)
-                for item in self.phases
+                (f"train.recipes.{recipe}[{phase.name}].settings", phase.settings)
+                for recipe, phases in self.recipes.items()
+                for phase in phases
             ),
-            *(
-                (f"regions.train.runs[{item.name}].settings", item.settings)
-                for item in self.runs
-            ),
+            *((f"train.runs[{run.name}].settings", run.settings) for run in self.runs),
         ]:
             try:
                 merge_training_settings([settings])
@@ -358,47 +415,12 @@ class RegionsTrainConfig(BaseModel):
                 raise ValueError(f"{label}: {exc}") from exc
         return self
 
+    def run(self, name: str) -> TrainRun:
+        return next(run for run in self.runs if run.name == name)
 
-class RegionsConfig(BaseModel):
-    """Region-count modelling on cached, frozen backbone embeddings.
-
-    Counting (``counts bam``/``counts gather``) reuses the top-level ``inputs.fasta``
-    and the track table ``track_assemble`` already produces; embedding caches
-    (:class:`RegionsEmbeddingConfig`) can name several backbones over the same
-    region set, and each :class:`RegionsTrainRun` names which one it trains on.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    inputs: RegionsInputsConfig
-    counts: RegionsCountsConfig = Field(default_factory=RegionsCountsConfig)
-    embeddings: list[RegionsEmbeddingConfig] = Field(min_length=1)
-    train: RegionsTrainConfig | None = None
-
-    @model_validator(mode="after")
-    def _embedding_names_are_unique(self) -> "RegionsConfig":
-        names = [embedding.name for embedding in self.embeddings]
-        duplicates = sorted({name for name in names if names.count(name) > 1})
-        if duplicates:
-            raise ValueError(
-                f"regions.embeddings names must be unique; repeated: {', '.join(duplicates)}"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _runs_name_known_embeddings(self) -> "RegionsConfig":
-        if self.train is None:
-            return self
-        embedding_names = {embedding.name for embedding in self.embeddings}
-        unknown = sorted(
-            {run.embedding for run in self.train.runs} - embedding_names
-        )
-        if unknown:
-            raise ValueError(
-                f"regions.train.runs name embedding(s) not in regions.embeddings: "
-                f"{', '.join(unknown)}"
-            )
-        return self
+    def final_phase(self, run_name: str) -> str:
+        """The last phase of *run_name*'s recipe: the checkpoint downstream stages use."""
+        return self.recipes[self.run(run_name).recipe][-1].name
 
 
 class ParameterSweepConfig(BaseModel):
@@ -746,7 +768,7 @@ class RegulonadoConfig(BaseModel):
 
     results_dir: str = Field(min_length=1)
     inputs: InputsConfig
-    dataset: DatasetConfig = Field(default_factory=DatasetConfig)
+    targets: TargetsConfig = Field(default_factory=TargetsConfig)
     scaling: ScalingConfig = Field(default_factory=ScalingConfig)
     qc: QCConfig = Field(default_factory=QCConfig)
     train: TrainConfig | None = None
@@ -754,67 +776,112 @@ class RegulonadoConfig(BaseModel):
     prediction: PredictionConfig | None = None
     design: DesignConfig | None = None
     attribution: AttributionConfig | None = None
-    regions: RegionsConfig | None = None
+
+    def track_format(self) -> str:
+        """``bigwig`` when a profile target is configured, else ``bam``.
+
+        One track table serves every run: bigWig tracks for profile datasets (each row also
+        carrying its ``bam`` when a sheet or ``inputs.bam_dir`` names one, so region-count
+        runs count the same tracks), or BAM tracks when only region counts are needed.
+        """
+        return "bigwig" if self.targets.profile is not None else "bam"
+
+    def runs_for(self, target: str) -> list[TrainRun]:
+        return [run for run in (self.train.runs if self.train else []) if run.target == target]
+
+    def _profile_run_names(self) -> set[str]:
+        return {run.name for run in self.runs_for("profile")}
 
     @model_validator(mode="after")
-    def _design_runs_are_known(self) -> "RegulonadoConfig":
-        if self.design is None or self.train is None:
-            return self
-        run_names = {run.name for run in self.train.runs}
-        for label, names in (
-            ("holdout_run", [self.design.holdout_run] if self.design.holdout_run else []),
-            ("design_runs", self.design.design_runs or []),
-        ):
-            unknown = sorted(name for name in names if name not in run_names)
-            if unknown:
+    def _run_targets_are_configured(self) -> "RegulonadoConfig":
+        for run in self.train.runs if self.train else []:
+            if getattr(self.targets, run.target) is None:
                 raise ValueError(
-                    f"design.{label} names train.runs entries that don't exist: "
-                    f"{', '.join(unknown)}"
+                    f"run {run.name!r} predicts {run.target!r}, but targets.{run.target} is "
+                    "not configured"
                 )
         return self
 
     @model_validator(mode="after")
-    def _prediction_run_is_known(self) -> "RegulonadoConfig":
-        if self.prediction is None:
+    def _tracks_have_a_source(self) -> "RegulonadoConfig":
+        if self.targets.profile is None and self.targets.region_counts is None:
+            return self
+        track_format = self.track_format()
+        if not self.inputs.has_track_source(track_format):
+            options = (
+                "bigwig_dir, track_sheet or seqnado_projects"
+                if track_format == "bigwig"
+                else "bam_dir, track_sheet or seqnado_projects"
+            )
+            raise ValueError(f"inputs needs one of {options} to discover {track_format} tracks")
+        return self
+
+    @model_validator(mode="after")
+    def _bigwig_stages_need_a_profile_target(self) -> "RegulonadoConfig":
+        if self.targets.profile is not None:
+            return self
+        if self.qc.checks:
+            raise ValueError("qc.checks scan bigWig tracks; configure targets.profile")
+        if self.parameter_sweep is not None and self.parameter_sweep.enabled:
+            raise ValueError(
+                "parameter_sweep trains on the profile dataset; configure targets.profile"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _downstream_runs_predict_profiles(self) -> "RegulonadoConfig":
+        """Prediction, attribution and design read bigWig-shaped profile models."""
+        referenced: list[tuple[str, list[str]]] = []
+        if self.prediction is not None:
+            referenced.append(("prediction.run", [self.prediction.run]))
+        if self.design is not None:
+            referenced.append(
+                ("design.holdout_run", [self.design.holdout_run] if self.design.holdout_run else [])
+            )
+            referenced.append(("design.design_runs", self.design.design_runs or []))
+        if self.attribution is not None:
+            referenced.append(("attribution.runs", self.attribution.runs or []))
+        if not any(names for _, names in referenced):
+            if self.prediction is not None and self.train is None:
+                raise ValueError(
+                    "prediction requires train so prediction.run can resolve a checkpoint"
+                )
             return self
         if self.train is None:
-            raise ValueError("prediction requires train so prediction.run can resolve a checkpoint")
-        run_names = {run.name for run in self.train.runs}
-        if self.prediction.run not in run_names:
-            raise ValueError(
-                "prediction.run names a train.runs entry that doesn't exist: "
-                f"{self.prediction.run}"
-            )
+            raise ValueError(f"{referenced[0][0]} names a run, but train is not configured")
+        all_runs = {run.name for run in self.train.runs}
+        profile_runs = self._profile_run_names()
+        for label, names in referenced:
+            unknown = sorted(name for name in names if name not in all_runs)
+            if unknown:
+                raise ValueError(
+                    f"{label} names train.runs entries that don't exist: {', '.join(unknown)}"
+                )
+            wrong = sorted(name for name in names if name not in profile_runs)
+            if wrong:
+                raise ValueError(
+                    f"{label} names run(s) {', '.join(wrong)} that don't predict profiles; "
+                    "prediction, attribution and design need target: profile runs"
+                )
         return self
 
     @model_validator(mode="after")
     def _anchor_disables_squash(self) -> "RegulonadoConfig":
-        if self.scaling.method == "anchor" and self.train is not None:
-            for phase in self.train.phases:
-                for run in self.train.runs:
-                    settings = merge_training_settings(
-                        [self.train.common, phase.settings, run.settings]
-                    )
-                    # Count labels ignore apply_squash entirely.
-                    if settings.get("data.label_space") == "counts":
-                        continue
-                    if settings.get("data.apply_squash", True) is not False:
-                        raise ValueError(
-                            "scaling.method='anchor' requires data.apply_squash=false; "
-                            f"resolved true for run {run.name!r}, phase {phase.name!r}"
-                        )
-        return self
-
-    @model_validator(mode="after")
-    def _attribution_runs_are_known(self) -> "RegulonadoConfig":
-        if self.attribution is None or not self.attribution.runs or self.train is None:
+        if self.scaling.method != "anchor" or self.train is None:
             return self
-        run_names = {run.name for run in self.train.runs}
-        unknown = sorted(name for name in self.attribution.runs if name not in run_names)
-        if unknown:
-            raise ValueError(
-                f"attribution.runs names train.runs entries that don't exist: {', '.join(unknown)}"
-            )
+        for run in self.runs_for("profile"):
+            for phase in self.train.recipes[run.recipe]:
+                settings = merge_training_settings(
+                    [self.train.common, phase.settings, run.settings]
+                )
+                # Count labels ignore apply_squash entirely.
+                if settings.get("data.label_space") == "counts":
+                    continue
+                if settings.get("data.apply_squash", True) is not False:
+                    raise ValueError(
+                        "scaling.method='anchor' requires data.apply_squash=false; "
+                        f"resolved true for run {run.name!r}, phase {phase.name!r}"
+                    )
         return self
 
     @model_validator(mode="after")
@@ -824,6 +891,20 @@ class RegulonadoConfig(BaseModel):
                 "qc.checks includes 'anchor', which reuses the anchor scale-factor "
                 "diagnostics; requires scaling.method: anchor"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _region_count_anchors_are_present(self) -> "RegulonadoConfig":
+        counts = self.targets.region_counts
+        if counts is None:
+            return self
+        for field_name in ("anchor_regions", "background_regions"):
+            if not (getattr(counts, field_name) or getattr(self.scaling, field_name)):
+                raise ValueError(
+                    f"targets.region_counts.{field_name} is required (or set "
+                    f"scaling.{field_name} with scaling.method: anchor to share it with the "
+                    "profile tracks)"
+                )
         return self
 
     @model_validator(mode="after")
@@ -877,10 +958,11 @@ class RegulonadoConfig(BaseModel):
         data = self.model_dump(mode="json", exclude_none=True)
         if not data.get("inputs", {}).get("seqnado_projects"):
             data.get("inputs", {}).pop("seqnado_projects", None)
-        for section in ("train",):
-            if not data.get(section, {}).get("common"):
-                data.get(section, {}).pop("common", None)
-        for item in data.get("train", {}).get("phases", []) + data.get("train", {}).get("runs", []):
+        train = data.get("train", {})
+        if not train.get("common"):
+            train.pop("common", None)
+        phases = [phase for recipe in train.get("recipes", {}).values() for phase in recipe]
+        for item in phases + train.get("runs", []):
             if not item.get("settings"):
                 item.pop("settings", None)
         return data

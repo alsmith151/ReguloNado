@@ -10,7 +10,7 @@ rule scale_factors:
     one scale factor per track, keyed by ``track_name``.
 
     All methods first infer original library sizes with BamNado. ``tmm`` then
-    adds a dataset-derived trimmed-mean correction, scanning ``inputs.intervals``
+    adds a dataset-derived trimmed-mean correction, scanning ``targets.profile.intervals``
     directly (sharing the scan with interval-based QC checks via
     ``track_interval_means``); ``bamnado`` instead corrects using one of
     BamNado's own BAM-based methods (tmm, csaw-background, cpm,
@@ -23,7 +23,7 @@ rule scale_factors:
     input:
         table=str(TRACKS_STAGE_DIR / "discovered.parquet"),
         intervals=(
-            config["inputs"]["intervals"] if config["scaling"]["method"] == "tmm" else []
+            PROFILE["intervals"] if config["scaling"]["method"] == "tmm" else []
         ),
         interval_means=(
             str(TRACKS_STAGE_DIR / "interval_means.parquet")
@@ -33,9 +33,9 @@ rule scale_factors:
     params:
         method=config["scaling"]["method"],
         initial=str(TRACKS_STAGE_DIR / "initial_scale_factors.parquet"),
-        bin_size=config["dataset"]["bin_size"],
-        n_pred_bins=config["dataset"]["n_pred_bins"],
-        shift_max_bp=config["dataset"]["shift_max_bp"],
+        bin_size=PROFILE["bin_size"],
+        n_pred_bins=PROFILE["n_pred_bins"],
+        shift_max_bp=PROFILE["shift_max_bp"],
         bam_dir=config["inputs"].get("bam_dir", ""),
         bamnado_method=config["scaling"].get("bamnado_method", "csaw-background"),
         bamnado_exogenous_prefix=config["scaling"].get("bamnado_exogenous_prefix", ""),

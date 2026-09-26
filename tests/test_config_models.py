@@ -8,19 +8,17 @@ from typing import Any
 
 import pytest
 from regulonado.config.models import (
-    DatasetConfig,
+    BackboneConfig,
     InputsConfig,
-    RegionsConfig,
-    RegionsEmbeddingConfig,
-    RegionsInputsConfig,
-    RegionsTrainConfig,
-    RegionsTrainPhase,
-    RegionsTrainRun,
+    ProfileTargetConfig,
+    RegionCountsTargetConfig,
     RegulonadoConfig,
     SeqNadoProjectRef,
+    TargetsConfig,
     TrainConfig,
     TrainPhase,
     TrainRun,
+    TrunkCacheConfig,
 )
 
 SCHEMA = (
@@ -42,17 +40,31 @@ def _validate_against_schema(data: dict[str, Any]) -> None:
     snakemake_utils.validate(copy.deepcopy(data), str(SCHEMA))
 
 
+PROFILE = TargetsConfig(profile=ProfileTargetConfig(intervals="intervals.bed"))
+
+
+def _run(name: str = "run_a", *, seed: int = 0, pretrained: str = "model/a", **kwargs) -> TrainRun:
+    return TrainRun(
+        name=name,
+        seed=seed,
+        recipe=kwargs.pop("recipe", "finetune"),
+        backbone=BackboneConfig(type=kwargs.pop("type", "borzoi"), pretrained=pretrained),
+        **kwargs,
+    )
+
+
 def _train() -> TrainConfig:
     return TrainConfig(
-        phases=[TrainPhase(name="head", preset="head_only")],
-        runs=[TrainRun(name="run_a", seed=0, pretrained_model="model/a")],
+        recipes={"finetune": [TrainPhase(name="head", preset="head_only")]},
+        runs=[_run()],
     )
 
 
 def _config(**inputs: Any) -> RegulonadoConfig:
     return RegulonadoConfig(
         results_dir="results",
-        inputs=InputsConfig(intervals="intervals.bed", fasta="genome.fa", **inputs),
+        inputs=InputsConfig(fasta="genome.fa", **inputs),
+        targets=PROFILE,
         train=_train(),
     )
 
@@ -60,7 +72,8 @@ def _config(**inputs: Any) -> RegulonadoConfig:
 def test_parameter_sweep_does_not_require_training_matrix() -> None:
     config = RegulonadoConfig(
         results_dir="results",
-        inputs=InputsConfig(intervals="intervals.bed", fasta="genome.fa", bigwig_dir="bigwigs"),
+        targets=PROFILE,
+        inputs=InputsConfig(fasta="genome.fa", bigwig_dir="bigwigs"),
         parameter_sweep={
             "enabled": True,
             "sweep_config": "sweep.yaml",
@@ -113,8 +126,8 @@ def test_seqnado_projects_config_validates_against_the_schema():
 def test_full_config_with_every_optional_key_validates():
     config = RegulonadoConfig(
         results_dir="results",
+        targets=PROFILE,
         inputs=InputsConfig(
-            intervals="intervals.bed",
             fasta="genome.fa",
             bigwig_dir="bigwigs",
             bam_dir="bams",
@@ -128,15 +141,17 @@ def test_full_config_with_every_optional_key_validates():
         },
         train=TrainConfig(
             common={"trainer": {"max_epochs": 3}},
-            phases=[
-                TrainPhase(name="head", preset="head_only"),
-                TrainPhase(name="deep", preset="deep_finetune", settings={"seed": 1}),
-            ],
+            recipes={
+                "finetune": [
+                    TrainPhase(name="head", preset="head_only"),
+                    TrainPhase(name="deep", preset="deep_finetune", settings={"seed": 1}),
+                ]
+            },
             runs=[
-                TrainRun(
-                    name="run_a",
+                _run(
+                    "run_a",
                     seed=0,
-                    pretrained_model="model/a",
+                    pretrained="model/a",
                     settings={"trainer": {"learning_rate": 1e-4}},
                 )
             ],
@@ -160,7 +175,7 @@ def test_to_dict_omits_unset_optional_keys():
     for key in ("bamnado_method", "bamnado_exogenous_prefix", "seqnado_project"):
         assert key not in data["scaling"]
     assert "common" not in data["train"]
-    assert "settings" not in data["train"]["phases"][0]
+    assert "settings" not in data["train"]["recipes"]["finetune"][0]
     assert "settings" not in data["train"]["runs"][0]
 
     def _no_nulls(node: Any) -> None:
@@ -180,36 +195,52 @@ def test_to_dict_omits_unset_optional_keys():
 # ---------------------------------------------------------------------- #
 
 
-def test_inputs_needs_a_track_source():
-    with pytest.raises(ValueError, match="'bigwig_dir', 'track_sheet' or 'seqnado_projects'"):
-        InputsConfig(intervals="intervals.bed", fasta="genome.fa")
+def test_profile_tracks_need_a_bigwig_source():
+    with pytest.raises(ValueError, match="bigwig_dir, track_sheet or seqnado_projects"):
+        RegulonadoConfig(
+            results_dir="results",
+            inputs=InputsConfig(fasta="genome.fa", bam_dir="bams"),
+            targets=PROFILE,
+            train=_train(),
+        )
+
+
+def test_runs_need_their_target_configured():
+    with pytest.raises(ValueError, match=r"targets.profile is\s+not configured"):
+        RegulonadoConfig(
+            results_dir="results", inputs=InputsConfig(fasta="genome.fa"), train=_train()
+        )
 
 
 def test_shift_max_bp_must_be_a_whole_number_of_bins():
     with pytest.raises(ValueError, match="must be a multiple of"):
-        DatasetConfig(bin_size=32, shift_max_bp=48)
+        ProfileTargetConfig(intervals="i.bed", bin_size=32, shift_max_bp=48)
 
-    assert DatasetConfig(bin_size=32, shift_max_bp=64).shift_max_bp == 64
+    assert ProfileTargetConfig(intervals="i.bed", bin_size=32, shift_max_bp=64).shift_max_bp == 64
 
 
 def test_duplicate_phase_names_raise():
-    with pytest.raises(ValueError, match=r"train\.phases names must be unique.*head"):
+    with pytest.raises(
+        ValueError, match=r"train\.recipes\.finetune phase names must be unique.*head"
+    ):
         TrainConfig(
-            phases=[
-                TrainPhase(name="head", preset="head_only"),
-                TrainPhase(name="head", preset="deep_finetune"),
-            ],
-            runs=[TrainRun(name="run_a", seed=0, pretrained_model="model/a")],
+            recipes={
+                "finetune": [
+                    TrainPhase(name="head", preset="head_only"),
+                    TrainPhase(name="head", preset="deep_finetune"),
+                ]
+            },
+            runs=[_run("run_a", seed=0, pretrained="model/a")],
         )
 
 
 def test_duplicate_run_names_raise():
     with pytest.raises(ValueError, match=r"train\.runs names must be unique.*run_a"):
         TrainConfig(
-            phases=[TrainPhase(name="head", preset="head_only")],
+            recipes={"finetune": [TrainPhase(name="head", preset="head_only")]},
             runs=[
-                TrainRun(name="run_a", seed=0, pretrained_model="model/a"),
-                TrainRun(name="run_a", seed=1, pretrained_model="model/b"),
+                _run("run_a", seed=0, pretrained="model/a"),
+                _run("run_a", seed=1, pretrained="model/b"),
             ],
         )
 
@@ -218,15 +249,16 @@ def test_training_settings_require_nested_canonical_syntax():
     with pytest.raises(ValueError, match="obsolete dotted YAML syntax"):
         TrainConfig(
             common={"trainer.max_epochs": 2},
-            phases=[TrainPhase(name="head", preset="head_only")],
-            runs=[TrainRun(name="run_a", seed=0, pretrained_model="model/a")],
+            recipes={"finetune": [TrainPhase(name="head", preset="head_only")]},
+            runs=[_run("run_a", seed=0, pretrained="model/a")],
         )
 
 
 def test_anchor_scaling_checks_every_resolved_phase_and_run() -> None:
     base = {
         "results_dir": "results",
-        "inputs": {"intervals": "intervals.bed", "fasta": "genome.fa", "bigwig_dir": "bw"},
+        "inputs": {"fasta": "genome.fa", "bigwig_dir": "bw"},
+        "targets": {"profile": {"intervals": "intervals.bed"}},
         "scaling": {
             "method": "anchor",
             "anchor_regions": "anchors.bed",
@@ -234,8 +266,15 @@ def test_anchor_scaling_checks_every_resolved_phase_and_run() -> None:
         },
         "train": {
             "common": {"data": {"apply_squash": False}},
-            "phases": [{"name": "head", "preset": "head_only"}],
-            "runs": [{"name": "run_a", "seed": 0, "pretrained_model": "model/a"}],
+            "recipes": {"finetune": [{"name": "head", "preset": "head_only"}]},
+            "runs": [
+                {
+                    "name": "run_a",
+                    "seed": 0,
+                    "recipe": "finetune",
+                    "backbone": {"pretrained": "model/a"},
+                }
+            ],
         },
     }
     RegulonadoConfig.model_validate(base)
@@ -259,9 +298,8 @@ def test_seqnado_scaling_across_several_projects_is_rejected():
     with pytest.raises(ValueError, match="only comparable within that project"):
         RegulonadoConfig(
             results_dir="results",
-            inputs=InputsConfig(
-                intervals="intervals.bed", fasta="genome.fa", seqnado_projects=projects
-            ),
+            targets=PROFILE,
+            inputs=InputsConfig(fasta="genome.fa", seqnado_projects=projects),
             scaling={"method": "seqnado"},
             train=_train(),
         )
@@ -271,8 +309,8 @@ def test_seqnado_scaling_with_a_named_project_is_still_rejected():
     with pytest.raises(ValueError, match="only comparable within that project"):
         RegulonadoConfig(
             results_dir="results",
+            targets=PROFILE,
             inputs=InputsConfig(
-                intervals="intervals.bed",
                 fasta="genome.fa",
                 seqnado_projects=[
                     SeqNadoProjectRef(name="expA", path="expA/seqnado_output"),
@@ -287,8 +325,8 @@ def test_seqnado_scaling_with_a_named_project_is_still_rejected():
 def test_seqnado_scaling_with_exactly_one_project_is_accepted():
     config = RegulonadoConfig(
         results_dir="results",
+        targets=PROFILE,
         inputs=InputsConfig(
-            intervals="intervals.bed",
             fasta="genome.fa",
             seqnado_projects=[SeqNadoProjectRef(name="expA", path="expA/seqnado_output")],
         ),
@@ -304,7 +342,8 @@ def test_bamnado_scaling_requires_a_bam_dir():
     with pytest.raises(ValueError, match="inputs.bam_dir is required"):
         RegulonadoConfig(
             results_dir="results",
-            inputs=InputsConfig(intervals="intervals.bed", fasta="genome.fa", bigwig_dir="bigwigs"),
+            targets=PROFILE,
+            inputs=InputsConfig(fasta="genome.fa", bigwig_dir="bigwigs"),
             scaling={"method": "bamnado"},
             train=_train(),
         )
@@ -313,8 +352,8 @@ def test_bamnado_scaling_requires_a_bam_dir():
 def test_bamnado_scaling_with_a_bam_dir_is_accepted():
     config = RegulonadoConfig(
         results_dir="results",
+        targets=PROFILE,
         inputs=InputsConfig(
-            intervals="intervals.bed",
             fasta="genome.fa",
             bigwig_dir="bigwigs",
             bam_dir="bams",
@@ -327,101 +366,149 @@ def test_bamnado_scaling_with_a_bam_dir_is_accepted():
 
 
 # ---------------------------------------------------------------------- #
-#  RegionsConfig                                                           #
+#  Runs: trunk, target, recipe                                             #
 # ---------------------------------------------------------------------- #
 
+COUNTS = RegionCountsTargetConfig(
+    regions="regions.parquet", anchor_regions="anchor.bed", background_regions="bg.bed"
+)
 
-def _regions_inputs() -> RegionsInputsConfig:
-    return RegionsInputsConfig(
-        regions="regions.parquet",
-        anchor_regions="anchor.bed",
-        background_regions="background.bed",
+
+def _cached(name: str = "counts_run", **kwargs) -> TrainRun:
+    return _run(
+        name,
+        recipe=kwargs.pop("recipe", "curriculum"),
+        type=kwargs.pop("type", "alphagenome"),
+        pretrained=kwargs.pop("pretrained", "all_folds"),
+        trunk="cached",
+        target="region_counts",
+        **kwargs,
     )
 
 
-def test_regions_config_validates_against_the_schema():
-    config = RegulonadoConfig(
+CURRICULUM = {"curriculum": [TrainPhase(name="pretrain", preset="pretrain")]}
+
+
+def _counts_config(*runs: TrainRun, **inputs: Any) -> RegulonadoConfig:
+    return RegulonadoConfig(
         results_dir="results",
-        inputs=InputsConfig(intervals="intervals.bed", fasta="genome.fa", bigwig_dir="bigwigs"),
-        regions=RegionsConfig(
-            inputs=_regions_inputs(),
-            embeddings=[
-                RegionsEmbeddingConfig(
-                    name="alphagenome",
-                    backbone="alphagenome",
-                    pretrained="all_folds",
-                    context=1_048_576,
-                    stride=524_288,
-                )
-            ],
-            train=RegionsTrainConfig(
-                phases=[
-                    RegionsTrainPhase(name="pretrain", preset="pretrain"),
-                    RegionsTrainPhase(name="specific", preset="specific"),
-                    RegionsTrainPhase(name="target", preset="target"),
-                ],
-                runs=[RegionsTrainRun(name="hl60", seed=0, embedding="alphagenome")],
-            ),
-        ),
+        inputs=InputsConfig(fasta="genome.fa", **(inputs or {"bam_dir": "bams"})),
+        targets=TargetsConfig(region_counts=COUNTS),
+        train=TrainConfig(recipes=CURRICULUM, runs=list(runs or [_cached()])),
     )
 
-    assert config.regions is not None
-    _validate_against_schema(config.model_dump(mode="json", exclude_none=True))
 
-
-def test_regions_config_is_optional():
-    config = RegulonadoConfig(
-        results_dir="results",
-        inputs=InputsConfig(intervals="intervals.bed", fasta="genome.fa", bigwig_dir="bigwigs"),
-    )
-    assert config.regions is None
+def test_region_count_runs_need_only_a_fasta_and_bams():
+    config = _counts_config()
+    assert config.track_format() == "bam"
     _validate_against_schema(config.to_dict())
 
 
-def test_regions_embedding_names_must_be_unique():
-    with pytest.raises(ValueError, match="regions.embeddings names must be unique"):
-        RegionsConfig(
-            inputs=_regions_inputs(),
-            embeddings=[
-                RegionsEmbeddingConfig(name="dup", backbone="borzoi"),
-                RegionsEmbeddingConfig(name="dup", backbone="enformer"),
-            ],
-        )
+def test_bam_tracks_need_a_bam_source():
+    with pytest.raises(ValueError, match="bam_dir, track_sheet or seqnado_projects"):
+        _counts_config(bigwig_dir="bigwigs")
 
 
-def test_regions_train_run_must_name_a_known_embedding():
-    with pytest.raises(ValueError, match="not in regions.embeddings"):
-        RegionsConfig(
-            inputs=_regions_inputs(),
-            embeddings=[RegionsEmbeddingConfig(name="alphagenome", backbone="alphagenome")],
-            train=RegionsTrainConfig(
-                phases=[RegionsTrainPhase(name="pretrain", preset="pretrain")],
-                runs=[RegionsTrainRun(name="hl60", seed=0, embedding="does_not_exist")],
-            ),
-        )
-
-
-def test_regions_embedding_context_stride_require_alphagenome():
-    with pytest.raises(ValueError, match="only apply to backbone 'alphagenome'"):
-        RegionsEmbeddingConfig(name="borzoi", backbone="borzoi", context=524_288)
-
-
-def test_regions_train_run_target_group_is_optional():
-    run = RegionsTrainRun(name="hl60", seed=0, embedding="alphagenome")
-    assert run.target_group is None
-
-    run_with_group = RegionsTrainRun(
-        name="hl60", seed=0, embedding="alphagenome", target_group="HL-60"
+def test_profile_and_region_count_runs_share_bigwig_tracks():
+    config = RegulonadoConfig(
+        results_dir="results",
+        inputs=InputsConfig(fasta="genome.fa", track_sheet="tracks.csv"),
+        targets=TargetsConfig(profile=PROFILE.profile, region_counts=COUNTS),
+        train=TrainConfig(
+            recipes={"finetune": [TrainPhase(name="head", preset="head_only")], **CURRICULUM},
+            runs=[_run(), _cached()],
+        ),
     )
-    assert run_with_group.target_group == "HL-60"
+    assert config.track_format() == "bigwig"
+    _validate_against_schema(config.to_dict())
 
 
-def test_regions_train_duplicate_phase_names_raise():
-    with pytest.raises(ValueError, match="regions.train.phases names must be unique"):
-        RegionsTrainConfig(
-            phases=[
-                RegionsTrainPhase(name="pretrain", preset="pretrain"),
-                RegionsTrainPhase(name="pretrain", preset="specific"),
-            ],
-            runs=[RegionsTrainRun(name="hl60", seed=0, embedding="alphagenome")],
+def test_recipe_presets_must_suit_the_run_trunk():
+    with pytest.raises(ValueError, match="not trunk-cached presets"):
+        TrainConfig(
+            recipes={"finetune": [TrainPhase(name="head", preset="head_only")]},
+            runs=[_cached(recipe="finetune")],
         )
+    with pytest.raises(ValueError, match="not trunk-live presets"):
+        TrainConfig(recipes=CURRICULUM, runs=[_run(recipe="curriculum")])
+
+
+def test_runs_must_name_a_known_recipe():
+    with pytest.raises(ValueError, match="names recipe 'missing'"):
+        TrainConfig(recipes=CURRICULUM, runs=[_cached(recipe="missing")])
+
+
+def test_unimplemented_trunk_target_pairs_are_rejected():
+    with pytest.raises(ValueError, match="trunk 'cached' with target 'profile' is not implemented"):
+        _run(trunk="cached", target="profile")
+    with pytest.raises(ValueError, match="trunk 'live' with target 'region_counts'"):
+        _run(target="region_counts")
+
+
+def test_cache_settings_apply_to_cached_alphagenome_runs_only():
+    with pytest.raises(ValueError, match="'cache' only applies to trunk: cached"):
+        _run(cache=TrunkCacheConfig(pool_to=128))
+    with pytest.raises(ValueError, match="only apply to backbone 'alphagenome'"):
+        _cached(type="borzoi", pretrained="model/a", cache=TrunkCacheConfig(context=524_288))
+    with pytest.raises(ValueError, match="target_group applies to trunk: cached"):
+        _run(target_group="HL-60")
+
+
+def test_runs_with_the_same_trunk_setup_share_a_cache():
+    default = _cached("a").cache_name()
+    assert default == _cached("b", cache=TrunkCacheConfig(context=1_048_576)).cache_name()
+    assert default == "alphagenome-all_folds-ctx1048576-stride524288"
+    pooled = _cached(
+        "c",
+        type="borzoi",
+        pretrained="johahi/flashzoi-replicate-0",
+        cache=TrunkCacheConfig(pool_to=128, rc=True),
+    )
+    assert pooled.cache_name() == "borzoi-johahi_flashzoi-replicate-0-pool128-rc"
+
+
+def test_region_count_anchors_default_to_the_anchor_scaling_windows():
+    config = RegulonadoConfig(
+        results_dir="results",
+        inputs=InputsConfig(fasta="genome.fa", track_sheet="tracks.csv"),
+        targets=TargetsConfig(
+            profile=PROFILE.profile, region_counts=RegionCountsTargetConfig(regions="r.parquet")
+        ),
+        scaling={"method": "anchor", "anchor_regions": "a.bed", "background_regions": "b.bed"},
+    )
+    assert config.targets.region_counts is not None
+    with pytest.raises(ValueError, match="targets.region_counts.anchor_regions is required"):
+        RegulonadoConfig(
+            results_dir="results",
+            inputs=InputsConfig(fasta="genome.fa", bam_dir="bams"),
+            targets=TargetsConfig(region_counts=RegionCountsTargetConfig(regions="r.parquet")),
+        )
+
+
+def test_downstream_stages_need_profile_runs():
+    config = _counts_config().model_dump(mode="json", exclude_none=True)
+    config["prediction"] = {"run": "counts_run", "whole_genome": True}
+    with pytest.raises(ValueError, match="don't predict profiles"):
+        RegulonadoConfig.model_validate(config)
+
+
+def test_bigwig_stages_need_a_profile_target():
+    config = _counts_config().model_dump(mode="json", exclude_none=True)
+    config["qc"] = {"checks": ["sparsity"]}
+    with pytest.raises(ValueError, match="qc.checks scan bigWig tracks"):
+        RegulonadoConfig.model_validate(config)
+
+
+def test_final_phase_follows_each_runs_recipe():
+    train = TrainConfig(
+        recipes={
+            "finetune": [
+                TrainPhase(name="head", preset="head_only"),
+                TrainPhase(name="deep", preset="deep_finetune"),
+            ],
+            **CURRICULUM,
+        },
+        runs=[_run(), _cached()],
+    )
+    assert train.final_phase("run_a") == "deep"
+    assert train.final_phase("counts_run") == "pretrain"

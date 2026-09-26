@@ -1,4 +1,4 @@
-"""Dataset construction: FASTA + tracks.parquet -> Parquet dataset."""
+"""The profile dataset: FASTA + bigWig tracks.parquet -> Parquet shards (``targets.profile``)."""
 
 from regulonado.dataset.build import DEFAULT_SPLITS
 
@@ -19,27 +19,27 @@ rule build_dataset:
     in. `dataset/README.md` is written last and serves as the completion sentinel.
     """
     input:
-        intervals=config["inputs"]["intervals"],
+        intervals=PROFILE["intervals"],
         fasta=config["inputs"]["fasta"],
         table=str(TRACKS_DIR / "tracks.parquet"),
     params:
         out_dir=lambda w, output: str(Path(output.readme).parent),
-        context_length=config["dataset"]["context_length"],
-        bin_size=config["dataset"]["bin_size"],
-        n_pred_bins=config["dataset"]["n_pred_bins"],
-        shift_max_bp=config["dataset"]["shift_max_bp"],
-        extract_threads=config["dataset"]["extract_threads"],
-        write_threads=config["dataset"]["write_threads"],
-        zstd_level=config["dataset"]["zstd_level"],
-        rows_per_row_group=config["dataset"]["rows_per_row_group"],
-        bin_denominator=config["dataset"]["bin_denominator"],
-        missing_bins=config["dataset"]["missing_bins"],
-        stage=lambda w: "--stage" if config["dataset"]["stage_to_scratch"] else "--no-stage",
+        context_length=PROFILE["context_length"],
+        bin_size=PROFILE["bin_size"],
+        n_pred_bins=PROFILE["n_pred_bins"],
+        shift_max_bp=PROFILE["shift_max_bp"],
+        extract_threads=PROFILE["extract_threads"],
+        write_threads=PROFILE["write_threads"],
+        zstd_level=PROFILE["zstd_level"],
+        rows_per_row_group=PROFILE["rows_per_row_group"],
+        bin_denominator=PROFILE["bin_denominator"],
+        missing_bins=PROFILE["missing_bins"],
+        stage=lambda w: "--stage" if PROFILE["stage_to_scratch"] else "--no-stage",
     output:
         readme=str(DATASET_DIR / "README.md"),
         table=str(DATASET_DIR / "tracks.parquet"),
         data=directory(str(DATASET_DIR / "data")),
-    threads: config["dataset"]["extract_threads"]
+    threads: PROFILE["extract_threads"]
     log:
         str(RESULTS / "logs" / "build_dataset.log"),
     shell:

@@ -45,7 +45,7 @@ if DESIGN:
         if explicit:
             return explicit
         holdout = DESIGN.get("holdout_run")
-        return [name for name in RUN_NAMES if name != holdout]
+        return [name for name in PROFILE_RUN_NAMES if name != holdout]
 
     def _design_candidates_path():
         """The candidate BED: 'candidates' verbatim, or chained from an attribution target's
@@ -91,17 +91,17 @@ if DESIGN:
         return sorted(path.stem for path in shard_dir.glob("*.bed"))
 
     def _design_run_dirs():
-        return [str(phase_run_dir(run, PHASE_NAMES[-1])) for run in DESIGN_RUN_NAMES]
+        return [str(phase_run_dir(run, final_phase(run))) for run in DESIGN_RUN_NAMES]
 
     def _design_holdout_dir():
         holdout = DESIGN.get("holdout_run")
-        return str(phase_run_dir(holdout, PHASE_NAMES[-1])) if holdout else ""
+        return str(phase_run_dir(holdout, final_phase(holdout))) if holdout else ""
 
     def _design_checkpoint_state_inputs(wildcards):
         if DESIGN_CHECKPOINT_DIRS:
             return list(DESIGN_CHECKPOINT_DIRS)
         return [
-            str(phase_run_dir(run, PHASE_NAMES[-1]) / "trainer_state.json")
+            str(phase_run_dir(run, final_phase(run)) / "trainer_state.json")
             for run in DESIGN_RUN_NAMES
         ]
 
@@ -111,7 +111,7 @@ if DESIGN:
         holdout = DESIGN.get("holdout_run")
         if not holdout:
             return []
-        return str(phase_run_dir(holdout, PHASE_NAMES[-1]) / "trainer_state.json")
+        return str(phase_run_dir(holdout, final_phase(holdout)) / "trainer_state.json")
 
     # Search-tuning fields of DesignConfig; everything else in DESIGN (candidates, shards,
     # holdout_run, design_runs, checkpoint_dirs, targets, ...) is structural and handled via
@@ -204,7 +204,7 @@ if DESIGN:
         input:
             shard=lambda w: str(Path(checkpoints.shard_candidates.get().output[0])
                                  / f"{w.shard}.bed"),
-            intervals=config["inputs"]["intervals"],
+            intervals=PROFILE["intervals"],
             checkpoints=_design_checkpoint_state_inputs,
             holdout=_design_holdout_state_input,
         params:

@@ -41,7 +41,7 @@ def _attr_merge_tsvs(paths, out_path):
 
 if ATTRIBUTION:
 
-    ATTRIBUTION_RUN_NAMES = ATTRIBUTION.get("runs") or list(RUN_NAMES)
+    ATTRIBUTION_RUN_NAMES = ATTRIBUTION.get("runs") or list(PROFILE_RUN_NAMES)
     ATTRIBUTION_TARGETS = ATTRIBUTION["targets"]
     ATTRIBUTION_TARGET_NAMES = [target["name"] for target in ATTRIBUTION_TARGETS]
     ATTRIBUTION_TARGET_BY_NAME = {target["name"]: target for target in ATTRIBUTION_TARGETS}
@@ -65,13 +65,13 @@ if ATTRIBUTION:
     ATTRIBUTION_SHARDS = [str(i) for i in range(ATTRIBUTION_SHARD_COUNT)]
 
     def _attr_run_dirs():
-        return [str(phase_run_dir(run, PHASE_NAMES[-1])) for run in ATTRIBUTION_RUN_NAMES]
+        return [str(phase_run_dir(run, final_phase(run))) for run in ATTRIBUTION_RUN_NAMES]
 
     def _attr_checkpoint_state_inputs(wildcards):
         if ATTRIBUTION_CHECKPOINT_DIRS:
             return list(ATTRIBUTION_CHECKPOINT_DIRS)
         return [
-            str(phase_run_dir(run, PHASE_NAMES[-1]) / "trainer_state.json")
+            str(phase_run_dir(run, final_phase(run)) / "trainer_state.json")
             for run in ATTRIBUTION_RUN_NAMES
         ]
 
@@ -141,7 +141,7 @@ if ATTRIBUTION:
     rule attribute_shard:
         input:
             shard=str(ATTRIBUTION_DIR / "shards" / "{shard}.bed"),
-            intervals=config["inputs"]["intervals"],
+            intervals=PROFILE["intervals"],
             checkpoints=_attr_checkpoint_state_inputs,
         params:
             track_selector_args=lambda w: _attr_track_selector_args(

@@ -216,12 +216,13 @@ def test_selected_contrast_config_resolves_strict_production_settings() -> None:
     path = Path(__file__).parents[1] / "examples" / "contrast-correlation-deep-unfreeze.yaml"
     raw = yaml.safe_load(path.read_text())
     RegulonadoConfig.model_validate(raw)
-    phase = raw["train"]["phases"][0]
     run = raw["train"]["runs"][0]
+    phase = raw["train"]["recipes"][run["recipe"]][0]
     settings = merge_training_settings(
         [raw["train"]["common"], phase["settings"], run["settings"]],
         seed=run["seed"],
-        pretrained_model=run["pretrained_model"],
+        pretrained_model=run["backbone"]["pretrained"],
+        backbone_type=run["backbone"]["type"],
     )
     overrides = hydra_override_items(settings)
     first_dotted = next(index for index, item in enumerate(overrides) if item.startswith("++"))
@@ -253,12 +254,13 @@ def test_selected_lora_locon_config_resolves_adapter_settings() -> None:
     path = Path(__file__).parents[1] / "examples" / "lora-locon-finetune.yaml"
     raw = yaml.safe_load(path.read_text())
     RegulonadoConfig.model_validate(raw)
-    phase = raw["train"]["phases"][0]
     run = raw["train"]["runs"][0]
+    phase = raw["train"]["recipes"][run["recipe"]][0]
     settings = merge_training_settings(
         [raw["train"]["common"], phase["settings"], run.get("settings", {})],
         seed=run["seed"],
-        pretrained_model=run["pretrained_model"],
+        pretrained_model=run["backbone"]["pretrained"],
+        backbone_type=run["backbone"]["type"],
     )
     overrides = hydra_override_items(settings)
     first_dotted = next(index for index, item in enumerate(overrides) if item.startswith("++"))

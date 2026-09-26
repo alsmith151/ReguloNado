@@ -1,6 +1,8 @@
-"""Track discovery, QC, and assembly into ``tracks.parquet`` — runs before the Arrow build.
+"""Track discovery, QC, and assembly into ``tracks.parquet`` — runs before any dataset build.
 
-Target DAG::
+Tracks are discovered from bigWigs when a profile target is configured, otherwise from
+BAMs (``TRACK_FORMAT``); scaling, the interval scan and QC read bigWigs, so only the
+bigWig table goes through them. Target DAG (bigWig)::
 
     track_discovery -> discovered.parquet
                              |
@@ -18,8 +20,9 @@ TRACKS_DIR = RESULTS / "tracks"
 TRACKS_STAGE_DIR = TRACKS_DIR / "_stages"
 QC = config.get("qc") or {"checks": []}
 QC_CHECKS = QC.get("checks") or []
-_NEEDS_INTERVAL_MEANS = bool({"interval_signal", "replicate_concordance"} & set(QC_CHECKS)) or (
-    config["scaling"]["method"] == "tmm"
+_NEEDS_INTERVAL_MEANS = TRACK_FORMAT == "bigwig" and (
+    bool({"interval_signal", "replicate_concordance"} & set(QC_CHECKS))
+    or config["scaling"]["method"] == "tmm"
 )
 
 
@@ -27,17 +30,21 @@ def track_source(input):
     """CLI flags naming where tracks and their annotation come from.
 
     Three sources, in precedence order: an explicit track sheet, one or more
-    SeqNado projects, or a plain directory of BigWigs. A sheet and projects can
-    be combined — rows that give only a `sample_id` are resolved against the
-    named project.
+    SeqNado projects, or a plain directory of BigWigs (BAMs, for a BAM table). A
+    sheet and projects can be combined — rows that give only a `sample_id` are
+    resolved against the named project.
     """
-    parts = []
+    parts = ["--format", TRACK_FORMAT]
     if input.track_sheet:
         parts += ["--track-sheet", shlex.quote(str(input.track_sheet[0]))]
     for project in SEQNADO_PROJECTS:
         parts += ["--seqnado-project", shlex.quote(f"{project['name']}={project['path']}")]
-    if not parts:
+    if len(parts) == 2 and TRACK_FORMAT == "bigwig":
         parts += ["--bigwig-dir", shlex.quote(config["inputs"]["bigwig_dir"])]
+    if config["inputs"].get("bam_dir"):
+        # BAM tables list or resolve their BAMs here; bigWig tables record each track's
+        # BAM, so region-count runs count the same tracks.
+        parts += ["--bam-dir", shlex.quote(config["inputs"]["bam_dir"])]
     return " ".join(parts)
 
 
@@ -49,8 +56,8 @@ rule track_discovery:
         ),
     params:
         track_source=lambda w, input: track_source(input),
-        drop_missing=lambda w: "--drop-missing" if config["dataset"]["drop_missing"] else "",
-        dedupe=config["dataset"]["dedupe_tracks"],
+        drop_missing=lambda w: "--drop-missing" if config["inputs"]["drop_missing"] else "",
+        dedupe=config["inputs"]["dedupe_tracks"],
     output:
         table=str(TRACKS_STAGE_DIR / "discovered.parquet"),
     log:
@@ -71,11 +78,11 @@ if _NEEDS_INTERVAL_MEANS:
         """One shared BigWig scan for 'tmm' scaling and interval-based QC checks."""
         input:
             table=str(TRACKS_STAGE_DIR / "discovered.parquet"),
-            intervals=config["inputs"]["intervals"],
+            intervals=PROFILE["intervals"],
         params:
-            bin_size=config["dataset"]["bin_size"],
-            n_pred_bins=config["dataset"]["n_pred_bins"],
-            shift_max_bp=config["dataset"]["shift_max_bp"],
+            bin_size=PROFILE["bin_size"],
+            n_pred_bins=PROFILE["n_pred_bins"],
+            shift_max_bp=PROFILE["shift_max_bp"],
             sample_n=QC.get("sample_windows") or 0,
             sample_arg=(
                 f"--sample-n {QC['sample_windows']}" if QC.get("sample_windows") else ""
@@ -103,7 +110,7 @@ rule track_qc:
     """Opt-in signal-quality checks; computes a verdict but never drops tracks itself."""
     input:
         table=str(TRACKS_STAGE_DIR / "discovered.parquet"),
-        intervals=config["inputs"]["intervals"] if _NEEDS_INTERVAL_MEANS else [],
+        intervals=PROFILE["intervals"] if _NEEDS_INTERVAL_MEANS else [],
         interval_means=(
             str(TRACKS_STAGE_DIR / "interval_means.parquet") if _NEEDS_INTERVAL_MEANS else []
         ),
@@ -148,7 +155,9 @@ rule track_assemble:
     """Join discovery + scaling + QC into tracks.parquet, the one file everything else reads."""
     input:
         discovered=str(TRACKS_STAGE_DIR / "discovered.parquet"),
-        scale_factors=str(TRACKS_STAGE_DIR / "scale_factors.parquet"),
+        scale_factors=(
+            str(TRACKS_STAGE_DIR / "scale_factors.parquet") if TRACK_FORMAT == "bigwig" else []
+        ),
         qc_report=str(TRACKS_STAGE_DIR / "qc_report.parquet") if QC_CHECKS else [],
         annotations=(
             [config["inputs"]["track_annotations"]]
@@ -156,6 +165,9 @@ rule track_assemble:
             else []
         ),
     params:
+        scale_factors_arg=lambda w, input: (
+            f"--scale-factors {shlex.quote(str(input.scale_factors))}" if input.scale_factors else ""
+        ),
         qc_report_arg=(
             f"--qc-report {TRACKS_STAGE_DIR / 'qc_report.parquet'}" if QC_CHECKS else ""
         ),
@@ -177,7 +189,7 @@ rule track_assemble:
         r"""
         regulonado tracks assemble {input.discovered:q} \
             --output {output.table:q} \
-            --scale-factors {input.scale_factors:q} \
+            {params.scale_factors_arg} \
             {params.qc_report_arg} \
             {params.annotations_arg} \
             {params.drop_degenerate} \

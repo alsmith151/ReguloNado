@@ -15,12 +15,14 @@ from typing import Any
 from regulonado.config.genomes import GenomeEntry, load_genome_registry
 from regulonado.config.models import (
     BAMNADO_METHODS,
-    PHASE_PRESETS,
-    DatasetConfig,
+    LIVE_PRESETS,
+    BackboneConfig,
     InputsConfig,
+    ProfileTargetConfig,
     RegulonadoConfig,
     ScalingConfig,
     SeqNadoProjectRef,
+    TargetsConfig,
     TrainConfig,
     TrainPhase,
     TrainRun,
@@ -30,6 +32,9 @@ from regulonado.config.prompts import ask, ask_int
 logger = logging.getLogger(__name__)
 
 DEFAULT_PRETRAINED = "johahi/flashzoi-replicate-0"
+# The generator writes one fine-tuning recipe; its default phases leave LoRA opt-in.
+DEFAULT_RECIPE = "finetune"
+DEFAULT_PHASES = ("head_only", "unfreeze_output", "deep_finetune", "peak_finetune")
 
 
 def _project_defaults(paths: list[str], interactive: bool) -> list[SeqNadoProjectRef]:
@@ -142,7 +147,7 @@ def build_config(
     else:
         defaults = dict(base)
     inputs_defaults: dict[str, Any] = defaults.get("inputs", {})
-    dataset_defaults: dict[str, Any] = defaults.get("dataset", {})
+    dataset_defaults: dict[str, Any] = (defaults.get("targets") or {}).get("profile") or {}
     scaling_defaults: dict[str, Any] = defaults.get("scaling", {})
     train_defaults: dict[str, Any] = defaults.get("train", {})
 
@@ -189,7 +194,7 @@ def build_config(
     )
     intervals = ask(
         "Intervals BED (column 4 is the fold label)?",
-        inputs_defaults.get("intervals"),
+        dataset_defaults.get("intervals"),
         is_path=bool(interactive),
         interactive=interactive,
     )
@@ -208,7 +213,7 @@ def build_config(
     # string "None" into the config would only fail much further downstream.
     unanswered = [
         label
-        for label, value in (("inputs.fasta", fasta), ("inputs.intervals", intervals))
+        for label, value in (("inputs.fasta", fasta), ("targets.profile.intervals", intervals))
         if not value
     ]
     if unanswered:
@@ -283,18 +288,24 @@ def build_config(
         scaling.seqnado_spikein_method = str(spikein) if spikein else None
 
     inputs = InputsConfig(
-        intervals=str(intervals),
         fasta=str(fasta),
         bigwig_dir=str(bigwig_dir) if bigwig_dir else None,
         bam_dir=str(bam_dir) if bam_dir else None,
         track_sheet=str(track_sheet) if track_sheet else None,
         seqnado_projects=projects,
+        drop_missing=inputs_defaults.get("drop_missing", True),
+        # Aggregating projects frequently duplicates shared inputs/controls,
+        # so content dedupe is the sensible default there.
+        dedupe_tracks=inputs_defaults.get(
+            "dedupe_tracks", "content" if len(projects) > 1 else "none"
+        ),
     )
 
-    # --- dataset -----------------------------------------------------------
-    dataset = DatasetConfig(
+    # --- profile target ----------------------------------------------------
+    profile = ProfileTargetConfig(
         **{
             **dataset_defaults,
+            "intervals": str(intervals),
             "context_length": ask_int(
                 "Input context length (bp)?",
                 dataset_defaults.get("context_length", 524_288),
@@ -328,11 +339,6 @@ def build_config(
             )
             if interactive
             else dataset_defaults.get("stage_to_scratch", True),
-            # Aggregating projects frequently duplicates shared inputs/controls,
-            # so content dedupe is the sensible default there.
-            "dedupe_tracks": dataset_defaults.get(
-                "dedupe_tracks", "content" if len(projects) > 1 else "none"
-            ),
         }
     )
 
@@ -343,15 +349,18 @@ def build_config(
         interactive=interactive,
     )
 
-    existing_phases = train_defaults.get("phases") or []
+    existing_recipes = train_defaults.get("recipes") or {}
+    existing_phases = existing_recipes.get(DEFAULT_RECIPE) or next(
+        iter(existing_recipes.values()), []
+    )
     phase_default = (
-        [phase["preset"] for phase in existing_phases] if existing_phases else list(PHASE_PRESETS)
+        [phase["preset"] for phase in existing_phases] if existing_phases else list(DEFAULT_PHASES)
     )
     selected = (
         ask(
             "Training phases, in order?",
             ",".join(phase_default),
-            choices=list(PHASE_PRESETS),
+            choices=list(LIVE_PRESETS),
             multi_select=True,
             interactive=interactive,
         )
@@ -371,27 +380,36 @@ def build_config(
             run_name = ask("Run name?", previous.get("name", f"run_{index}"))
             seed = ask_int("Random seed?", previous.get("seed", index))
             pretrained = ask(
-                "Pretrained model?", previous.get("pretrained_model", DEFAULT_PRETRAINED)
+                "Pretrained model?",
+                (previous.get("backbone") or {}).get("pretrained", DEFAULT_PRETRAINED),
             )
-            runs.append(
-                TrainRun(name=str(run_name), seed=int(seed), pretrained_model=str(pretrained))
-            )
+            runs.append(_finetune_run(str(run_name), int(seed), str(pretrained)))
     elif existing_runs:
-        runs = [TrainRun.model_validate(run) for run in existing_runs]
+        runs = [TrainRun.model_validate({**run, "recipe": DEFAULT_RECIPE}) for run in existing_runs]
     else:
-        runs = [TrainRun(name="run_0", seed=0, pretrained_model=DEFAULT_PRETRAINED)]
+        runs = [_finetune_run("run_0", 0, DEFAULT_PRETRAINED)]
 
     train = TrainConfig(
         nproc_per_node=int(nproc),
         common=train_defaults.get("common", {}),
-        phases=phases,
+        recipes={DEFAULT_RECIPE: phases},
         runs=runs,
     )
 
     return RegulonadoConfig(
         results_dir=str(results_dir),
         inputs=inputs,
-        dataset=dataset,
+        targets=TargetsConfig(profile=profile),
         scaling=scaling,
         train=train,
+    )
+
+
+def _finetune_run(name: str, seed: int, pretrained: str) -> TrainRun:
+    """A live-trunk profile run on a Borzoi-family checkpoint, following the default recipe."""
+    return TrainRun(
+        name=name,
+        seed=seed,
+        recipe=DEFAULT_RECIPE,
+        backbone=BackboneConfig(type="borzoi", pretrained=pretrained),
     )

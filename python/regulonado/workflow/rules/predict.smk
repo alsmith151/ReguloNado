@@ -30,14 +30,14 @@ if PREDICTION:
     rule predict_bigwigs:
         input:
             checkpoint_state=str(
-                phase_run_dir(PREDICTION_RUN, PHASE_NAMES[-1]) / "trainer_state.json"
+                phase_run_dir(PREDICTION_RUN, final_phase(PREDICTION_RUN)) / "trainer_state.json"
             ),
             dataset=str(training_dataset_dir() / "tracks.parquet"),
             fasta=config["inputs"]["fasta"],
         output:
             complete=str(PREDICTION_DIR / ".complete"),
         params:
-            checkpoint_dir=str(phase_run_dir(PREDICTION_RUN, PHASE_NAMES[-1])),
+            checkpoint_dir=str(phase_run_dir(PREDICTION_RUN, final_phase(PREDICTION_RUN))),
             output_dir=str(PREDICTION_DIR),
             resolver=str(Path(workflow.basedir) / "scripts" / "resolve_checkpoint.py"),
             extent_args=_prediction_extent_args(),

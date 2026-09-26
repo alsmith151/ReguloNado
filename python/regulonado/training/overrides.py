@@ -29,13 +29,20 @@ def merge_training_settings(
     *,
     seed: int | None = None,
     pretrained_model: str | None = None,
+    backbone_type: str | None = None,
 ) -> dict[str, Any]:
-    """Merge common/phase/run settings using the workflow's declared precedence."""
+    """Merge common/phase/run settings using the workflow's declared precedence.
+
+    ``seed``, ``pretrained_model`` and ``backbone_type`` come from the run itself and win
+    over any layer; ``backbone_type`` selects the ``backbone`` config group.
+    """
     merged: dict[str, Any] = {}
     for layer in layers:
         merged.update(flatten_settings(layer))
     if seed is not None:
         merged["seed"] = seed
+    if backbone_type is not None:
+        merged["backbone"] = backbone_type
     if pretrained_model is not None:
         merged["backbone.pretrained_name"] = pretrained_model
     return merged
