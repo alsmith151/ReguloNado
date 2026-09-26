@@ -1,0 +1,12 @@
+                                                                                                    
+ Usage: root embed [OPTIONS] COMMAND [ARGS]...                                                      
+                                                                                                    
+ Cache frozen-backbone embeddings over region targets, for training a count head.                   
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --help          Show this message and exit.                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────────────────────────╮
+│ regions  Cache one backbone's frozen embeddings over every region's scored target.               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

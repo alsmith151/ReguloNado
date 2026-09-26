@@ -1,0 +1,37 @@
+                                                                                                    
+ Usage: root embed regions [OPTIONS] REGION_DATASET FASTA                                           
+                                                                                                    
+ Cache one backbone's frozen embeddings over every region's scored target.                          
+                                                                                                    
+ Writes ``<out>/<chrom>.parquet`` per chromosome (skipped if it already exists, so                  
+ this is safe to rerun -- one job per chromosome via ``--chroms``) and a shared                     
+ ``<out>/manifest.parquet``, checked for consistency on every rerun.                                
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    region_dataset      PATH  RegionCountData run directory (has regions.parquet) [required]    │
+│ *    fasta               PATH  Genome FASTA (a .fai index is built if missing) [required]        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --backbone                   TEXT     Backbone type: borzoi, enformer or alphagenome          │
+│                                          [required]                                              │
+│ *  --out                -o      PATH     Output embeddings directory [required]                  │
+│    --pretrained                 TEXT     Pretrained checkpoint name/path (see                    │
+│                                          python/configs/backbone/*.yaml)                         │
+│    --chroms                     TEXT     Only cache these chromosomes (default: every            │
+│                                          chromosome)                                             │
+│    --rc                                  Also cache a reverse-complement pass (features_rc)      │
+│    --pool-to                    INTEGER  Average adjacent bins up to this bp width               │
+│    --context                    INTEGER  Input length (bp) for flexible backbones (AlphaGenome)  │
+│                                          [default: 1048576]                                      │
+│    --stride                     INTEGER  Central bp kept per window for flexible backbones       │
+│                                          [default: 524288]                                       │
+│    --batch-size                 INTEGER  Windows per forward pass [default: 1]                   │
+│    --device                     TEXT     auto (cuda > mps > cpu), cpu, cuda or mps               │
+│                                          [default: auto]                                         │
+│    --allow-random-init                   Allow a randomly initialised backbone when --pretrained │
+│                                          is not given                                            │
+│    --row-group-size             INTEGER  Parquet row group size per chromosome file              │
+│                                          [default: 256]                                          │
+│    --help                                Show this message and exit.                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
