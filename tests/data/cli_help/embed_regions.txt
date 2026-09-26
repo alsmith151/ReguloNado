@@ -8,7 +8,9 @@
  ``<out>/manifest.parquet``, checked for consistency on every rerun.                                
                                                                                                     
 ╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
-│ *    region_dataset      PATH  RegionCountData run directory (has regions.parquet) [required]    │
+│ *    region_dataset      PATH  Region table: 'counts regions' output, or a RegionCountData run   │
+│                                directory                                                         │
+│                                [required]                                                        │
 │ *    fasta               PATH  Genome FASTA (a .fai index is built if missing) [required]        │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮

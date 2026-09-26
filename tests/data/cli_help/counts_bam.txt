@@ -13,6 +13,8 @@
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
 │ *  --tracks                      PATH     tracks.parquet from 'regulonado tracks assemble'       │
+│                                           (discovered with '--format bam', or bigWig tracks that │
+│                                           carry a 'bam')                                         │
 │                                           [required]                                             │
 │ *  --anchor-regions              PATH     High-anchor BED/parquet [required]                     │
 │ *  --background-regions          PATH     Background BED/parquet [required]                      │

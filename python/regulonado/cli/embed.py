@@ -29,7 +29,10 @@ def _resolve_device(name: str) -> str:
 @embed_app.command("regions")
 def regions(
     region_dataset: Annotated[
-        Path, typer.Argument(help="RegionCountData run directory (has regions.parquet)")
+        Path,
+        typer.Argument(
+            help="Region table: 'counts regions' output, or a RegionCountData run directory"
+        ),
     ],
     fasta: Annotated[Path, typer.Argument(help="Genome FASTA (a .fai index is built if missing)")],
     backbone: Annotated[
@@ -85,12 +88,15 @@ def regions(
     this is safe to rerun -- one job per chromosome via ``--chroms``) and a shared
     ``<out>/manifest.parquet``, checked for consistency on every rerun.
     """
-    from regulonado.counts.dataset import RegionCountData
+    import polars as pl
     from regulonado.embeddings.cache import embed_regions as _embed_regions
     from regulonado.model.adapters import BackboneSpec, build_backbone_adapter
     from regulonado.sequence import open_genome
 
-    data = RegionCountData.read(region_dataset)
+    regions_path = (
+        region_dataset / "regions.parquet" if region_dataset.is_dir() else region_dataset
+    )
+    region_table = pl.read_parquet(regions_path)
     spec = BackboneSpec(
         backbone_type=backbone,  # type: ignore[arg-type]
         pretrained_name=pretrained,
@@ -101,7 +107,7 @@ def regions(
     resolved_device = _resolve_device(device)
 
     _embed_regions(
-        data.regions,
+        region_table,
         genome,
         adapter,
         out,

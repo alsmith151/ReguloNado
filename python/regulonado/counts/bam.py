@@ -56,7 +56,7 @@ __all__ = [
     "CountSpec",
     "TrackCounts",
     "count_events",
-    "read_tracks_table",
+    "read_count_tracks",
     "recentre_windows",
     "scale_bp_for",
 ]
@@ -336,26 +336,94 @@ class TrackCounts:
         )
 
 
-def read_tracks_table(path: str | Path) -> pl.DataFrame:
-    """Read ``tracks.parquet``'s included rows as ``bam``/``assay_class``/``group``/``track_name``.
+#: Free-text ``assay`` spellings (track sheets, SeqNado project assays) mapped onto the
+#: ``assay_class`` keys of :data:`DEFAULT_COUNT_SPECS`; matched case-insensitively.
+ASSAY_CLASS_ALIASES: dict[str, str] = {
+    "atac": "ATAC",
+    "atac-seq": "ATAC",
+    "atacseq": "ATAC",
+    "chip": "ChIP",
+    "chip-seq": "ChIP",
+    "chipseq": "ChIP",
+    "cut&run": "CUT&RUN",
+    "cutandrun": "CUT&RUN",
+    "cut_and_run": "CUT&RUN",
+    "cutrun": "CUT&RUN",
+    "cut-run": "CUT&RUN",
+    "cut_run": "CUT&RUN",
+}
 
-    Delegates to :func:`regulonado.tracks_table.read_track_table` for schema
-    validation, then narrows to the columns count counting needs.
+
+def _assay_class_for(assay: object) -> str | None:
+    if assay is None:
+        return None
+    text = str(assay).strip()
+    if text in DEFAULT_COUNT_SPECS:
+        return text
+    return ASSAY_CLASS_ALIASES.get(text.lower())
+
+
+def read_count_tracks(path: str | Path, *, require_bam: bool = True) -> pl.DataFrame:
+    """Read ``tracks.parquet``'s included tracks as ``track_name``/``bam``/``assay_class``/
+    ``group``.
+
+    Either discovery format works: ``tracks discover --format bam`` (the count model's own
+    tracks) or a bigWig table whose rows carry a ``bam`` (from a track sheet, a SeqNado
+    project or ``--bam-dir``), so a count model can reuse a coverage model's track set.
+    ``assay_class`` is taken as-is when present, otherwise derived from ``assay``
+    (:data:`ASSAY_CLASS_ALIASES`, e.g. ``atac`` -> ``ATAC``).
+
+    Raises:
+        ValueError: on an unresolvable ``assay_class``, or (with *require_bam*) an
+            included track with no ``bam``.
     """
+    import pandas as pd
+
     from regulonado.tracks_table import read_track_table
 
     table = read_track_table(path)
     included = table[table["status"] == "included"].sort_values("track_index")
-    frame = pl.from_pandas(included.reset_index(drop=True))
-    missing = [c for c in ("bam", "assay_class", "track_name") if c not in frame.columns]
-    if missing:
-        raise ValueError(f"{path} is missing columns needed for counting: {missing}")
-    if "group" not in frame.columns:
-        frame = frame.with_columns(pl.lit(None, dtype=pl.Utf8).alias("group"))
-    no_bam = frame.filter(pl.col("bam").is_null())["track_name"].to_list()
-    if no_bam:
-        raise ValueError(f"tracks with no 'bam' path in {path}: {no_bam}")
-    return frame.select("track_name", "bam", "assay_class", "group")
+    rows = included.reset_index(drop=True).to_dict("records")
+
+    def _value(row: dict, column: str) -> object:
+        value = row.get(column)
+        return None if value is None or pd.isna(value) else value
+
+    assay_classes = [
+        _assay_class_for(_value(row, "assay_class")) or _assay_class_for(_value(row, "assay"))
+        for row in rows
+    ]
+    unresolved = [
+        f"{row['track_name']} ({_value(row, 'assay_class') or _value(row, 'assay')!r})"
+        for row, assay_class in zip(rows, assay_classes, strict=True)
+        if assay_class is None
+    ]
+    if unresolved:
+        raise ValueError(
+            f"{path}: no assay_class for track(s) {unresolved}; give the track sheet an "
+            f"'assay' column using one of {sorted(ASSAY_CLASS_ALIASES)} (or an "
+            f"'assay_class' of {', '.join(DEFAULT_COUNT_SPECS)} via track annotations)"
+        )
+
+    bams = [_value(row, "bam") for row in rows]
+    if require_bam:
+        no_bam = [row["track_name"] for row, bam in zip(rows, bams, strict=True) if bam is None]
+        if no_bam:
+            raise ValueError(
+                f"{path}: track(s) with no 'bam': {no_bam}. Discover them with "
+                "'tracks discover --format bam', or give the bigWig track sheet a 'bam' "
+                "column / --bam-dir"
+            )
+
+    groups = [_value(row, "group") for row in rows]
+    return pl.DataFrame(
+        {
+            "track_name": pl.Series([str(row["track_name"]) for row in rows], dtype=pl.Utf8),
+            "bam": pl.Series([None if b is None else str(b) for b in bams], dtype=pl.Utf8),
+            "assay_class": pl.Series(assay_classes, dtype=pl.Utf8),
+            "group": pl.Series([None if g is None else str(g) for g in groups], dtype=pl.Utf8),
+        }
+    )
 
 
 @dataclass
@@ -382,7 +450,9 @@ class BamRegionCounter:
     Attributes:
         regions: input regions, ``chrom``/``start``/``end`` plus any extra
             columns (``split``, provenance flags).
-        target_width: width of the window events are counted in.
+        target_width: width of the window events are counted in, centred on each
+            region -- unless *regions* already has ``target_start``/``target_end``
+            (of this width), which are kept as given.
         chrom_sizes: contig lengths for the bounds check, or ``None`` to skip.
         anchor_windows: anchor windows (``count_scale_high``).
         background_windows: background/null windows (``count_scale_low``).
@@ -422,10 +492,23 @@ class BamRegionCounter:
         )
 
         target = self.target_width
-        centre = (pl.col("start") + pl.col("end")) // 2
-        frame = frame.with_columns(
-            pl.max_horizontal(pl.lit(0, pl.Int64), centre - target // 2).alias("target_start")
-        ).with_columns((pl.col("target_start") + target).alias("target_end"))
+        if {"target_start", "target_end"} <= set(frame.columns):
+            # A region set that already names its scored windows (e.g. UEF's, cut from the
+            # un-resized peaks) keeps them, so counts line up with that set's signal targets.
+            frame = frame.with_columns(
+                pl.col("target_start").cast(pl.Int64), pl.col("target_end").cast(pl.Int64)
+            )
+            widths = (frame["target_end"] - frame["target_start"]).unique().to_list()
+            if widths != [target]:
+                raise ValueError(
+                    f"regions carry target_start/target_end of width(s) {sorted(widths)[:5]}, "
+                    f"but target_width is {target}"
+                )
+        else:
+            centre = (pl.col("start") + pl.col("end")) // 2
+            frame = frame.with_columns(
+                pl.max_horizontal(pl.lit(0, pl.Int64), centre - target // 2).alias("target_start")
+            ).with_columns((pl.col("target_start") + target).alias("target_end"))
 
         n_before = frame.height
         if self.chrom_sizes is not None:

@@ -45,6 +45,53 @@ def _assign_splits(
     )
 
 
+@counts_app.command("regions")
+def region_set(
+    regions: Annotated[
+        Path,
+        typer.Argument(help="Region set: BED or parquet with chrom/start/end, optionally split"),
+    ],
+    output: Annotated[Path, typer.Option("--output", "-o", help="Canonical regions.parquet")],
+    chrom_sizes: Annotated[
+        Optional[Path],
+        typer.Option("--chrom-sizes", help="chrom.sizes/.fai for the region bounds check"),
+    ] = None,
+    target_width: Annotated[
+        int,
+        typer.Option("--target-width", help="Width of the counted window, centred on each region"),
+    ] = 1000,
+    val_chroms: Annotated[
+        Optional[list[str]],
+        typer.Option("--val-chroms", help="Chromosomes assigned split=val with no 'split' column"),
+    ] = None,
+    test_chroms: Annotated[
+        Optional[list[str]],
+        typer.Option("--test-chroms", help="Chromosomes assigned split=test with no 'split' col"),
+    ] = None,
+) -> None:
+    """Write the canonical region table ``counts bam``/``gather`` and ``embed regions`` share.
+
+    Applies the same geometry, bounds check, de-duplication and split assignment as
+    ``counts gather``, without reading any BAM -- so the embedding cache can be built
+    from it while counting is still running, and its rows match the gathered dataset's.
+    """
+    from regulonado.counts.bam import BamRegionCounter
+    from regulonado.genomics import read_chrom_sizes
+
+    region_frame = _assign_splits(_read_regions(regions), val_chroms, test_chroms)
+    sizes = read_chrom_sizes(chrom_sizes) if chrom_sizes is not None else None
+    counter = BamRegionCounter(region_frame, target_width=target_width, chrom_sizes=sizes)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    tmp = output.with_name(f".{output.name}.tmp")
+    counter.regions.write_parquet(tmp)
+    tmp.replace(output)
+    typer.echo(
+        f"Wrote {counter.n_regions} regions to {output} "
+        f"(dropped {counter.n_dropped_out_of_bounds} out-of-bounds, "
+        f"{counter.n_dropped_duplicates} duplicate)"
+    )
+
+
 @counts_app.command("bam")
 def bam(
     regions: Annotated[
@@ -52,7 +99,12 @@ def bam(
         typer.Argument(help="Region set: BED or parquet with chrom/start/end, optionally split"),
     ],
     tracks: Annotated[
-        Path, typer.Option("--tracks", help="tracks.parquet from 'regulonado tracks assemble'")
+        Path,
+        typer.Option(
+            "--tracks",
+            help="tracks.parquet from 'regulonado tracks assemble' (discovered with "
+            "'--format bam', or bigWig tracks that carry a 'bam')",
+        ),
     ],
     anchor_regions: Annotated[
         Path, typer.Option("--anchor-regions", help="High-anchor BED/parquet")
@@ -88,17 +140,27 @@ def bam(
     and skipped on a re-run. Run ``regulonado counts gather`` afterwards to
     assemble the per-track cache into one ``RegionCountData`` run.
     """
-    from regulonado.counts.bam import BamRegionCounter, read_tracks_table
+    from regulonado.counts.bam import BamRegionCounter, read_count_tracks
     from regulonado.genomics import read_chrom_sizes
     from regulonado.normalization import read_regions
 
     region_frame = _read_regions(regions)
-    tracks_frame = read_tracks_table(tracks)
+    # Validate BAMs only for the track(s) this call counts, so one per-track job does
+    # not fail on another track's missing file.
+    tracks_frame = read_count_tracks(tracks, require_bam=False)
     if track is not None:
         tracks_frame = tracks_frame.filter(pl.col("track_name") == track)
         if tracks_frame.height == 0:
             typer.echo(f"No track named {track!r} in {tracks}", err=True)
             raise typer.Exit(1)
+    no_bam = tracks_frame.filter(pl.col("bam").is_null())["track_name"].to_list()
+    if no_bam:
+        typer.echo(f"No 'bam' path for track(s): {no_bam}", err=True)
+        raise typer.Exit(1)
+    absent = [bam for bam in tracks_frame["bam"].to_list() if not Path(bam).exists()]
+    if absent:
+        typer.echo(f"BAM(s) not found: {absent}", err=True)
+        raise typer.Exit(1)
 
     sizes = read_chrom_sizes(chrom_sizes) if chrom_sizes is not None else None
     counter = BamRegionCounter(
@@ -127,7 +189,8 @@ def gather(
         Path, typer.Argument(help="Same region set passed to 'counts bam'")
     ],
     tracks: Annotated[
-        Path, typer.Option("--tracks", help="Same tracks.parquet passed to 'counts bam'")
+        Path,
+        typer.Option("--tracks", help="Same tracks.parquet passed to 'counts bam'"),
     ],
     out_dir: Annotated[
         Path,
@@ -157,12 +220,12 @@ def gather(
 
     Writes to ``--dataset-dir``.
     """
-    from regulonado.counts.bam import BamRegionCounter, read_tracks_table
+    from regulonado.counts.bam import BamRegionCounter, read_count_tracks
     from regulonado.counts.dataset import RegionCountData
     from regulonado.genomics import read_chrom_sizes
 
     region_frame = _assign_splits(_read_regions(regions), val_chroms, test_chroms)
-    tracks_frame = read_tracks_table(tracks)
+    tracks_frame = read_count_tracks(tracks, require_bam=False)
 
     sizes = read_chrom_sizes(chrom_sizes) if chrom_sizes is not None else None
     counter = BamRegionCounter(region_frame, target_width=target_width, chrom_sizes=sizes)

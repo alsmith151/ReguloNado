@@ -364,3 +364,20 @@ def test_parity_with_uef_bam_counts_on_the_same_bam_and_region(tmp_path):
     assert result.counts.tolist() == [2]
     assert result.count_scale_high == 10.0
     assert result.count_scale_low == 1.0
+
+
+def test_counter_keeps_a_region_sets_own_target_windows():
+    """UEF region sets cut targets from the un-resized peak; they must not be recomputed."""
+    regions = pl.DataFrame(
+        {
+            "chrom": ["chr1"],
+            "start": [816184],
+            "end": [818298],
+            "target_start": [816742],
+            "target_end": [817742],
+        }
+    )
+    counter = BamRegionCounter(regions, target_width=1000)
+    assert counter.regions["target_start"].to_list() == [816742]
+    with pytest.raises(ValueError, match="target_width is 500"):
+        BamRegionCounter(regions, target_width=500)

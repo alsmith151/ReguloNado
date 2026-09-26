@@ -1,0 +1,23 @@
+                                                                                                    
+ Usage: root counts regions [OPTIONS] REGIONS                                                       
+                                                                                                    
+ Write the canonical region table ``counts bam``/``gather`` and ``embed regions`` share.            
+                                                                                                    
+ Applies the same geometry, bounds check, de-duplication and split assignment as                    
+ ``counts gather``, without reading any BAM -- so the embedding cache can be built                  
+ from it while counting is still running, and its rows match the gathered dataset's.                
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    regions      PATH  Region set: BED or parquet with chrom/start/end, optionally split        │
+│                         [required]                                                               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --output        -o      PATH     Canonical regions.parquet [required]                         │
+│    --chrom-sizes           PATH     chrom.sizes/.fai for the region bounds check                 │
+│    --target-width          INTEGER  Width of the counted window, centred on each region          │
+│                                     [default: 1000]                                              │
+│    --val-chroms            TEXT     Chromosomes assigned split=val with no 'split' column        │
+│    --test-chroms           TEXT     Chromosomes assigned split=test with no 'split' col          │
+│    --help                           Show this message and exit.                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
