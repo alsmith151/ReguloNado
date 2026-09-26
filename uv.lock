@@ -88,6 +88,21 @@ wheels = [
 ]
 
 [[package]]
+name = "alphagenome-pytorch"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "safetensors", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "torch", version = "2.6.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "sys_platform == 'linux'" },
+    { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/82/3a/cd1577a6d33de806207c8be7c1722780c33b7e2617c64dcf24e8323f9310/alphagenome_pytorch-0.3.1.tar.gz", hash = "sha256:5a22de9b4aaad6c3798d8e752d10580e4cb0d6ce4b53e3d822c35a8bb00b04a3", size = 2427767, upload-time = "2026-04-17T21:38:25.775Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d3/48/9e82423976ad7283a452163e2b5bd4b7d1b2a3842612324941419e97a890/alphagenome_pytorch-0.3.1-py3-none-any.whl", hash = "sha256:0a9530b4d326c6a359df0f8faed4073208fba04a2fecb7c38573591556ad83cb", size = 190064, upload-time = "2026-04-17T21:38:23.566Z" },
+]
+
+[[package]]
 name = "annotated-doc"
 version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2176,6 +2191,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pyfastx"
+version = "2.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/04/30/b637657b3b05c318307a74075e106eca49432f80237925c48367bcc2b471/pyfastx-2.3.1.tar.gz", hash = "sha256:19d802cc13ee7774a3068bae3e4d4f419cc69aa237f2dd6366ce220a08b03dca", size = 261246, upload-time = "2026-06-10T14:05:46.202Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/eb/368aa67d7f228132834ec36795b2ebf926804227ec2c3887955307ba1cac/pyfastx-2.3.1-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:179848af93735327c988cb2e017b36d2634b53d9b5b39a4c93748197cb911e63", size = 784727, upload-time = "2026-06-10T14:05:02.948Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/86/6751ad1ee8d30f4e17efd6c2397d9dcd1ed51787d89c8b572709e270f6c6/pyfastx-2.3.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:0badf3fd4bbb3240c9dd3a97546b887a7d2761b48264e1dafcd7cdb1020b2f01", size = 744170, upload-time = "2026-06-10T14:05:04.544Z" },
+    { url = "https://files.pythonhosted.org/packages/78/cb/14c4c17f114736ad2b3e65ae97e0102048d1adf73c4a532ab9cd6da2ea3e/pyfastx-2.3.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:7774085d02a0500bd86e3e9a2b1d10900130f73d34cc0bb341d15473738b746f", size = 876242, upload-time = "2026-06-10T14:05:06.035Z" },
+    { url = "https://files.pythonhosted.org/packages/7e/0f/54647eb0d31c027d766c2d43df15eaccdd3c7f2f1edb7839a9e65239c8c2/pyfastx-2.3.1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:b2b6d0ce18a745249163a3507b2c4794de66396a79ac57eafa0035eac33b72d0", size = 882704, upload-time = "2026-06-10T14:05:07.32Z" },
+]
+
+[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2381,7 +2408,9 @@ all = [
     { name = "matplotlib", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "peft", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "plotly", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "polars", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyfastx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "seaborn", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -2391,10 +2420,34 @@ all = [
     { name = "transformers", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "wandb", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
+alphagenome = [
+    { name = "accelerate", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "alphagenome-pytorch", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "bioframe", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "borzoi-pytorch", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "datasets", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "enformer-pytorch", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "hydra-core", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "lightning", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "matplotlib", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "peft", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "polars", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyfastx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "torch", version = "2.6.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "sys_platform == 'linux'" },
+    { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
+    { name = "torchmetrics", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "transformers", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "wandb", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+]
 data = [
     { name = "bioframe", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "datasets", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "polars", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyfastx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
@@ -2415,7 +2468,9 @@ gpu = [
     { name = "matplotlib", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "ninja", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "peft", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "polars", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyfastx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "torch", version = "2.6.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "sys_platform == 'linux'" },
@@ -2438,8 +2493,10 @@ test = [
     { name = "bioframe", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "datasets", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pandera", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "polars", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pyfaidx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyfastx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pytest", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -2454,7 +2511,9 @@ train = [
     { name = "lightning", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "matplotlib", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "peft", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "polars", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pybigtools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyfastx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pysam", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "scipy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "torch", version = "2.6.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "sys_platform == 'linux'" },
@@ -2475,6 +2534,7 @@ workflow = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'train'" },
+    { name = "alphagenome-pytorch", marker = "extra == 'alphagenome'" },
     { name = "bioframe", marker = "extra == 'data'" },
     { name = "borzoi-pytorch", marker = "extra == 'train'" },
     { name = "datasets", marker = "extra == 'data'", specifier = ">=5.0.0" },
@@ -2497,10 +2557,12 @@ requires-dist = [
     { name = "pandera", extras = ["strategies"], marker = "extra == 'test'" },
     { name = "peft", marker = "extra == 'train'" },
     { name = "plotly", marker = "extra == 'viz'" },
+    { name = "polars", marker = "extra == 'data'", specifier = ">=1.0" },
     { name = "pyarrow" },
     { name = "pybigtools", marker = "extra == 'data'" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyfaidx", marker = "extra == 'test'" },
+    { name = "pyfastx", marker = "extra == 'data'" },
     { name = "pysam", marker = "extra == 'data'" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.1.1" },
@@ -2508,6 +2570,7 @@ requires-dist = [
     { name = "regulonado", extras = ["data"], marker = "extra == 'test'" },
     { name = "regulonado", extras = ["data"], marker = "extra == 'train'" },
     { name = "regulonado", extras = ["data", "train", "viz"], marker = "extra == 'all'" },
+    { name = "regulonado", extras = ["train"], marker = "extra == 'alphagenome'" },
     { name = "regulonado", extras = ["train"], marker = "extra == 'gpu'" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "scipy", marker = "extra == 'data'" },
@@ -2522,7 +2585,7 @@ requires-dist = [
     { name = "typer" },
     { name = "wandb", marker = "extra == 'train'", specifier = ">=0.16" },
 ]
-provides-extras = ["data", "train", "gpu", "viz", "jupyter", "dev", "test", "workflow", "seqnado", "all"]
+provides-extras = ["data", "train", "alphagenome", "gpu", "viz", "jupyter", "dev", "test", "workflow", "seqnado", "all"]
 
 [[package]]
 name = "requests"
