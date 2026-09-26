@@ -1,4 +1,4 @@
-"""``regulonado.training.cached.runner``: optimizer weight-decay exclusion, warm start, and a CPU
+"""``regulonado.training.regions.runner``: optimizer weight-decay exclusion, warm start, and a CPU
 end-to-end cached-trunk training run on a tiny synthetic cache."""
 
 from __future__ import annotations
@@ -10,9 +10,9 @@ import polars as pl
 import torch
 from regulonado.counts.dataset import RegionCountData
 from regulonado.embeddings.cache import region_table_hash, write_chrom_embeddings
-from regulonado.training.cached.model import RegionCountConfig, RegionCountModel
-from regulonado.training.cached.runner import _build_optimizer, _load_warm_start, run_training
 from regulonado.training.config import TrainerConfig
+from regulonado.training.regions.model import RegionCountConfig, RegionCountModel
+from regulonado.training.regions.runner import _build_optimizer, _load_warm_start, run_training
 
 
 def _toy_region_data(n_per_split: int = 8) -> RegionCountData:

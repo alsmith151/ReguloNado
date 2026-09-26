@@ -1,6 +1,6 @@
-"""Lean HF ``Trainer`` entry point for :class:`~regulonado.training.cached.model.RegionCountModel`.
+"""Lean HF ``Trainer`` entry point for :class:`~regulonado.training.regions.model.RegionCountModel`.
 
-Driven by the Hydra config ``python/configs/train_cached.yaml`` (``data.*``/``model.*``/
+Driven by the Hydra config ``python/configs/train_regions.yaml`` (``data.*``/``model.*``/
 ``loss.*``/``trainer: TrainerConfig``), the same shape as :mod:`regulonado.training.runner`
 but far smaller: the backbone is already frozen and cached
 (:mod:`regulonado.embeddings.cache`), so there is no backbone to build, freeze-policy, or
@@ -33,18 +33,18 @@ from transformers import EarlyStoppingCallback, Trainer, default_data_collator
 
 from regulonado.counts.dataset import RegionCountData
 from regulonado.embeddings.cache import EmbeddingManifest, EmbeddingStore
-from regulonado.training.cached.data import (
+from regulonado.training.callbacks import LRLogCallback, WandbConfigCallback
+from regulonado.training.config import TrainerConfig
+from regulonado.training.provenance import write_provenance
+from regulonado.training.regions.data import (
     CachedRegionDataset,
     PreparedRegionData,
     RegionsDataConfig,
     attach_region_rows,
     prepare_region_data,
 )
-from regulonado.training.cached.metrics import GroupedCountMetrics
-from regulonado.training.cached.model import RegionCountConfig, RegionCountModel
-from regulonado.training.callbacks import LRLogCallback, WandbConfigCallback
-from regulonado.training.config import TrainerConfig
-from regulonado.training.provenance import write_provenance
+from regulonado.training.regions.metrics import GroupedCountMetrics
+from regulonado.training.regions.model import RegionCountConfig, RegionCountModel
 from regulonado.training.runner import (
     TrainingSchedule,
     _build_scheduler_for_trainer,
@@ -58,18 +58,18 @@ logger = logging.getLogger(__name__)
 
 CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs"
 # Sections read key-by-key (``cfg["data"].get(...)``), so a misspelt key would otherwise
-# be silently ignored; train_cached.yaml declares every key they accept.
+# be silently ignored; train_regions.yaml declares every key they accept.
 _CHECKED_SECTIONS = ("data", "model", "loss")
 
 
-def validate_cached_config(cfg: Mapping[str, Any]) -> None:
-    """Reject keys ``train_cached.yaml`` does not declare, and a ``trainer`` that
+def validate_region_config(cfg: Mapping[str, Any]) -> None:
+    """Reject keys ``train_regions.yaml`` does not declare, and a ``trainer`` that
     ``TrainerConfig`` rejects.
 
     Raises:
         ValueError: naming every unknown ``data``/``model``/``loss`` key, or the trainer error.
     """
-    base = OmegaConf.load(CONFIG_DIR / "train_cached.yaml")
+    base = OmegaConf.load(CONFIG_DIR / "train_regions.yaml")
     unknown = [
         f"{section}.{key}"
         for section in _CHECKED_SECTIONS
@@ -81,18 +81,18 @@ def validate_cached_config(cfg: Mapping[str, Any]) -> None:
     _resolve_trainer_config(cfg)
 
 
-def resolved_cached_config(preset: str, overrides: list[str]) -> str:
-    """Compose a ``cached_experiment`` preset over ``train_cached.yaml``, for ``--print-config``.
+def resolved_region_config(preset: str, overrides: list[str]) -> str:
+    """Compose a ``region_experiment`` preset over ``train_regions.yaml``, for ``--print-config``.
 
     Mirrors :func:`regulonado.training.compose.resolved_training_config`, kept separate
     (rather than generalising that function) since it composes a different root config
-    with a different experiment-group name (``cached_experiment`` vs ``experiment``).
+    with a different experiment-group name (``region_experiment`` vs ``experiment``).
     """
     with initialize_config_dir(version_base=None, config_dir=str(CONFIG_DIR)):
         config = compose(
-            config_name="train_cached", overrides=[f"+cached_experiment={preset}", *overrides]
+            config_name="train_regions", overrides=[f"+region_experiment={preset}", *overrides]
         )
-    validate_cached_config(config)
+    validate_region_config(config)
     if OmegaConf.is_interpolation(config, "output_dir"):
         config.output_dir = "<automatic run directory>"
     return OmegaConf.to_yaml(config, resolve=True)
@@ -107,7 +107,7 @@ def _resolve_data_config(cfg: Mapping[str, Any]) -> RegionsDataConfig:
 def _resolve_trainer_config(cfg: Mapping[str, Any]) -> TrainerConfig:
     """Merge ``cfg["trainer"]`` into a :class:`TrainerConfig`, the same way the main runner does.
 
-    ``train_cached.yaml``'s ``trainer:`` section only ever sets fields that exist on
+    ``train_regions.yaml``'s ``trainer:`` section only ever sets fields that exist on
     :class:`TrainerConfig` (structured-config merge rejects anything else), so most of
     that dataclass's backbone/adapter-specific fields simply keep their defaults here --
     unused, since this model has no backbone to freeze or adapt.
@@ -128,7 +128,7 @@ def _resolve_trainer_config(cfg: Mapping[str, Any]) -> TrainerConfig:
 
 
 def _build_optimizer(model: RegionCountModel, trainer_cfg: TrainerConfig) -> AdamW:
-    """AdamW with :class:`~regulonado.training.cached.model.CountHead` params excluded from
+    """AdamW with :class:`~regulonado.training.regions.model.CountHead` params excluded from
     weight decay.
 
     Shrinking a replicate offset or a noise scale toward zero is not regularisation of
@@ -336,14 +336,14 @@ def run_training(cfg: Mapping[str, Any]) -> dict[str, Any]:
     ----------
     cfg
         Complete region-training configuration: ``data``/``model``/``loss``/``trainer``
-        sections plus ``output_dir`` and ``seed`` (see ``python/configs/train_cached.yaml``).
+        sections plus ``output_dir`` and ``seed`` (see ``python/configs/train_regions.yaml``).
 
     Returns
     -------
     A summary dict (also written to ``<output_dir>/training_summary.json``): output
     directory, seed, track/group counts, and the train/eval loss history.
     """
-    validate_cached_config(cfg)
+    validate_region_config(cfg)
     trainer_cfg = _resolve_trainer_config(cfg)
     seed = int(cfg.get("seed", 42))
     _seed_everything(seed)
@@ -448,9 +448,10 @@ def run_training(cfg: Mapping[str, Any]) -> dict[str, Any]:
     return summary
 
 
-@hydra.main(version_base=None, config_path="../../../configs", config_name="train_cached")
+@hydra.main(version_base=None, config_path="../../../configs", config_name="train_regions")
 def hydra_entrypoint(cfg: DictConfig) -> None:
-    """Hydra entrypoint: resolve ``python/configs/train_cached.yaml``, then :func:`run_training`."""
+    """Hydra entrypoint: resolve ``python/configs/train_regions.yaml``, then
+    :func:`run_training`."""
     config = OmegaConf.to_container(cfg, resolve=True)
     if not isinstance(config, dict):
         raise TypeError("Hydra config did not resolve to a dictionary")

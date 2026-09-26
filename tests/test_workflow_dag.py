@@ -1178,7 +1178,7 @@ targets:
     return config
 
 
-def test_cached_run_plans_counts_embeddings_and_chained_phases(tmp_path):
+def test_regions_run_plans_counts_embeddings_and_chained_phases(tmp_path):
     """A trunk: cached run pulls in BAM tracks, region counts, its cache and its recipe."""
     pytest.importorskip("hydra")
     config = _count_only_config(tmp_path, runs=[_cached_run("run_a", seed=7)])

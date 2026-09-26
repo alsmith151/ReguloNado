@@ -23,7 +23,7 @@
 │ --output-dir                    -o      PATH     Run directory for checkpoints and diagnostics   │
 │ --preset                        -p      TEXT     Named phase preset: python/configs/experiment/  │
 │                                                  (trunk live, default head_only) or              │
-│                                                  python/configs/cached_experiment/ (trunk        │
+│                                                  python/configs/region_experiment/ (trunk        │
 │                                                  cached, default pretrain)                       │
 │ --metadata                              PATH     tracks.parquet to use instead of the dataset    │
 │                                                  copy                                            │

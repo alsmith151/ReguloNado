@@ -3,8 +3,8 @@
 # no backbone/head config group here: the backbone is frozen and its features are already
 # cached (`regulonado embed regions`), so this trains only the small pooling head.
 #
-# Override these values directly or start from a `cached_experiment/*` preset with
-# `+cached_experiment=<name>`, mirroring `+experiment=<name>` for `regulonado train`.
+# Override these values directly or start from a `region_experiment/*` preset with
+# `+region_experiment=<name>`, mirroring `+experiment=<name>` for `regulonado train`.
 defaults:
   - _self_
 
@@ -104,7 +104,7 @@ trainer:
 
 hydra:
   run:
-    dir: outputs/train-cached/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: outputs/train-regions/${now:%Y-%m-%d}/${now:%H-%M-%S}
   sweep:
     dir: multirun-regions/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra.job.num}

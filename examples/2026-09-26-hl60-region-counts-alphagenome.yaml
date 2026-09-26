@@ -63,7 +63,7 @@ train:
 
   recipes:
     # pretrain -> specific -> target, the UEF v2 curriculum. The presets
-    # (python/configs/cached_experiment/) set each stage's filtering/weighting; the
+    # (python/configs/region_experiment/) set each stage's filtering/weighting; the
     # settings carry over UEF's per-stage selection metric and stage-3 contrast
     # emphasis (configs/train-stage{2,3}-*.args).
     curriculum:

@@ -53,7 +53,7 @@ its trunk is used, what it predicts, and the `recipe` (phase chain) it follows:
 Implemented pairs are `live`/`profile` and `cached`/`region_counts`. Live recipes
 use the `python/configs/experiment/` presets (`head_only`, `unfreeze_output`,
 `deep_finetune`, `peak_finetune`, `lora_finetune`); cached recipes use
-`python/configs/cached_experiment/` (`pretrain`, `specific`, `target`).
+`python/configs/region_experiment/` (`pretrain`, `specific`, `target`).
 
 ```yaml
 targets:

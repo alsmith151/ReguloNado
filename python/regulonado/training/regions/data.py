@@ -2,7 +2,7 @@
 
 :class:`CachedRegionDataset` is the training-time counterpart of
 :mod:`regulonado.embeddings.cache`: it yields ``{"features": [K, D], "labels":
-[n_tracks]}`` items for :class:`~regulonado.training.cached.model.RegionCountModel`, joining a
+[n_tracks]}`` items for :class:`~regulonado.training.regions.model.RegionCountModel`, joining a
 :class:`~regulonado.counts.dataset.RegionCountData` (BAM counts,
 :mod:`regulonado.counts`) to an :class:`~regulonado.embeddings.cache.EmbeddingStore`
 (cached frozen-backbone features, :mod:`regulonado.embeddings.cache`) via each region's
@@ -122,7 +122,7 @@ class RegionsDataConfig:
         :mod:`regulonado.embeddings.cache` directory to read features from.
     target_group
         The group (cell type) name stage 2/3 knobs below are relative to (also used as
-        :class:`~regulonado.training.cached.metrics.GroupedCountMetrics`'s ``top_decile_task``).
+        :class:`~regulonado.training.regions.metrics.GroupedCountMetrics`'s ``top_decile_task``).
     specific_only, gini_std_threshold
         Stage 2: keep only cell type-specific regions -- Gini (at group level) above
         ``mean + gini_std_threshold * std``, computed over every region before
@@ -289,7 +289,7 @@ class CachedRegionDataset(Dataset):
 
     Yields ``{"features": [K, D], "labels": [n_tracks]}`` (plus ``"sample_weight"``, a
     scalar, when *sample_weights* is given): both directly consumable by
-    :class:`~regulonado.training.cached.model.RegionCountModel` and a plain
+    :class:`~regulonado.training.regions.model.RegionCountModel` and a plain
     ``torch.utils.data.dataloader.default_collate``/
     ``transformers.default_data_collator``, since every item has the same shapes (the
     manifest's fixed ``K``/``D`` and *region_dataset*'s fixed ``n_tracks``). ``features``

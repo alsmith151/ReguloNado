@@ -19,8 +19,8 @@ from regulonado.training.overrides import merge_training_settings
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # Phase presets per trunk mode: python/configs/experiment/*.yaml compose over train.yaml
-# (the trunk runs live, every step); python/configs/cached_experiment/*.yaml over
-# train_cached.yaml (a head trained on cached trunk embeddings).
+# (the trunk runs live, every step); python/configs/region_experiment/*.yaml over
+# train_regions.yaml (a head trained on cached trunk embeddings).
 LIVE_PRESETS = ("head_only", "unfreeze_output", "deep_finetune", "peak_finetune", "lora_finetune")
 CACHED_PRESETS = ("pretrain", "specific", "target")
 PRESETS_BY_TRUNK = {"live": LIVE_PRESETS, "cached": CACHED_PRESETS}

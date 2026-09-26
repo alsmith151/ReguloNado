@@ -1,4 +1,4 @@
-"""``regulonado.training.cached.data``: cache join, RC augmentation, UEF-ported stage pipeline."""
+"""``regulonado.training.regions.data``: cache join, RC augmentation, UEF-ported stage pipeline."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from regulonado.embeddings.cache import (
     region_table_hash,
     write_chrom_embeddings,
 )
-from regulonado.training.cached import data as regions_data
-from regulonado.training.cached.data import (
+from regulonado.training.regions import data as regions_data
+from regulonado.training.regions.data import (
     CachedRegionDataset,
     RegionsDataConfig,
     attach_region_rows,
@@ -289,14 +289,14 @@ def test_prepare_region_data_contrast_weighting_produces_train_sample_weights(tm
 # --------------------------------------------------------------------------- #
 
 
-def test_cached_region_dataset_requires_region_row(tmp_path):
+def test_regions_region_dataset_requires_region_row(tmp_path):
     data = _toy_data()
     _write_cache(tmp_path / "emb", data.regions, k=2, d=3)
     with pytest.raises(ValueError, match="region_row"):
         CachedRegionDataset(data, tmp_path / "emb", split="train")
 
 
-def test_cached_region_dataset_joins_via_region_row(tmp_path):
+def test_regions_region_dataset_joins_via_region_row(tmp_path):
     data = _toy_data()
     features, _ = _write_cache(tmp_path / "emb", data.regions, k=2, d=3)
     attached, _ = attach_region_rows(data, tmp_path / "emb")
@@ -313,7 +313,7 @@ def test_cached_region_dataset_joins_via_region_row(tmp_path):
         assert "sample_weight" not in item
 
 
-def test_cached_region_dataset_splits_internally(tmp_path):
+def test_regions_region_dataset_splits_internally(tmp_path):
     data = _toy_data()
     _write_cache(tmp_path / "emb", data.regions, k=2, d=3)
     attached, _ = attach_region_rows(data, tmp_path / "emb")
@@ -321,7 +321,7 @@ def test_cached_region_dataset_splits_internally(tmp_path):
     assert len(dataset) == (data.regions["split"] == "val").sum()
 
 
-def test_cached_region_dataset_rc_augmentation_in_train_mode(tmp_path, monkeypatch):
+def test_regions_region_dataset_rc_augmentation_in_train_mode(tmp_path, monkeypatch):
     data = _toy_data()
     features, features_rc = _write_cache(tmp_path / "emb", data.regions, k=2, d=3, rc=True)
     attached, _ = attach_region_rows(data, tmp_path / "emb")
@@ -342,7 +342,7 @@ def test_cached_region_dataset_rc_augmentation_in_train_mode(tmp_path, monkeypat
     assert torch.allclose(item["features"].float(), expected)
 
 
-def test_cached_region_dataset_no_rc_when_disabled(tmp_path, monkeypatch):
+def test_regions_region_dataset_no_rc_when_disabled(tmp_path, monkeypatch):
     data = _toy_data()
     features, features_rc = _write_cache(tmp_path / "emb", data.regions, k=2, d=3, rc=True)
     attached, _ = attach_region_rows(data, tmp_path / "emb")
@@ -366,7 +366,7 @@ def _store_without_first_region(embeddings_dir):
     return EmbeddingStore(embeddings_dir)
 
 
-def test_cached_region_dataset_missing_region_raises_by_default(tmp_path):
+def test_regions_region_dataset_missing_region_raises_by_default(tmp_path):
     data = _toy_data()
     _write_cache(tmp_path / "emb", data.regions, k=2, d=3)
     attached, _ = attach_region_rows(data, tmp_path / "emb")
@@ -375,7 +375,7 @@ def test_cached_region_dataset_missing_region_raises_by_default(tmp_path):
         CachedRegionDataset(attached, store, split=None, train=False)
 
 
-def test_cached_region_dataset_drop_missing_from_cache(tmp_path):
+def test_regions_region_dataset_drop_missing_from_cache(tmp_path):
     data = _toy_data()
     _write_cache(tmp_path / "emb", data.regions, k=2, d=3)
     attached, _ = attach_region_rows(data, tmp_path / "emb")
@@ -389,7 +389,7 @@ def test_cached_region_dataset_drop_missing_from_cache(tmp_path):
     assert dropped not in dataset.data.regions["region_row"].to_list()
 
 
-def test_cached_region_dataset_sample_weight_shape_mismatch_raises(tmp_path):
+def test_regions_region_dataset_sample_weight_shape_mismatch_raises(tmp_path):
     data = _toy_data()
     _write_cache(tmp_path / "emb", data.regions, k=2, d=3)
     attached, _ = attach_region_rows(data, tmp_path / "emb")
@@ -399,7 +399,7 @@ def test_cached_region_dataset_sample_weight_shape_mismatch_raises(tmp_path):
         )
 
 
-def test_cached_region_dataset_in_memory_matches_memory_mapped(tmp_path):
+def test_regions_region_dataset_in_memory_matches_memory_mapped(tmp_path):
     data = _toy_data()
     _write_cache(tmp_path / "emb", data.regions, k=2, d=3)
     attached, _ = attach_region_rows(data, tmp_path / "emb")
@@ -411,7 +411,7 @@ def test_cached_region_dataset_in_memory_matches_memory_mapped(tmp_path):
         assert torch.equal(mapped[idx]["features"], in_memory[idx]["features"])
 
 
-def test_cached_region_dataset_getitems_matches_getitem(tmp_path):
+def test_regions_region_dataset_getitems_matches_getitem(tmp_path):
     """A DataLoader batch fetched in one read equals the items fetched one by one."""
     data = _toy_data()
     _write_cache(tmp_path / "emb", data.regions, k=2, d=3)

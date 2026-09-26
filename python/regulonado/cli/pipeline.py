@@ -127,7 +127,7 @@ def _validate_training_matrix(configfile: Path) -> None:
     """Compose every configured run x recipe phase, as the workflow will, before scheduling.
 
     Live-trunk phases compose over ``train.yaml``, cached-trunk phases over
-    ``train_cached.yaml``; either way a misspelt or mistyped setting fails here rather
+    ``train_regions.yaml``; either way a misspelt or mistyped setting fails here rather
     than on a GPU node.
     """
     import yaml
@@ -145,8 +145,8 @@ def _validate_training_matrix(configfile: Path) -> None:
         return
 
     try:
-        from regulonado.training.cached.runner import resolved_cached_config
         from regulonado.training.compose import resolved_training_config
+        from regulonado.training.regions.runner import resolved_region_config
     except ImportError as exc:
         raise typer.BadParameter(
             "Training configuration requires regulonado[train].", param_hint="CONFIGFILE"
@@ -171,7 +171,7 @@ def _validate_training_matrix(configfile: Path) -> None:
                 *([f"data.target_group={run.target_group}"] if run.target_group else []),
                 *hydra_override_items(settings),
             ]
-            compose = resolved_cached_config if cached else resolved_training_config
+            compose = resolved_region_config if cached else resolved_training_config
             try:
                 compose(phase.preset, overrides)
             except Exception as exc:

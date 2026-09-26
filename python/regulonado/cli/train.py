@@ -99,7 +99,7 @@ def train(
             "--preset",
             "-p",
             help="Named phase preset: python/configs/experiment/ (trunk live, default "
-            "head_only) or python/configs/cached_experiment/ (trunk cached, default pretrain)",
+            "head_only) or python/configs/region_experiment/ (trunk cached, default pretrain)",
         ),
     ] = None,
     metadata: Annotated[
@@ -220,7 +220,7 @@ def train(
 
     if trunk == "cached":
         overrides = [
-            f"+cached_experiment={preset}",
+            f"+region_experiment={preset}",
             f"data.path={dataset}",
             f"data.embeddings_dir={embeddings}",
         ]
@@ -262,7 +262,7 @@ def train(
 
     if print_config and trunk == "cached":
         try:
-            from regulonado.training.cached.runner import resolved_cached_config
+            from regulonado.training.regions.runner import resolved_region_config
         except ImportError as exc:
             typer.echo(
                 "Hydra is required to inspect training presets. Install regulonado[train].",
@@ -270,7 +270,7 @@ def train(
             )
             raise typer.Exit(127) from exc
         try:
-            typer.echo(resolved_cached_config(preset, overrides[1:]))
+            typer.echo(resolved_region_config(preset, overrides[1:]))
         except Exception as exc:
             raise typer.BadParameter(
                 f"Could not compose preset {preset!r}: {exc}", param_hint="--preset/--set"
@@ -304,7 +304,7 @@ def train(
         return
 
     module = (
-        "regulonado.training.cached.runner" if trunk == "cached" else "regulonado.training.runner"
+        "regulonado.training.regions.runner" if trunk == "cached" else "regulonado.training.runner"
     )
     if nproc_per_node > 1:
         import random

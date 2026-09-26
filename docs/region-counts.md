@@ -182,7 +182,7 @@ regulonado train region_dataset --trunk cached --embeddings embeddings/alphageno
     --target-group HL-60 --init-weights-from-checkpoint <specific_dir>
 ```
 
-**Model** (`training/cached/model.py`):
+**Model** (`training/regions/model.py`):
 - attention pooling over the K bins → LayerNorm → MLP (D → 512);
 - per-group log rates, with an optional soft cap (`model.eta_max`);
 - a `CountHead` with fixed log size factors, centred per-group replicate offsets and a
@@ -190,8 +190,8 @@ regulonado train region_dataset --trunk cached --embeddings embeddings/alphageno
 
 `CountHead` parameters are excluded from weight decay.
 
-**Presets** (`python/configs/cached_experiment/`, composed over
-`python/configs/train_cached.yaml`):
+**Presets** (`python/configs/region_experiment/`, composed over
+`python/configs/train_regions.yaml`):
 
 | preset     | what changes                                                                 |
 |------------|------------------------------------------------------------------------------|
@@ -204,7 +204,7 @@ phase) drops train regions that overlap held-out sequences such as benchmark can
 Val and test are not touched. This is UEF's `--exclude_bed`.
 
 Settings go through the recipe and run `settings:` layers, or `--set`. Keys that
-`train_cached.yaml` does not declare are rejected, and the workflow composes every run ×
+`train_regions.yaml` does not declare are rejected, and the workflow composes every run ×
 phase before scheduling anything.
 
 The metric names match UEF (`eval_contrast_pearson_mean`, `eval_contrast_pearson_<group>`,
