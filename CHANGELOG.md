@@ -31,9 +31,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requires torch, borzoi-pytorch, or enformer-pytorch.
 - Added `__version__` to the top-level namespace.
 - Added `[project.urls]` with repository link.
+- `EnformerBackboneAdapter.feature_dim` now reports `2 * dim` (3072), which matches what
+  `return_only_embeddings=True` actually returns (it was previously `dim`).
 
 ### Added
 
+- Region-count modelling on cached frozen-backbone embeddings
+  (`docs/region-counts.md`):
+  - `regulonado counts bam/gather`: BAM region counting, ported from UEF, with
+    anchor-based size factors, stored as parquet;
+  - `regulonado embed regions`: a backbone-agnostic per-chromosome parquet embedding
+    cache;
+  - `regulonado train-regions`: an NB region-count head with
+    `pretrain`/`specific`/`target` presets;
+  - a Snakemake `regions:` workflow section.
+- `AlphaGenomeBackboneAdapter` (`alphagenome` extra), and adapter output geometry
+  (`output_bin_size`, `fixed_input_length`, `input_multiple`, `output_span`).
+- `regulonado.sequence`: pid-safe pyfastx genome access and zero-padded window fetches.
 - GitHub Actions CI workflow (`ci.yml`): Python 3.12/3.13 matrix, Rust
   toolchain, pytest over data/chrom-pass tests (no GPU required).
 - GitHub Actions release workflow (`release.yml`): maturin wheel matrix
