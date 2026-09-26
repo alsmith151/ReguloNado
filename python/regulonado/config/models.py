@@ -827,6 +827,14 @@ class RegulonadoConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     results_dir: str = Field(min_length=1)
+    max_mem_mb: int = Field(
+        default=256_000,
+        ge=1_000,
+        description=(
+            "Cap on any job's memory request, in MB, including after retries double it: "
+            "larger requests can wait a long time for a node."
+        ),
+    )
     inputs: InputsConfig
     targets: TargetsConfig = Field(default_factory=TargetsConfig)
     scaling: ScalingConfig = Field(default_factory=ScalingConfig)

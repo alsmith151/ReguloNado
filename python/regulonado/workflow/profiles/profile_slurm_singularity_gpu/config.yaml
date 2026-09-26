@@ -39,8 +39,9 @@ default-resources:
   cpus_per_task: 1
 
 # Per-rule placement. Memory is set by the rules themselves (sized to each job, and
-# doubled on each retry), so do not set mem_mb here: a set-resources value overrides
-# the rule's. The default-resources mem_mb above only covers a rule that sets none.
+# doubled on each retry, never above the workflow config's max_mem_mb, default 256 GB),
+# so do not set mem_mb here: a set-resources value overrides the rule's. The
+# default-resources mem_mb above only covers a rule that sets none.
 set-resources:
   build_dataset:
     # Dataset construction is memory- and I/O-hungry rather than GPU-bound.

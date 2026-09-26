@@ -65,8 +65,9 @@ def _train_mem_mb(wildcards, attempt):
     """Memory to request for a phase: a base for the model, data-loader workers and
     Python, plus -- for a cached run loading its embeddings into RAM (data.in_memory) --
     the cache's size with 25% headroom; doubled on each retry, like
-    :func:`scaled_mem_mb`."""
-    return _train_mem_mb_first_attempt(wildcards) * 2 ** (attempt - 1)
+    :func:`scaled_mem_mb`, and capped at ``max_mem_mb``. Past the cap, a cache that does
+    not fit is memory-mapped instead (see ``EmbeddingStore``)."""
+    return capped_mem_mb(_train_mem_mb_first_attempt(wildcards) * 2 ** (attempt - 1))
 
 
 def _train_mem_mb_first_attempt(wildcards):

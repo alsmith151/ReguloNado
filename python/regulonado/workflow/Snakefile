@@ -95,11 +95,20 @@ def final_phase(run):
     return run_phases(run)[-1]["name"]
 
 
+MAX_MEM_MB = int(config.get("max_mem_mb", 256_000))
+
+
+def capped_mem_mb(mem_mb):
+    """*mem_mb*, capped at ``max_mem_mb`` (larger requests can wait a long time for a node)."""
+    return min(int(mem_mb), MAX_MEM_MB)
+
+
 def scaled_mem_mb(base_mb):
     """A rule's ``mem_mb``: *base_mb*, doubled on each retry (the SLURM profiles resubmit
-    failed jobs), so a job killed for running out of memory comes back with more. Memory is
-    set here in the rules; profiles only place jobs (partition, account, CPUs, runtime)."""
-    return lambda wildcards, attempt: base_mb * 2 ** (attempt - 1)
+    failed jobs), so a job killed for running out of memory comes back with more -- never
+    above ``max_mem_mb``. Memory is set here in the rules; profiles only place jobs
+    (partition, account, CPUs, runtime)."""
+    return lambda wildcards, attempt: capped_mem_mb(base_mb * 2 ** (attempt - 1))
 
 
 def phase_run_dir(run, phase):

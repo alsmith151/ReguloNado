@@ -1294,6 +1294,13 @@ properties:
     minLength: 1
     title: Results Dir
     type: string
+  max_mem_mb:
+    default: 256000
+    description: 'Cap on any job''s memory request, in MB, including after retries
+      double it: larger requests can wait a long time for a node.'
+    minimum: 1000
+    title: Max Mem Mb
+    type: integer
   inputs:
     $ref: '#/$defs/InputsConfig'
   targets:

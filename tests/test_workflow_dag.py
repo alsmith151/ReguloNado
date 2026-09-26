@@ -1419,3 +1419,13 @@ def test_in_memory_cached_runs_request_memory_for_their_cache(tmp_path):
     # Two regions x K=9 x D=3072 x 2 bytes is tiny, so "loaded" is the base plus ~1 MB.
     assert int(requests["mapped"]) == 32_000
     assert 32_000 < int(requests["loaded"]) <= 32_001
+
+
+def test_memory_requests_never_exceed_max_mem_mb(tmp_path):
+    pytest.importorskip("hydra")
+    config = _count_only_config(tmp_path, runs=[_cached_run("run_a")])
+    config.write_text(config.read_text() + "max_mem_mb: 20000\n")
+    output, code = _snakemake_dry_run(tmp_path, config)
+    assert code == 0, output
+    requests = [int(mb) for mb in re.findall(r"mem_mb=(\d+)", output)]
+    assert requests and max(requests) == 20000  # train_phase's 32 GB base, capped
