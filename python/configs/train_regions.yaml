@@ -43,6 +43,10 @@ data:
   enable_rc_aug: true
   # Read the whole embeddings cache into RAM once instead of memory-mapping it.
   in_memory: false
+  # Diagnostic: train on this many train regions and evaluate on those same regions, so
+  # every eval_* metric reports fit to the training data instead of generalisation. A model
+  # that cannot score near-perfectly here is limited by its features or capacity, not data.
+  overfit_probe: null
   # A region missing from the embeddings cache is an error by default; set true to drop it
   # (with a warning) instead.
   drop_missing_from_cache: false
