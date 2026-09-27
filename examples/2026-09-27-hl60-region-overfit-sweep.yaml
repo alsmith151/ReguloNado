@@ -1,0 +1,108 @@
+# Is the region-count head limited by its features or by its capacity?
+#
+# data.overfit_probe trains on N train regions and evaluates on those same N (no RC or
+# shift augmentation at eval), so every eval_* metric is fit to the training data. The
+# 09-27 specificity runs found pretrain train and eval losses matching (3.02 / 3.00): the
+# head underfits. This grid asks, per feature cache, how close each head size gets to a
+# perfect fit:
+#   - every head saturates at the same ceiling      -> the features are the limit;
+#   - wider / per_group heads keep climbing         -> capacity is the limit;
+#   - one cache's ceiling sits well above another's -> that trunk carries the signal.
+#
+# Regularisation is off (dropout 0, weight decay 0, no RC augmentation, no early
+# stopping): this is a memorisation test, not a generalisation one. Do not compare these
+# eval numbers against ordinary runs.
+#
+# Run through the pipeline's parameter-sweep stage (2026-09-27-hl60-specificity-directions
+# enables it with this file), from the UEF repo root:
+#
+#   regulonado pipeline /path/to/ReguloNado/examples/2026-09-27-hl60-specificity-directions.yaml parameter-sweep
+#
+# The stage waits for the region-count dataset and the three embedding caches below
+# (parameter_sweep.embeddings_from), creates the sweep and runs one-GPU agents. Paths are
+# relative to the UEF repo root, where the pipeline runs.
+#
+# 3 caches x 5 widths x 2 poolings x 2 learning rates = 60 trials of 4000 steps each;
+# each lands in results/2026-09-26-hl60-region-counts/parameter-sweep/runs/<run id>.
+program: regulonado
+name: hl60-region-overfit
+method: grid
+
+metric:
+  # Fit to the training regions, across every cell type. eval/loss and
+  # eval/contrast_pearson_HL-60 are logged alongside for the same runs.
+  name: eval/contrast_pearson_mean
+  goal: maximize
+
+parameters:
+  target:
+    value: region_counts
+  # The pretrain preset (every region, no filtering or weighting), with its plateau
+  # schedule and early stopping replaced below.
+  preset:
+    value: pretrain
+  data.path:
+    value: results/2026-09-26-hl60-region-counts/region_counts/dataset
+  # Features: AlphaGenome full trunk (1 Mb context), Flashzoi (524 kb, pooled to 128 bp),
+  # AlphaGenome CNN encoder only (~1.5 kb receptive field). The caches of the
+  # hl60_alphagenome_trunk, hl60_flashzoi_trunk and hl60_alphagenome_encoder runs.
+  data.embeddings_dir:
+    values:
+      - results/2026-09-26-hl60-region-counts/embeddings/alphagenome-all_folds-ctx1048576-stride524288
+      - results/2026-09-26-hl60-region-counts/embeddings/borzoi-johahi_flashzoi-replicate-0-pool128
+      - results/2026-09-26-hl60-region-counts/embeddings/alphagenome-all_folds-encoder-ctx4096-stride2048-rc
+  data.target_group:
+    value: HL-60
+  # 16k regions: 64 steps per epoch at batch 256, so 4000 steps is ~60 passes over each
+  # region -- enough to memorise if the head can.
+  data.overfit_probe:
+    value: 16384
+  data.enable_rc_aug:
+    value: false
+  # A 16k subset is a few GB of random reads; memory-mapping beats loading a 64 GB cache
+  # per trial.
+  data.in_memory:
+    value: false
+
+  # The head: attention pool -> Linear(d, hidden) -> GELU -> Dropout -> readout. hidden is
+  # its only width knob (depth is fixed at one hidden layer); 512 is the current default,
+  # 2048 the 09-27 _wide runs.
+  model.hidden:
+    values: [256, 512, 1024, 2048, 4096]
+  model.pooling:
+    values: [shared, per_group]
+  model.dropout:
+    value: 0.0
+
+  trainer.learning_rate:
+    values: [1.0e-3, 3.0e-3]
+  trainer.weight_decay:
+    value: 0.0
+  trainer.scheduler:
+    value: cosine
+  trainer.warmup_steps:
+    value: 100
+  trainer.early_stopping_patience:
+    value: null
+  trainer.batch_size:
+    value: 256
+  trainer.eval_batch_size:
+    value: 1024
+  trainer.max_steps:
+    value: 4000
+  trainer.eval_every_n_steps:
+    value: 200
+  trainer.checkpoint_every_n_steps:
+    value: 200
+  trainer.metric_for_best_model:
+    value: eval_contrast_pearson_mean
+  trainer.wandb_job_type:
+    value: overfit-probe
+  trainer.wandb_tags:
+    value: [overfit-probe, hl60]
+
+command:
+  - ${env}
+  - ${program}
+  - sweep-train
+  - ${args_json_file}

@@ -490,6 +490,17 @@ class ParameterSweepConfig(BaseModel):
 
     enabled: bool = False
     sweep_config: str = Field(min_length=1)
+    target: Literal["profile", "region_counts"] = Field(
+        default="profile",
+        description="Dataset the trials train on; the agents wait for it to be built.",
+    )
+    embeddings_from: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Cached region-count runs whose embedding caches the trials read (as "
+            "data.embeddings_dir); the agents wait for those caches to be built."
+        ),
+    )
     agents: int = Field(default=1, ge=1)
     trials_per_agent: int = Field(default=1, ge=1)
     cpus_per_agent: int = Field(default=4, ge=1)
@@ -890,10 +901,28 @@ class RegulonadoConfig(BaseModel):
             return self
         if self.qc.checks:
             raise ValueError("qc.checks scan bigWig tracks; configure targets.profile")
-        if self.parameter_sweep is not None and self.parameter_sweep.enabled:
+        return self
+
+    @model_validator(mode="after")
+    def _parameter_sweep_inputs_are_configured(self) -> "RegulonadoConfig":
+        sweep = self.parameter_sweep
+        if sweep is None or not sweep.enabled:
+            return self
+        if getattr(self.targets, sweep.target) is None:
             raise ValueError(
-                "parameter_sweep trains on the profile dataset; configure targets.profile"
+                f"parameter_sweep trains on {sweep.target!r}, but targets.{sweep.target} is "
+                "not configured"
             )
+        if sweep.embeddings_from and sweep.target != "region_counts":
+            raise ValueError("parameter_sweep.embeddings_from applies to target: region_counts")
+        runs = {run.name: run for run in self.train.runs} if self.train else {}
+        for name in sweep.embeddings_from:
+            run = runs.get(name)
+            if run is None or run.trunk != "cached" or run.target != "region_counts":
+                raise ValueError(
+                    f"parameter_sweep.embeddings_from: {name!r} is not a train run with "
+                    "trunk: cached and target: region_counts"
+                )
         return self
 
     @model_validator(mode="after")

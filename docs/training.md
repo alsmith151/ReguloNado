@@ -178,6 +178,27 @@ longer-lived agents so later suggestions can incorporate earlier results; for a
 One-by-one jobs remain preferable when queue policy, wall-time prediction, or
 preemption isolation matters more than Bayesian adaptivity.
 
+### Region-count heads
+
+Set `target: region_counts` to sweep region-count heads instead. The agents then wait
+for the region-count dataset, and `embeddings_from` names the `trunk: cached` runs whose
+embedding caches the trials read, so the agents wait for those too:
+
+```yaml
+parameter_sweep:
+  enabled: true
+  sweep_config: examples/2026-09-27-hl60-region-overfit-sweep.yaml
+  target: region_counts
+  embeddings_from: [hl60_alphagenome_trunk, hl60_flashzoi_trunk]
+```
+
+In the W&B sweep file, each trial sets `target: region_counts` (default preset
+`pretrain`, from `python/configs/region_experiment/`), `data.path` to
+`<results_dir>/region_counts/dataset` and, for a cached trunk, `data.embeddings_dir` to
+one of `<results_dir>/embeddings/<cache>`. Trials write to
+`<results_dir>/parameter-sweep/runs/<run id>` either way, and always report to W&B in the
+agents' project.
+
 ## Label space
 
 `data.label_space` picks what the loss is fitted against. Each option below is a single

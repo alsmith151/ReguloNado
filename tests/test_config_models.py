@@ -547,3 +547,42 @@ def test_init_from_names_another_runs_phase_with_the_same_target():
     recipes = {**CURRICULUM, "finetune": [TrainPhase(name="head", preset="head_only")]}
     with pytest.raises(ValueError, match="has target region_counts, not profile"):
         TrainConfig(recipes=recipes, runs=[cached, profile])
+
+
+def _counts_sweep_config(**sweep: Any) -> RegulonadoConfig:
+    return RegulonadoConfig(
+        results_dir="results",
+        inputs=InputsConfig(fasta="genome.fa", bam_dir="bams"),
+        targets=TargetsConfig(region_counts=COUNTS),
+        train=TrainConfig(recipes=CURRICULUM, runs=[_cached()]),
+        parameter_sweep={"enabled": True, "sweep_config": "sweep.yaml", **sweep},
+    )
+
+
+def test_region_count_parameter_sweep_reads_cached_runs_embeddings():
+    config = _counts_sweep_config(target="region_counts", embeddings_from=["counts_run"])
+    assert config.parameter_sweep.embeddings_from == ["counts_run"]
+    _validate_against_schema(config.to_dict())
+
+
+def test_parameter_sweep_needs_its_target_configured():
+    with pytest.raises(ValueError, match="targets.profile is not configured"):
+        _counts_sweep_config()
+
+
+@pytest.mark.parametrize(
+    ("sweep", "message"),
+    [
+        ({"target": "region_counts", "embeddings_from": ["missing"]}, "'missing' is not a train"),
+        ({"embeddings_from": ["counts_run"]}, "embeddings_from applies to target: region_counts"),
+    ],
+)
+def test_parameter_sweep_embeddings_must_come_from_cached_region_runs(sweep, message):
+    with pytest.raises(ValueError, match=message):
+        RegulonadoConfig(
+            results_dir="results",
+            inputs=InputsConfig(fasta="genome.fa", track_sheet="tracks.csv"),
+            targets=TargetsConfig(profile=PROFILE.profile, region_counts=COUNTS),
+            train=TrainConfig(recipes=CURRICULUM, runs=[_cached()]),
+            parameter_sweep={"enabled": True, "sweep_config": "sweep.yaml", **sweep},
+        )

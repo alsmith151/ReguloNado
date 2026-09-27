@@ -1247,6 +1247,47 @@ def test_region_counts_without_runs_builds_the_dataset(tmp_path):
     assert "train_phase" not in output
 
 
+
+def test_region_count_parameter_sweep_waits_for_the_dataset_and_its_caches(tmp_path):
+    """A region-count sweep builds the counts and the named caches, but trains no run."""
+    pytest.importorskip("hydra")
+    runs = [
+        _cached_run("alphagenome"),
+        _cached_run(
+            "flashzoi",
+            backbone="type: borzoi, pretrained: johahi/flashzoi-replicate-0",
+            cache="      cache: {pool_to: 128}\n",
+        ),
+    ]
+    config = _count_only_config(tmp_path, runs=runs)
+    sweep = tmp_path / "sweep.yaml"
+    sweep.write_text("program: regulonado\nmethod: grid\n")
+    config.write_text(
+        config.read_text()
+        + f"""
+parameter_sweep:
+  enabled: true
+  sweep_config: {sweep}
+  target: region_counts
+  embeddings_from: [flashzoi]
+  agents: 2
+"""
+    )
+    result = _pipeline_dry_run(tmp_path, config, stage="parameter-sweep")
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+
+    results = tmp_path / "results"
+    assert "region_counts_gather" in output
+    # Only the named run's cache is built.
+    assert re.search(r"embed_done\s+1", output)
+    assert "borzoi-johahi_flashzoi-replicate-0-pool128" in output
+    assert "alphagenome-all_folds" not in output
+    assert "train_phase" not in output
+    assert "build_dataset" not in output
+    assert re.search(r"parameter_sweep_agent\s+2", output)
+    assert str(results / "parameter-sweep" / "sweep.done") in output
+
 def test_training_typos_fail_before_scheduling(tmp_path):
     pytest.importorskip("hydra")
     typo = """      - name: extra

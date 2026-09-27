@@ -4,15 +4,31 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
     _SWEEP_DIR = RESULTS / "parameter-sweep"
     _SWEEP_AGENT_IDS = [str(index) for index in range(int(PARAMETER_SWEEP.get("agents", 1)))]
 
+
+    def _sweep_inputs():
+        """The dataset the trials train on, and any embedding caches they read."""
+        if PARAMETER_SWEEP.get("target", "profile") == "region_counts":
+            return {
+                "dataset": str(REGION_DATASET_DIR / "counts.parquet"),
+                "embeddings": [
+                    str(embedding_cache_dir(run) / ".done")
+                    for run in PARAMETER_SWEEP.get("embeddings_from", [])
+                ],
+            }
+        return {
+            "dataset": str(training_dataset_dir() / "README.md"),
+            "metadata": str(training_dataset_dir() / "tracks.parquet"),
+        }
+
+
     rule create_parameter_sweep:
         input:
-            sweep_config=lambda w: str(PARAMETER_SWEEP["sweep_config"]),
             # Creating the W&B sweep is part of the dataset-dependent stage,
             # not merely configuration parsing.  Keep this dependency here
             # (rather than only on the agents) so the remote sweep cannot be
             # initialized while the dataset is still being built.
-            dataset=str(training_dataset_dir() / "README.md"),
-            metadata=str(training_dataset_dir() / "tracks.parquet"),
+            unpack(lambda w: _sweep_inputs()),
+            sweep_config=lambda w: str(PARAMETER_SWEEP["sweep_config"]),
         output:
             sweep_id=str(_SWEEP_DIR / "sweep.id"),
         params:
@@ -32,8 +48,7 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
 
     rule parameter_sweep_agent:
         input:
-            dataset=str(training_dataset_dir() / "README.md"),
-            metadata=str(training_dataset_dir() / "tracks.parquet"),
+            unpack(lambda w: _sweep_inputs()),
             sweep_id=str(_SWEEP_DIR / "sweep.id"),
         output:
             done=str(_SWEEP_DIR / "agents" / "agent_{agent}.done"),

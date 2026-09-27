@@ -706,6 +706,21 @@ $defs:
         minLength: 1
         title: Sweep Config
         type: string
+      target:
+        default: profile
+        description: Dataset the trials train on; the agents wait for it to be built.
+        enum:
+        - profile
+        - region_counts
+        title: Target
+        type: string
+      embeddings_from:
+        description: Cached region-count runs whose embedding caches the trials read
+          (as data.embeddings_dir); the agents wait for those caches to be built.
+        items:
+          type: string
+        title: Embeddings From
+        type: array
       agents:
         default: 1
         minimum: 1

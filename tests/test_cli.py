@@ -52,6 +52,43 @@ def test_sweep_train_maps_wandb_json_to_training_settings(tmp_path, monkeypatch)
     assert "++trainer.prefetch_factor=1" in training["settings"]
 
 
+
+def test_sweep_train_runs_region_count_trials_on_a_cached_trunk(tmp_path, monkeypatch):
+    train_module = importlib.import_module("regulonado.cli.train")
+    config_file = tmp_path / "trial.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "target": "region_counts",
+                "data.path": "/results/region_counts/dataset",
+                "data.embeddings_dir": "/results/embeddings/cache",
+                "data.overfit_probe": 16384,
+                "model.hidden": 1024,
+                "trainer.wandb_tags": ["overfit-probe", "hl60"],
+            }
+        )
+    )
+    captured = []
+    monkeypatch.setattr(train_module, "train", lambda **kwargs: captured.append(kwargs))
+    monkeypatch.setenv("WANDB_RUN_ID", "abc123")
+    monkeypatch.setenv("WANDB_PROJECT", "region-sweep")
+
+    train_module.sweep_train(config_file)
+
+    # No profile schedule preflight: one region-count training call.
+    (training,) = captured
+    assert training["target"] == "region_counts"
+    assert training["trunk"] == "cached"
+    assert training["embeddings"] == Path("/results/embeddings/cache")
+    assert training["preset"] is None
+    assert training["dataset"] == Path("/results/region_counts/dataset")
+    assert training["output_dir"] == Path("/results/parameter-sweep/runs/abc123")
+    assert "++data.overfit_probe=16384" in training["settings"]
+    assert '++trainer.wandb_tags=["overfit-probe","hl60"]' in training["settings"]
+    assert '++trainer.report_to=["wandb"]' in training["settings"]
+    assert '++trainer.wandb_project="region-sweep"' in training["settings"]
+    assert not any("embeddings_dir" in setting for setting in training["settings"])
+
 def test_train_builds_a_readable_preset_command(tmp_path):
     result = runner.invoke(
         app,

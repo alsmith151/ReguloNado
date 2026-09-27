@@ -17,7 +17,12 @@ def sweep_train(
         Path, typer.Argument(help="W&B-generated JSON file containing one sweep trial")
     ],
 ) -> None:
-    """Bridge one W&B trial into Hydra's normal training configuration."""
+    """Bridge one W&B trial into Hydra's normal training configuration.
+
+    ``target: region_counts`` trains a region-count head (default preset ``pretrain``);
+    ``data.embeddings_dir`` then selects a cached trunk. Otherwise the trial trains the
+    profile model (default preset ``head_only``).
+    """
     values = json.loads(config_file.read_text())
     if not isinstance(values, dict):
         raise typer.BadParameter(
@@ -31,9 +36,27 @@ def sweep_train(
             param_hint="CONFIG_FILE",
         )
 
-    preset = str(values.pop("preset", "head_only"))
+    target = str(values.pop("target", "profile"))
+    if target not in ("profile", "region_counts"):
+        raise typer.BadParameter(
+            f"Sweep trial target must be profile or region_counts, got {target!r}",
+            param_hint="CONFIG_FILE",
+        )
+    preset = values.pop("preset", None)
+    preset = None if preset is None else str(preset)
+    embeddings = values.pop("data.embeddings_dir", None)
+    if embeddings is not None and target != "region_counts":
+        raise typer.BadParameter(
+            "data.embeddings_dir applies to target: region_counts trials",
+            param_hint="CONFIG_FILE",
+        )
     dataset = Path(str(values.pop("data.path")))
     configured_output = values.pop("output_dir", None)
+    # A trial always reports to its sweep, in the agent's project: the runner exports
+    # trainer.wandb_project as WANDB_PROJECT, which would otherwise move the run out of it.
+    values.setdefault("trainer.report_to", ["wandb"])
+    if os.environ.get("WANDB_PROJECT"):
+        values.setdefault("trainer.wandb_project", os.environ["WANDB_PROJECT"])
     # Sweep agents run inside a fixed CPU allocation and handle unusually large
     # sequence examples. Avoid inheriting a workstation-oriented worker count
     # or holding two prefetched batches per worker, either of which can cause
@@ -47,7 +70,22 @@ def sweep_train(
     settings = hydra_override_items(values)
 
     run_id = os.environ.get("WANDB_RUN_ID", "trial")
-    output_dir = Path(configured_output or dataset.parent / "parameter-sweep" / "runs" / run_id)
+    # Beside the pipeline's <results_dir>/parameter-sweep/: the profile dataset is
+    # <results_dir>/dataset, the region-count one <results_dir>/region_counts/dataset.
+    results_dir = dataset.parents[1] if target == "region_counts" else dataset.parent
+    output_dir = Path(configured_output or results_dir / "parameter-sweep" / "runs" / run_id)
+    if target == "region_counts":
+        train(
+            dataset=dataset,
+            trunk="cached" if embeddings is not None else "live",
+            target=target,
+            embeddings=None if embeddings is None else Path(str(embeddings)),
+            output_dir=output_dir,
+            preset=preset,
+            settings=settings,
+        )
+        return
+    preset = preset or "head_only"
     # Every sweep trial validates its real dataset-backed update budget before
     # constructing the backbone in the same allocated job.
     train(
