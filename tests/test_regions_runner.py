@@ -276,3 +276,55 @@ def test_run_training_with_target_group_and_contrast_weighting(tmp_path):
         entry for entry in state["log_history"] if "eval_contrast_pearson_mean" in entry
     ]
     assert eval_entries
+
+
+def test_plateau_scheduler_follows_the_metric_direction_and_refuses_warmup():
+    import pytest
+    from regulonado.training.runner import _build_scheduler_for_trainer
+
+    model = RegionCountModel(
+        RegionCountConfig(k=2, d=4, track_groups=[0, 1], log_size_factors=[0.0, 0.0], hidden=8)
+    )
+    optimizer = _build_optimizer(model, TrainerConfig(learning_rate=1e-2))
+    for greater, mode in ((True, "max"), (False, "min")):
+        cfg = TrainerConfig(
+            scheduler="reduce_lr_on_plateau",
+            greater_is_better=greater,
+            lr_plateau_factor=0.5,
+            lr_plateau_patience=1,
+        )
+        scheduler = _build_scheduler_for_trainer(optimizer, cfg, schedule=None)
+        assert isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau)
+        assert (scheduler.mode, scheduler.factor, scheduler.patience) == (mode, 0.5, 1)
+    with pytest.raises(ValueError, match="warmup_steps does not combine"):
+        _build_scheduler_for_trainer(
+            optimizer,
+            TrainerConfig(scheduler="reduce_lr_on_plateau", warmup_steps=10),
+            schedule=None,
+        )
+
+
+def test_run_training_lowers_the_learning_rate_when_the_metric_stalls(tmp_path):
+    data = _toy_region_data(n_per_split=16)
+    dataset_dir = tmp_path / "dataset"
+    data.write(dataset_dir)
+    embeddings_dir = tmp_path / "embeddings"
+    _write_cache(embeddings_dir, data.regions, k=2, d=4)
+    output_dir = tmp_path / "out"
+    cfg = _base_cfg(dataset_dir, embeddings_dir, output_dir)
+    # Evaluate on eval_loss every step, with no patience: the first evaluation that does
+    # not improve must cut the learning rate.
+    cfg["trainer"].update(
+        scheduler="reduce_lr_on_plateau",
+        lr_plateau_factor=0.1,
+        lr_plateau_patience=0,
+        eval_every_n_steps=1,
+        evals_per_epoch=None,
+        max_epochs=4,
+        learning_rate=1.0,
+    )
+    run_training(cfg)
+    state = json.loads((output_dir / "trainer_state.json").read_text())
+    rates = [entry["learning_rate"] for entry in state["log_history"] if "learning_rate" in entry]
+    assert rates[0] == 1.0
+    assert min(rates) < 1.0, rates

@@ -176,10 +176,19 @@ class TrainerConfig:
     lora_learning_rate: float | None = None
     # AdamW weight decay applied to all optimizer parameter groups.
     weight_decay: float = 1e-2
-    # Scheduler name passed through to transformers.get_scheduler.
+    # Scheduler name passed through to transformers.get_scheduler. "reduce_lr_on_plateau"
+    # lowers the learning rate when metric_for_best_model stops improving (stepped by the
+    # Trainer after each evaluation), in the direction greater_is_better says.
     scheduler: str = "linear"
-    # Scheduler warmup steps counted in optimizer-update steps.
+    # Scheduler warmup steps counted in optimizer-update steps. Not combinable with
+    # reduce_lr_on_plateau, which only steps at evaluations.
     warmup_steps: int = 0
+    # reduce_lr_on_plateau: multiply the learning rate by this factor after
+    # lr_plateau_patience evaluations without improvement, never below lr_plateau_min_lr.
+    # Keep early_stopping_patience several times larger, so the lowered rate gets a chance.
+    lr_plateau_factor: float = 0.3
+    lr_plateau_patience: int = 4
+    lr_plateau_min_lr: float = 1e-6
     # Number of full passes over the training split when max_steps is unset. Streaming
     # runs size an epoch from the local Arrow shard headers.
     max_epochs: int = 1

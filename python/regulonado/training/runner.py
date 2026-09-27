@@ -1725,6 +1725,22 @@ def _build_scheduler_for_trainer(
     trainer_cfg: TrainerConfig,
     schedule: TrainingSchedule,
 ) -> torch.optim.lr_scheduler.LRScheduler:
+    if trainer_cfg.scheduler == "reduce_lr_on_plateau":
+        if trainer_cfg.warmup_steps:
+            raise ValueError(
+                "trainer.warmup_steps does not combine with reduce_lr_on_plateau, which the "
+                "Trainer only steps after evaluations; set trainer.warmup_steps: 0"
+            )
+        return get_scheduler(
+            trainer_cfg.scheduler,
+            optimizer=optimizer,
+            scheduler_specific_kwargs={
+                "mode": "max" if trainer_cfg.greater_is_better else "min",
+                "factor": trainer_cfg.lr_plateau_factor,
+                "patience": trainer_cfg.lr_plateau_patience,
+                "min_lr": trainer_cfg.lr_plateau_min_lr,
+            },
+        )
     return get_scheduler(
         trainer_cfg.scheduler,
         optimizer=optimizer,
