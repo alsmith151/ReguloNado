@@ -1,0 +1,21 @@
+                                                                                                    
+ Usage: root embed subset [OPTIONS] EMBEDDINGS_DIR REGION_DATASET                                   
+                                                                                                    
+ Copy *regions* random regions of one split into a small cache.                                     
+                                                                                                    
+ Trials that need only a few thousand regions (``data.overfit_probe``) read the copy,               
+ in RAM, with ``data.drop_missing_from_cache: true``, instead of each opening the full              
+ cache -- which reads through all of it on a slow network filesystem.                               
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    embeddings_dir      PATH  Embeddings cache to copy from [required]                          │
+│ *    region_dataset      PATH  RegionCountData run directory the cache was built for [required]  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --out      -o      PATH                  Output embeddings directory [required]               │
+│ *  --regions  -n      INTEGER RANGE [x>=1]  Random regions to copy [required]                    │
+│    --split            TEXT                  Draw the regions from this split [default: train]    │
+│    --seed             INTEGER               Random seed for the draw [default: 0]                │
+│    --help                                   Show this message and exit.                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
