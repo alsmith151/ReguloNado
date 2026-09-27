@@ -1288,6 +1288,36 @@ parameter_sweep:
     assert re.search(r"parameter_sweep_agent\s+2", output)
     assert str(results / "parameter-sweep" / "sweep.done") in output
 
+
+def test_region_count_parameter_sweep_reads_subsets_of_its_caches(tmp_path):
+    """embeddings_subset copies each cache's regions once, and the agents wait for that."""
+    pytest.importorskip("hydra")
+    config = _count_only_config(tmp_path, runs=[_cached_run("alphagenome")])
+    sweep = tmp_path / "sweep.yaml"
+    sweep.write_text("program: regulonado\nmethod: grid\n")
+    config.write_text(
+        config.read_text()
+        + f"""
+parameter_sweep:
+  enabled: true
+  sweep_config: {sweep}
+  target: region_counts
+  embeddings_from: [alphagenome]
+  embeddings_subset: 16384
+"""
+    )
+    result = _pipeline_dry_run(tmp_path, config, stage="parameter-sweep")
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+
+    cache = "alphagenome-all_folds-ctx1048576-stride524288"
+    subset = tmp_path / "results" / "parameter-sweep" / "embeddings" / cache
+    assert re.search(r"sweep_embeddings_subset\s+1", output)
+    assert "regulonado embed subset" in output
+    assert f"--out {subset} --regions 16384 --split train" in output
+    agent_inputs = re.findall(r"rule parameter_sweep_agent:\n\s+input: (.*)", output)
+    assert agent_inputs and all(str(subset / ".done") in line for line in agent_inputs)
+
 def test_training_typos_fail_before_scheduling(tmp_path):
     pytest.importorskip("hydra")
     typo = """      - name: extra

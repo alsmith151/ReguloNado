@@ -5,14 +5,22 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
     _SWEEP_AGENT_IDS = [str(index) for index in range(int(PARAMETER_SWEEP.get("agents", 1)))]
 
 
+    _SWEEP_EMBEDDINGS_DIR = _SWEEP_DIR / "embeddings"
+    _SWEEP_SUBSET = PARAMETER_SWEEP.get("embeddings_subset")
+    # cache name -> run, for the caches the trials read.
+    _SWEEP_CACHES = {
+        embedding_cache_dir(run).name: run for run in PARAMETER_SWEEP.get("embeddings_from", [])
+    }
+
+
     def _sweep_inputs():
         """The dataset the trials train on, and any embedding caches they read."""
         if PARAMETER_SWEEP.get("target", "profile") == "region_counts":
+            embeddings_root = _SWEEP_EMBEDDINGS_DIR if _SWEEP_SUBSET else EMBEDDINGS_DIR
             return {
                 "dataset": str(REGION_DATASET_DIR / "counts.parquet"),
                 "embeddings": [
-                    str(embedding_cache_dir(run) / ".done")
-                    for run in PARAMETER_SWEEP.get("embeddings_from", [])
+                    str(embeddings_root / cache / ".done") for cache in _SWEEP_CACHES
                 ],
             }
         return {
@@ -20,6 +28,36 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
             "metadata": str(training_dataset_dir() / "tracks.parquet"),
         }
 
+
+    if _SWEEP_SUBSET:
+
+        rule sweep_embeddings_subset:
+            """Copy embeddings_subset random train regions of one cache, read once from the
+            full cache so the trials need not each read through it."""
+            input:
+                done=str(EMBEDDINGS_DIR / "{cache}" / ".done"),
+                dataset=str(REGION_DATASET_DIR / "counts.parquet"),
+            params:
+                cache_dir=str(EMBEDDINGS_DIR / "{cache}"),
+                dataset_dir=str(REGION_DATASET_DIR),
+                out_dir=str(_SWEEP_EMBEDDINGS_DIR / "{cache}"),
+                regions=int(_SWEEP_SUBSET),
+            output:
+                touch(str(_SWEEP_EMBEDDINGS_DIR / "{cache}" / ".done")),
+            resources:
+                mem_mb=scaled_mem_mb(32000),
+            wildcard_constraints:
+                cache="|".join(re.escape(name) for name in _SWEEP_CACHES),
+            log:
+                str(RESULTS / "logs" / "sweep_embeddings_subset_{cache}.log"),
+            shell:
+                r"""
+                set -euo pipefail
+                mkdir -p "$(dirname {log:q})"
+                regulonado embed subset {params.cache_dir:q} {params.dataset_dir:q} \
+                    --out {params.out_dir:q} --regions {params.regions} --split train \
+                    > {log:q} 2>&1
+                """
 
     rule create_parameter_sweep:
         input:

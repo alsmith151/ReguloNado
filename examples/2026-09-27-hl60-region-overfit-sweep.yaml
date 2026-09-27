@@ -18,9 +18,12 @@
 #
 #   regulonado pipeline /path/to/ReguloNado/examples/2026-09-27-hl60-specificity-directions.yaml parameter-sweep
 #
-# The stage waits for the region-count dataset and the three embedding caches below
-# (parameter_sweep.embeddings_from), creates the sweep and runs one-GPU agents. Paths are
-# relative to the UEF repo root, where the pipeline runs.
+# The stage copies 16384 random train regions of each of the three embedding caches below
+# (parameter_sweep.embeddings_from / embeddings_subset) to
+# results/.../parameter-sweep/embeddings/<cache>, once, then creates the sweep and runs
+# one-GPU agents. Trials read those ~1 GB copies into RAM: opening a full 40-64 GB cache
+# memory-mapped reads through all of it on Ceph, which every trial would otherwise repeat.
+# Paths are relative to the UEF repo root, where the pipeline runs.
 #
 # 3 caches x 5 widths x 2 poolings x 2 learning rates = 60 trials of 4000 steps each;
 # each lands in results/2026-09-26-hl60-region-counts/parameter-sweep/runs/<run id>.
@@ -44,25 +47,28 @@ parameters:
   data.path:
     value: results/2026-09-26-hl60-region-counts/region_counts/dataset
   # Features: AlphaGenome full trunk (1 Mb context), Flashzoi (524 kb, pooled to 128 bp),
-  # AlphaGenome CNN encoder only (~1.5 kb receptive field). The caches of the
-  # hl60_alphagenome_trunk, hl60_flashzoi_trunk and hl60_alphagenome_encoder runs.
+  # AlphaGenome CNN encoder only (~1.5 kb receptive field). The pipeline's 16384-region
+  # copies of the hl60_alphagenome_trunk, hl60_flashzoi_trunk and hl60_alphagenome_encoder
+  # caches.
   data.embeddings_dir:
     values:
-      - results/2026-09-26-hl60-region-counts/embeddings/alphagenome-all_folds-ctx1048576-stride524288
-      - results/2026-09-26-hl60-region-counts/embeddings/borzoi-johahi_flashzoi-replicate-0-pool128
-      - results/2026-09-26-hl60-region-counts/embeddings/alphagenome-all_folds-encoder-ctx4096-stride2048-rc
+      - results/2026-09-26-hl60-region-counts/parameter-sweep/embeddings/alphagenome-all_folds-ctx1048576-stride524288
+      - results/2026-09-26-hl60-region-counts/parameter-sweep/embeddings/borzoi-johahi_flashzoi-replicate-0-pool128
+      - results/2026-09-26-hl60-region-counts/parameter-sweep/embeddings/alphagenome-all_folds-encoder-ctx4096-stride2048-rc
   data.target_group:
     value: HL-60
-  # 16k regions: 64 steps per epoch at batch 256, so 4000 steps is ~60 passes over each
-  # region -- enough to memorise if the head can.
+  # Every region of the copies (parameter_sweep.embeddings_subset): 64 steps per epoch at
+  # batch 256, so 4000 steps is ~60 passes over each region -- enough to memorise if the
+  # head can. The rest of the dataset is not in the copies, so it is dropped.
   data.overfit_probe:
     value: 16384
+  data.drop_missing_from_cache:
+    value: true
   data.enable_rc_aug:
     value: false
-  # A 16k subset is a few GB of random reads; memory-mapping beats loading a 64 GB cache
-  # per trial.
+  # The ~1 GB copy is read into RAM once per trial.
   data.in_memory:
-    value: false
+    value: true
 
   # The head: attention pool -> Linear(d, hidden) -> GELU -> Dropout -> readout. hidden is
   # its only width knob (depth is fixed at one hidden layer); 512 is the current default,

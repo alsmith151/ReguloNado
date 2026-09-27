@@ -501,6 +501,16 @@ class ParameterSweepConfig(BaseModel):
             "data.embeddings_dir); the agents wait for those caches to be built."
         ),
     )
+    embeddings_subset: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Copy this many random train regions of each embeddings_from cache to "
+            "<results_dir>/parameter-sweep/embeddings/<cache>, once, for the trials to read "
+            "instead of the full cache (in RAM, with data.drop_missing_from_cache): on a "
+            "network filesystem, opening a full cache reads through all of it."
+        ),
+    )
     agents: int = Field(default=1, ge=1)
     trials_per_agent: int = Field(default=1, ge=1)
     cpus_per_agent: int = Field(default=4, ge=1)
@@ -915,6 +925,8 @@ class RegulonadoConfig(BaseModel):
             )
         if sweep.embeddings_from and sweep.target != "region_counts":
             raise ValueError("parameter_sweep.embeddings_from applies to target: region_counts")
+        if sweep.embeddings_subset is not None and not sweep.embeddings_from:
+            raise ValueError("parameter_sweep.embeddings_subset needs embeddings_from")
         runs = {run.name: run for run in self.train.runs} if self.train else {}
         for name in sweep.embeddings_from:
             run = runs.get(name)

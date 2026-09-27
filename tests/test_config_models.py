@@ -586,3 +586,8 @@ def test_parameter_sweep_embeddings_must_come_from_cached_region_runs(sweep, mes
             train=TrainConfig(recipes=CURRICULUM, runs=[_cached()]),
             parameter_sweep={"enabled": True, "sweep_config": "sweep.yaml", **sweep},
         )
+
+
+def test_parameter_sweep_embeddings_subset_needs_embeddings_from():
+    with pytest.raises(ValueError, match="embeddings_subset needs embeddings_from"):
+        _counts_sweep_config(target="region_counts", embeddings_subset=16384)

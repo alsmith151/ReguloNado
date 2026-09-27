@@ -70,6 +70,7 @@ __all__ = [
     "embedding_features",
     "read_manifest",
     "region_table_hash",
+    "subset_embeddings",
     "validate_manifest",
     "write_chrom_embeddings",
 ]
@@ -818,3 +819,31 @@ class EmbeddingStore:
         # Array2D's storage is list<list<float16>>: flatten both levels for the raw values.
         values = table.column(column).combine_chunks().storage.flatten().flatten()
         return values.to_numpy(zero_copy_only=False).reshape(len(positions), self.k, self.d)
+
+
+#: File name of a subset cache's single embeddings file (:func:`subset_embeddings`).
+SUBSET_FILENAME = f"subset{CHROM_SUFFIX}"
+
+
+def subset_embeddings(
+    embeddings_dir: str | Path, out_dir: str | Path, region_rows: Sequence[int] | np.ndarray
+) -> Path:
+    """Copy *region_rows*' features from one cache into a small cache at *out_dir*.
+
+    The copy keeps the source's manifest, so it validates against the same region table
+    and its ``region_row`` values index the same rows; it just holds fewer of them (train
+    on it with ``data.drop_missing_from_cache``). Opening a large memory-mapped cache
+    reads through all of it on a slow network filesystem, so trials that only need a few
+    thousand regions (``data.overfit_probe``) read a copy like this instead, once, in RAM.
+    """
+    source = EmbeddingStore(embeddings_dir)
+    rows = np.unique(np.asarray(region_rows, dtype=np.int64))
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    # In cache order, so the reads walk the source files forwards.
+    rows = rows[np.argsort(source._position[rows], kind="stable")] if rows.size else rows
+    features = source.get_many(rows)
+    features_rc = source.get_many(rows, rc=True) if source.has_rc else None
+    write_chrom_embeddings(out / SUBSET_FILENAME, rows, features, features_rc)
+    _write_manifest(out, source.manifest)
+    return out

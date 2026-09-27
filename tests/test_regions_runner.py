@@ -393,3 +393,38 @@ def test_overfit_probe_rejects_more_rows_than_the_train_split_has(tmp_path):
 
     with pytest.raises(ValueError, match="exceeds the 8 available train regions"):
         run_training(cfg)
+
+
+def test_overfit_probe_trains_on_a_subset_cache_of_its_regions(tmp_path):
+    """`embed subset` copies N train regions; a probe over all N trains on the copy alone."""
+    from regulonado.cli.app import app
+    from regulonado.embeddings.cache import EmbeddingStore
+    from typer.testing import CliRunner
+
+    data = _toy_region_data(n_per_split=8)
+    dataset_dir = tmp_path / "dataset"
+    data.write(dataset_dir)
+    embeddings_dir = tmp_path / "embeddings"
+    _write_cache(embeddings_dir, data.regions, k=2, d=4)
+    subset_dir = tmp_path / "subset"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "embed", "subset", str(embeddings_dir), str(dataset_dir),
+            "--out", str(subset_dir), "--regions", "4",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    full, subset = EmbeddingStore(embeddings_dir), EmbeddingStore(subset_dir)
+    rows = subset.region_rows
+    assert rows.size == 4
+    # Drawn from the train split (rows 0-7), with the source's features.
+    assert (rows < 8).all()
+    np.testing.assert_array_equal(subset.get_many(rows), full.get_many(rows))
+
+    cfg = _base_cfg(dataset_dir, subset_dir, tmp_path / "out")
+    cfg["data"].update(overfit_probe=4, drop_missing_from_cache=True, in_memory=True)
+    summary = run_training(cfg)
+    assert summary["history"]["eval/loss"]

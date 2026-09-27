@@ -721,6 +721,17 @@ $defs:
           type: string
         title: Embeddings From
         type: array
+      embeddings_subset:
+        anyOf:
+        - minimum: 1
+          type: integer
+        - type: 'null'
+        default: null
+        description: 'Copy this many random train regions of each embeddings_from
+          cache to <results_dir>/parameter-sweep/embeddings/<cache>, once, for the
+          trials to read instead of the full cache (in RAM, with data.drop_missing_from_cache):
+          on a network filesystem, opening a full cache reads through all of it.'
+        title: Embeddings Subset
       agents:
         default: 1
         minimum: 1

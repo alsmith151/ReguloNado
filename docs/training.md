@@ -195,7 +195,15 @@ parameter_sweep:
 In the W&B sweep file, each trial sets `target: region_counts` (default preset
 `pretrain`, from `python/configs/region_experiment/`), `data.path` to
 `<results_dir>/region_counts/dataset` and, for a cached trunk, `data.embeddings_dir` to
-one of `<results_dir>/embeddings/<cache>`. Trials write to
+one of `<results_dir>/embeddings/<cache>`.
+
+Opening a full cache memory-mapped reads through all of it, which on a network filesystem
+such as Ceph takes each trial many minutes of I/O before training starts. A sweep that
+needs only a few thousand regions (`data.overfit_probe`) should set `embeddings_subset:
+N`: one job per cache copies N random train regions (`regulonado embed subset`) to
+`<results_dir>/parameter-sweep/embeddings/<cache>`, and the agents wait for those copies.
+Point `data.embeddings_dir` at them, with `data.in_memory: true` and
+`data.drop_missing_from_cache: true`. Trials write to
 `<results_dir>/parameter-sweep/runs/<run id>` either way, and always report to W&B in the
 agents' project.
 

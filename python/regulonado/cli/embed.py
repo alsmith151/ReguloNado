@@ -140,3 +140,41 @@ def regions(
         device=resolved_device,
     )
     typer.echo(f"Wrote embeddings to {out}")
+
+
+@embed_app.command("subset")
+def subset(
+    embeddings_dir: Annotated[Path, typer.Argument(help="Embeddings cache to copy from")],
+    region_dataset: Annotated[
+        Path,
+        typer.Argument(help="RegionCountData run directory the cache was built for"),
+    ],
+    out: Annotated[Path, typer.Option("--out", "-o", help="Output embeddings directory")],
+    regions: Annotated[
+        int, typer.Option("--regions", "-n", help="Random regions to copy", min=1)
+    ],
+    split: Annotated[
+        str, typer.Option("--split", help="Draw the regions from this split")
+    ] = "train",
+    seed: Annotated[int, typer.Option("--seed", help="Random seed for the draw")] = 0,
+) -> None:
+    """Copy *regions* random regions of one split into a small cache.
+
+    Trials that need only a few thousand regions (``data.overfit_probe``) read the copy,
+    in RAM, with ``data.drop_missing_from_cache: true``, instead of each opening the full
+    cache -- which reads through all of it on a slow network filesystem.
+    """
+    import numpy as np
+    from regulonado.counts.dataset import RegionCountData
+    from regulonado.embeddings.cache import subset_embeddings
+    from regulonado.training.regions.data import attach_region_rows
+
+    data, _ = attach_region_rows(RegionCountData.read(region_dataset), embeddings_dir)
+    region_rows = data.split(split).regions["region_row"].to_numpy()
+    if regions > region_rows.size:
+        raise typer.BadParameter(
+            f"split {split!r} has only {region_rows.size} regions", param_hint="--regions"
+        )
+    chosen = np.random.default_rng(seed).choice(region_rows, size=regions, replace=False)
+    subset_embeddings(embeddings_dir, out, chosen)
+    typer.echo(f"Wrote {regions} {split} regions of {embeddings_dir} to {out}")
