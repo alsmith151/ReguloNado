@@ -9,10 +9,14 @@ trainer:
   batch_size: 64
   eval_batch_size: 64
   learning_rate: 1.0e-3
-  scheduler: cosine
-  max_epochs: 20
+  # Lower the learning rate when the stage's metric stalls for an epoch (4 evaluations);
+  # stop after 3 epochs without improvement, by which time it has been lowered twice.
+  scheduler: reduce_lr_on_plateau
+  lr_plateau_factor: 0.3
+  lr_plateau_patience: 4
+  max_epochs: 30
   evals_per_epoch: 4
   report_to: [wandb]
   metric_for_best_model: eval_contrast_pearson_mean
   greater_is_better: true
-  early_stopping_patience: 5
+  early_stopping_patience: 12
