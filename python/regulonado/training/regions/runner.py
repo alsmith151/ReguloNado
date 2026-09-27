@@ -582,6 +582,13 @@ def run_training(cfg: Mapping[str, Any]) -> dict[str, Any]:
         compute_metrics=compute_metrics,
     )
 
+    if trainer_cfg.num_workers > 0:
+        # Workers hand each batch over as a named shared-memory file, not as a file
+        # descriptor passed through a per-worker Unix socket in TMPDIR: on the cluster that
+        # socket went missing hours into live-trunk runs, killing them with
+        # FileNotFoundError in multiprocessing.resource_sharer.
+        torch.multiprocessing.set_sharing_strategy("file_system")
+
     resume = trainer_cfg.resume_from_checkpoint
     trainer.train(resume_from_checkpoint=resume if resume else None)
     trainer.save_model(str(output_dir))
