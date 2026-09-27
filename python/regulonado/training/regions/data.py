@@ -148,6 +148,13 @@ class RegionsDataConfig:
     in_memory
         Read the whole embeddings cache into RAM once, instead of memory-mapping it
         (:class:`~regulonado.embeddings.cache.EmbeddingStore`).
+    overfit_probe
+        Diagnostic: train on this many randomly chosen *train* regions and evaluate on
+        exactly those same regions, so ``eval_*`` metrics measure how well the model fits
+        its own training data rather than how it generalises. A model that cannot reach a
+        near-perfect score here is limited by its features or its capacity, not by the
+        amount of data; one that can is limited by generalisation. ``None`` (the default)
+        trains and evaluates normally.
     drop_missing_from_cache
         A region absent from the embeddings cache is a clear error by default (a
         cache/region-table mismatch that should never be silently masked); set this to
@@ -175,6 +182,7 @@ class RegionsDataConfig:
     count_mask_factor: float = 20.0
     enable_rc_aug: bool = True
     in_memory: bool = False
+    overfit_probe: int | None = None
     drop_missing_from_cache: bool = False
     exclude_regions: str | None = None
 

@@ -423,12 +423,46 @@ def _load_and_prepare(
     return prepared, source, data_cfg
 
 
+def _build_overfit_probe_datasets(
+    prepared: PreparedRegionData,
+    source: _FeatureSource,
+    train_dataset: Dataset,
+    *,
+    rows: int,
+    seed: int,
+) -> tuple[Dataset, Any, bool]:
+    """Train and evaluate on the same *rows* train regions (``data.overfit_probe``).
+
+    The evaluation copy reads the identical regions with ``train=False``, so no
+    reverse-complement or shift augmentation is applied and the same region yields the same
+    features every time: ``eval_*`` then measures fit to the training data, not
+    generalisation.
+    """
+    n_train = len(train_dataset)
+    if rows < 1:
+        raise ValueError(f"data.overfit_probe must be at least 1, got {rows}")
+    if rows > n_train:
+        raise ValueError(
+            f"data.overfit_probe ({rows}) exceeds the {n_train} available train regions"
+        )
+    rng = np.random.default_rng(seed)
+    indices = sorted(rng.choice(n_train, size=rows, replace=False).tolist())
+    eval_dataset = source.make_dataset(prepared.data, "train", train=False)
+    logger.warning(
+        f"data.overfit_probe={rows}: training and evaluating on the same {rows} train "
+        "regions. Every eval_* metric measures fit to the training data, NOT "
+        "generalisation -- do not compare these numbers against ordinary runs."
+    )
+    return Subset(train_dataset, indices), Subset(eval_dataset, indices), True
+
+
 def _build_datasets(
     prepared: PreparedRegionData,
     source: _FeatureSource,
     trainer_cfg: TrainerConfig,
     *,
     seed: int,
+    overfit_probe: int | None = None,
 ) -> tuple[Dataset, Any, bool]:
     split_names = set(prepared.data.regions["split"].unique().to_list())
     has_eval = "val" in split_names
@@ -436,6 +470,10 @@ def _build_datasets(
     train_dataset = source.make_dataset(
         prepared.data, "train", train=True, sample_weights=prepared.train_sample_weights
     )
+    if overfit_probe is not None:
+        return _build_overfit_probe_datasets(
+            prepared, source, train_dataset, rows=overfit_probe, seed=seed
+        )
     val_dataset: Any = None
     if has_eval:
         val_dataset = source.make_dataset(prepared.data, "val", train=False)
@@ -471,7 +509,7 @@ def run_training(cfg: Mapping[str, Any]) -> dict[str, Any]:
 
     prepared, source, data_cfg = _load_and_prepare(cfg)
     train_dataset, val_dataset, has_eval = _build_datasets(
-        prepared, source, trainer_cfg, seed=seed
+        prepared, source, trainer_cfg, seed=seed, overfit_probe=data_cfg.overfit_probe
     )
 
     schedule: TrainingSchedule = _resolve_training_schedule(

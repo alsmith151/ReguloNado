@@ -328,3 +328,68 @@ def test_run_training_lowers_the_learning_rate_when_the_metric_stalls(tmp_path):
     rates = [entry["learning_rate"] for entry in state["log_history"] if "learning_rate" in entry]
     assert rates[0] == 1.0
     assert min(rates) < 1.0, rates
+
+
+# --------------------------------------------------------------------------- #
+# data.overfit_probe
+# --------------------------------------------------------------------------- #
+def test_overfit_probe_trains_and_evaluates_on_the_same_regions(tmp_path):
+    from regulonado.training.regions.runner import (
+        _build_datasets,
+        _load_and_prepare,
+        _resolve_trainer_config,
+    )
+
+    data = _toy_region_data(n_per_split=8)
+    dataset_dir = tmp_path / "dataset"
+    data.write(dataset_dir)
+    embeddings_dir = tmp_path / "embeddings"
+    _write_cache(embeddings_dir, data.regions, k=2, d=4)
+
+    cfg = _base_cfg(dataset_dir, embeddings_dir, tmp_path / "out")
+    prepared, source, _ = _load_and_prepare(cfg)
+    train_dataset, val_dataset, has_eval = _build_datasets(
+        prepared, source, _resolve_trainer_config(cfg), seed=0, overfit_probe=4
+    )
+
+    assert has_eval
+    assert len(train_dataset) == len(val_dataset) == 4
+    # The same regions, in the same order, on both sides.
+    assert train_dataset.indices == val_dataset.indices
+    # The evaluation copy is not in train mode, so no augmentation is applied to it.
+    assert train_dataset.dataset.train is True
+    assert val_dataset.dataset.train is False
+
+
+def test_overfit_probe_warns_that_eval_metrics_are_not_generalisation(tmp_path, caplog):
+    import logging
+
+    data = _toy_region_data(n_per_split=8)
+    dataset_dir = tmp_path / "dataset"
+    data.write(dataset_dir)
+    embeddings_dir = tmp_path / "embeddings"
+    _write_cache(embeddings_dir, data.regions, k=2, d=4)
+
+    cfg = _base_cfg(dataset_dir, embeddings_dir, tmp_path / "out")
+    cfg["data"]["overfit_probe"] = 4
+
+    with caplog.at_level(logging.WARNING):
+        run_training(cfg)
+
+    assert any("overfit_probe" in record.message for record in caplog.records)
+
+
+def test_overfit_probe_rejects_more_rows_than_the_train_split_has(tmp_path):
+    import pytest
+
+    data = _toy_region_data(n_per_split=8)
+    dataset_dir = tmp_path / "dataset"
+    data.write(dataset_dir)
+    embeddings_dir = tmp_path / "embeddings"
+    _write_cache(embeddings_dir, data.regions, k=2, d=4)
+
+    cfg = _base_cfg(dataset_dir, embeddings_dir, tmp_path / "out")
+    cfg["data"]["overfit_probe"] = 999
+
+    with pytest.raises(ValueError, match="exceeds the 8 available train regions"):
+        run_training(cfg)
