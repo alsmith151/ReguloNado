@@ -79,14 +79,16 @@ def test_parameter_sweep_does_not_require_training_matrix() -> None:
         results_dir="results",
         targets=PROFILE,
         inputs=InputsConfig(fasta="genome.fa", bigwig_dir="bigwigs"),
-        parameter_sweep={
-            "enabled": True,
-            "sweep_config": "sweep.yaml",
-            "agents": 4,
-            "trials_per_agent": 2,
-            "cpus_per_agent": 4,
-            "mem_mb_per_agent": 64_000,
-            "runtime_minutes_per_agent": 240,
+        parameter_sweeps={
+            "heads": {
+                "enabled": True,
+                "sweep_config": "sweep.yaml",
+                "agents": 4,
+                "trials_per_agent": 2,
+                "cpus_per_agent": 4,
+                "mem_mb_per_agent": 64_000,
+                "runtime_minutes_per_agent": 240,
+            }
         },
     )
 
@@ -555,13 +557,13 @@ def _counts_sweep_config(**sweep: Any) -> RegulonadoConfig:
         inputs=InputsConfig(fasta="genome.fa", bam_dir="bams"),
         targets=TargetsConfig(region_counts=COUNTS),
         train=TrainConfig(recipes=CURRICULUM, runs=[_cached()]),
-        parameter_sweep={"enabled": True, "sweep_config": "sweep.yaml", **sweep},
+        parameter_sweeps={"heads": {"enabled": True, "sweep_config": "sweep.yaml", **sweep}},
     )
 
 
 def test_region_count_parameter_sweep_reads_cached_runs_embeddings():
     config = _counts_sweep_config(target="region_counts", embeddings_from=["counts_run"])
-    assert config.parameter_sweep.embeddings_from == ["counts_run"]
+    assert config.parameter_sweeps["heads"].embeddings_from == ["counts_run"]
     _validate_against_schema(config.to_dict())
 
 
@@ -584,10 +586,34 @@ def test_parameter_sweep_embeddings_must_come_from_cached_region_runs(sweep, mes
             inputs=InputsConfig(fasta="genome.fa", track_sheet="tracks.csv"),
             targets=TargetsConfig(profile=PROFILE.profile, region_counts=COUNTS),
             train=TrainConfig(recipes=CURRICULUM, runs=[_cached()]),
-            parameter_sweep={"enabled": True, "sweep_config": "sweep.yaml", **sweep},
+            parameter_sweeps={
+                "heads": {"enabled": True, "sweep_config": "sweep.yaml", **sweep}
+            },
         )
 
 
 def test_parameter_sweep_embeddings_subset_needs_embeddings_from():
     with pytest.raises(ValueError, match="embeddings_subset needs embeddings_from"):
         _counts_sweep_config(target="region_counts", embeddings_subset=16384)
+
+
+def test_parameter_sweep_names_are_directory_safe():
+    with pytest.raises(ValueError, match="only letters, digits"):
+        RegulonadoConfig(
+            results_dir="results",
+            inputs=InputsConfig(fasta="genome.fa", bam_dir="bams"),
+            targets=TargetsConfig(region_counts=COUNTS),
+            parameter_sweeps={
+                "a/b": {"enabled": True, "sweep_config": "s.yaml", "target": "region_counts"}
+            },
+        )
+
+
+def test_disabled_parameter_sweeps_are_not_checked():
+    config = RegulonadoConfig(
+        results_dir="results",
+        inputs=InputsConfig(fasta="genome.fa", bam_dir="bams"),
+        targets=TargetsConfig(region_counts=COUNTS),
+        parameter_sweeps={"old": {"sweep_config": "s.yaml", "embeddings_from": ["gone"]}},
+    )
+    assert not config.parameter_sweeps["old"].enabled

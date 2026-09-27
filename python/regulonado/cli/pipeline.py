@@ -355,12 +355,17 @@ def pipeline(
                 for run in config.train.runs
             )
         elif stage == "parameter-sweep":
-            parameter_sweep = raw.get("parameter_sweep") or {}
-            if not parameter_sweep.get("enabled"):
+            sweeps = [
+                name
+                for name, sweep in (raw.get("parameter_sweeps") or {}).items()
+                if sweep.get("enabled")
+            ]
+            if not sweeps:
                 raise typer.BadParameter(
-                    "Config has no enabled parameter_sweep stage", param_hint="stage"
+                    "Config has no enabled parameter_sweeps", param_hint="stage"
                 )
-            selected_targets.add(str(results / "parameter-sweep" / "sweep.done"))
+            for name in sweeps:
+                selected_targets.add(str(results / "parameter-sweeps" / name / "sweep.done"))
         elif stage == "attribution":
             attribution = raw.get("attribution") or {}
             targets = attribution.get("targets") or []

@@ -13,20 +13,27 @@
 # stopping): this is a memorisation test, not a generalisation one. Do not compare these
 # eval numbers against ordinary runs.
 #
-# Run through the pipeline's parameter-sweep stage (2026-09-27-hl60-specificity-directions
-# enables it with this file), from the UEF repo root:
+# Run through the pipeline's parameter-sweep stage (parameter_sweeps.region_overfit in
+# 2026-09-27-hl60-specificity-directions), from the UEF repo root:
 #
 #   regulonado pipeline /path/to/ReguloNado/examples/2026-09-27-hl60-specificity-directions.yaml parameter-sweep
 #
-# The stage copies 16384 random train regions of each of the three embedding caches below
-# (parameter_sweep.embeddings_from / embeddings_subset) to
-# results/.../parameter-sweep/embeddings/<cache>, once, then creates the sweep and runs
-# one-GPU agents. Trials read those ~1 GB copies into RAM: opening a full 40-64 GB cache
-# memory-mapped reads through all of it on Ceph, which every trial would otherwise repeat.
-# Paths are relative to the UEF repo root, where the pipeline runs.
+# The stage copies 16384 random train regions of each embedding cache below (the sweep's
+# embeddings_from / embeddings_subset) to
+# results/.../parameter-sweeps/embeddings/<cache>-train16384, once, then creates the sweep
+# and runs one-GPU agents. Trials read those ~1 GB copies into RAM: opening a full 40-64 GB
+# cache memory-mapped reads through all of it on Ceph, which every trial would otherwise
+# repeat. Paths are relative to the UEF repo root, where the pipeline runs. The CNN encoder
+# has its own sweeps, run live: 2026-09-27-hl60-encoder-overfit-{frozen,locon}-sweep.
 #
-# 3 caches x 5 widths x 2 poolings x 2 learning rates = 60 trials of 4000 steps each;
-# each lands in results/2026-09-26-hl60-region-counts/parameter-sweep/runs/<run id>.
+# 2 caches x 5 widths x 2 poolings x 2 learning rates = 40 trials of 4000 steps each; each
+# lands in results/2026-09-26-hl60-region-counts/parameter-sweeps/region_overfit/runs/.
+#
+# First run (W&B sweep kkh934og, from the full caches), fit to the training regions:
+# AlphaGenome trunk contrast_pearson_mean 0.84 (hidden 256) -> 0.89 (512) -> 0.94 (1024)
+# -> 0.97 (2048) -> 0.977 (4096), HL-60 0.94 -> 0.998, at lr 1e-3; 3e-3 was worse at every
+# width, most at the widest (0.92 at 4096); per_group and shared pooling within 0.005.
+# The features are not the limit on fitting HL-60 specificity; generalisation is.
 program: regulonado
 name: hl60-region-overfit
 method: grid
@@ -46,18 +53,16 @@ parameters:
     value: pretrain
   data.path:
     value: results/2026-09-26-hl60-region-counts/region_counts/dataset
-  # Features: AlphaGenome full trunk (1 Mb context), Flashzoi (524 kb, pooled to 128 bp),
-  # AlphaGenome CNN encoder only (~1.5 kb receptive field). The pipeline's 16384-region
-  # copies of the hl60_alphagenome_trunk, hl60_flashzoi_trunk and hl60_alphagenome_encoder
-  # caches.
+  # Features: AlphaGenome full trunk (1 Mb context), Flashzoi (524 kb, pooled to 128 bp).
+  # The pipeline's 16384-region copies of the hl60_alphagenome_trunk and
+  # hl60_flashzoi_trunk caches.
   data.embeddings_dir:
     values:
-      - results/2026-09-26-hl60-region-counts/parameter-sweep/embeddings/alphagenome-all_folds-ctx1048576-stride524288
-      - results/2026-09-26-hl60-region-counts/parameter-sweep/embeddings/borzoi-johahi_flashzoi-replicate-0-pool128
-      - results/2026-09-26-hl60-region-counts/parameter-sweep/embeddings/alphagenome-all_folds-encoder-ctx4096-stride2048-rc
+      - results/2026-09-26-hl60-region-counts/parameter-sweeps/embeddings/alphagenome-all_folds-ctx1048576-stride524288-train16384
+      - results/2026-09-26-hl60-region-counts/parameter-sweeps/embeddings/borzoi-johahi_flashzoi-replicate-0-pool128-train16384
   data.target_group:
     value: HL-60
-  # Every region of the copies (parameter_sweep.embeddings_subset): 64 steps per epoch at
+  # Every region of the copies (the sweep's embeddings_subset): 64 steps per epoch at
   # batch 256, so 4000 steps is ~60 passes over each region -- enough to memorise if the
   # head can. The rest of the dataset is not in the copies, so it is dropped.
   data.overfit_probe:

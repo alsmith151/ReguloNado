@@ -483,8 +483,17 @@ class TrainConfig(BaseModel):
         return self.recipes[self.run(run_name).recipe][-1].name
 
 
+#: A ``parameter_sweeps`` name: it becomes a directory and part of job and log names.
+SWEEP_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+
+
 class ParameterSweepConfig(BaseModel):
-    """Optional W&B-managed GPU parameter sweep."""
+    """One W&B-managed GPU parameter sweep, under ``parameter_sweeps.<name>``.
+
+    Its sweep id, agents' markers and trial run directories live in
+    ``<results_dir>/parameter-sweeps/<name>/``. Agents pass trials the pipeline's
+    ``inputs.fasta`` (for live-trunk region-count trials) and that run directory.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -506,7 +515,8 @@ class ParameterSweepConfig(BaseModel):
         ge=1,
         description=(
             "Copy this many random train regions of each embeddings_from cache to "
-            "<results_dir>/parameter-sweep/embeddings/<cache>, once, for the trials to read "
+            "<results_dir>/parameter-sweeps/embeddings/<cache>-train<N>, once, for the "
+            "trials to read "
             "instead of the full cache (in RAM, with data.drop_missing_from_cache): on a "
             "network filesystem, opening a full cache reads through all of it."
         ),
@@ -861,7 +871,10 @@ class RegulonadoConfig(BaseModel):
     scaling: ScalingConfig = Field(default_factory=ScalingConfig)
     qc: QCConfig = Field(default_factory=QCConfig)
     train: TrainConfig | None = None
-    parameter_sweep: ParameterSweepConfig | None = None
+    parameter_sweeps: dict[str, ParameterSweepConfig] = Field(
+        default_factory=dict,
+        description="W&B parameter sweeps by name; the parameter-sweep stage runs enabled ones.",
+    )
     prediction: PredictionConfig | None = None
     design: DesignConfig | None = None
     attribution: AttributionConfig | None = None
@@ -915,26 +928,31 @@ class RegulonadoConfig(BaseModel):
 
     @model_validator(mode="after")
     def _parameter_sweep_inputs_are_configured(self) -> "RegulonadoConfig":
-        sweep = self.parameter_sweep
-        if sweep is None or not sweep.enabled:
-            return self
-        if getattr(self.targets, sweep.target) is None:
-            raise ValueError(
-                f"parameter_sweep trains on {sweep.target!r}, but targets.{sweep.target} is "
-                "not configured"
-            )
-        if sweep.embeddings_from and sweep.target != "region_counts":
-            raise ValueError("parameter_sweep.embeddings_from applies to target: region_counts")
-        if sweep.embeddings_subset is not None and not sweep.embeddings_from:
-            raise ValueError("parameter_sweep.embeddings_subset needs embeddings_from")
         runs = {run.name: run for run in self.train.runs} if self.train else {}
-        for name in sweep.embeddings_from:
-            run = runs.get(name)
-            if run is None or run.trunk != "cached" or run.target != "region_counts":
+        for sweep_name, sweep in self.parameter_sweeps.items():
+            where = f"parameter_sweeps.{sweep_name}"
+            if not re.match(SWEEP_NAME_PATTERN, sweep_name):
                 raise ValueError(
-                    f"parameter_sweep.embeddings_from: {name!r} is not a train run with "
-                    "trunk: cached and target: region_counts"
+                    f"{where}: a sweep name may hold only letters, digits, '_' and '-'"
                 )
+            if not sweep.enabled:
+                continue
+            if getattr(self.targets, sweep.target) is None:
+                raise ValueError(
+                    f"{where} trains on {sweep.target!r}, but targets.{sweep.target} is not "
+                    "configured"
+                )
+            if sweep.embeddings_from and sweep.target != "region_counts":
+                raise ValueError(f"{where}.embeddings_from applies to target: region_counts")
+            if sweep.embeddings_subset is not None and not sweep.embeddings_from:
+                raise ValueError(f"{where}.embeddings_subset needs embeddings_from")
+            for name in sweep.embeddings_from:
+                run = runs.get(name)
+                if run is None or run.trunk != "cached" or run.target != "region_counts":
+                    raise ValueError(
+                        f"{where}.embeddings_from: {name!r} is not a train run with "
+                        "trunk: cached and target: region_counts"
+                    )
         return self
 
     @model_validator(mode="after")

@@ -696,7 +696,14 @@ $defs:
     type: object
   ParameterSweepConfig:
     additionalProperties: false
-    description: Optional W&B-managed GPU parameter sweep.
+    description: 'One W&B-managed GPU parameter sweep, under ``parameter_sweeps.<name>``.
+
+
+      Its sweep id, agents'' markers and trial run directories live in
+
+      ``<results_dir>/parameter-sweeps/<name>/``. Agents pass trials the pipeline''s
+
+      ``inputs.fasta`` (for live-trunk region-count trials) and that run directory.'
     properties:
       enabled:
         default: false
@@ -728,8 +735,8 @@ $defs:
         - type: 'null'
         default: null
         description: 'Copy this many random train regions of each embeddings_from
-          cache to <results_dir>/parameter-sweep/embeddings/<cache>, once, for the
-          trials to read instead of the full cache (in RAM, with data.drop_missing_from_cache):
+          cache to <results_dir>/parameter-sweeps/embeddings/<cache>-train<N>, once,
+          for the trials to read instead of the full cache (in RAM, with data.drop_missing_from_cache):
           on a network filesystem, opening a full cache reads through all of it.'
         title: Embeddings Subset
       agents:
@@ -1339,10 +1346,13 @@ properties:
     anyOf:
     - $ref: '#/$defs/TrainConfig'
     - type: 'null'
-  parameter_sweep:
-    anyOf:
-    - $ref: '#/$defs/ParameterSweepConfig'
-    - type: 'null'
+  parameter_sweeps:
+    additionalProperties:
+      $ref: '#/$defs/ParameterSweepConfig'
+    description: W&B parameter sweeps by name; the parameter-sweep stage runs enabled
+      ones.
+    title: Parameter Sweeps
+    type: object
   prediction:
     anyOf:
     - $ref: '#/$defs/PredictionConfig'

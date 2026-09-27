@@ -144,7 +144,12 @@ def training_dataset_dir():
 
 DESIGN = config.get("design")
 ATTRIBUTION = config.get("attribution")
-PARAMETER_SWEEP = config.get("parameter_sweep")
+# Enabled sweeps by name (parameter_sweep.smk).
+PARAMETER_SWEEPS = {
+    name: sweep
+    for name, sweep in (config.get("parameter_sweeps") or {}).items()
+    if sweep.get("enabled", False)
+}
 PREDICTION = config.get("prediction")
 _QC_ENABLED = bool(config["qc"].get("checks"))
 
@@ -171,11 +176,7 @@ rule all:
             if DESIGN
             else []
         ),
-        *(
-            [str(RESULTS / "parameter-sweep" / "sweep.done")]
-            if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False)
-            else []
-        ),
+        *(str(RESULTS / "parameter-sweeps" / name / "sweep.done") for name in PARAMETER_SWEEPS),
         *(
             [str(RESULTS / "predictions" / PREDICTION["run"] / ".complete")]
             if PREDICTION

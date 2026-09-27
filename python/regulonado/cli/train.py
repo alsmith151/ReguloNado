@@ -19,9 +19,11 @@ def sweep_train(
 ) -> None:
     """Bridge one W&B trial into Hydra's normal training configuration.
 
-    ``target: region_counts`` trains a region-count head (default preset ``pretrain``);
-    ``data.embeddings_dir`` then selects a cached trunk. Otherwise the trial trains the
-    profile model (default preset ``head_only``).
+    ``target: region_counts`` trains a region-count head (default preset ``pretrain``):
+    on a cached trunk with ``data.embeddings_dir``, else on a live trunk reading
+    ``data.fasta`` (default ``$REGULONADO_FASTA``, which pipeline agents set). Otherwise the
+    trial trains the profile model (default preset ``head_only``). Trials run in
+    ``output_dir``, else ``$REGULONADO_SWEEP_RUNS_DIR/<run id>`` (pipeline agents set it).
     """
     values = json.loads(config_file.read_text())
     if not isinstance(values, dict):
@@ -51,6 +53,10 @@ def sweep_train(
             param_hint="CONFIG_FILE",
         )
     dataset = Path(str(values.pop("data.path")))
+    live_regions = target == "region_counts" and embeddings is None
+    fasta = None
+    if live_regions:
+        fasta = values.pop("data.fasta", None) or os.environ.get("REGULONADO_FASTA")
     configured_output = values.pop("output_dir", None)
     # A trial always reports to its sweep, in the agent's project: the runner exports
     # trainer.wandb_project as WANDB_PROJECT, which would otherwise move the run out of it.
@@ -70,16 +76,23 @@ def sweep_train(
     settings = hydra_override_items(values)
 
     run_id = os.environ.get("WANDB_RUN_ID", "trial")
-    # Beside the pipeline's <results_dir>/parameter-sweep/: the profile dataset is
-    # <results_dir>/dataset, the region-count one <results_dir>/region_counts/dataset.
-    results_dir = dataset.parents[1] if target == "region_counts" else dataset.parent
-    output_dir = Path(configured_output or results_dir / "parameter-sweep" / "runs" / run_id)
+    runs_dir = os.environ.get("REGULONADO_SWEEP_RUNS_DIR")
+    if configured_output:
+        output_dir = Path(configured_output)
+    elif runs_dir:
+        output_dir = Path(runs_dir) / run_id
+    else:
+        # The profile dataset is <results_dir>/dataset, the region-count one
+        # <results_dir>/region_counts/dataset.
+        results_dir = dataset.parents[1] if target == "region_counts" else dataset.parent
+        output_dir = results_dir / "parameter-sweep" / "runs" / run_id
     if target == "region_counts":
         train(
             dataset=dataset,
-            trunk="cached" if embeddings is not None else "live",
+            trunk="live" if live_regions else "cached",
             target=target,
             embeddings=None if embeddings is None else Path(str(embeddings)),
+            fasta=None if fasta is None else Path(str(fasta)),
             output_dir=output_dir,
             preset=preset,
             settings=settings,

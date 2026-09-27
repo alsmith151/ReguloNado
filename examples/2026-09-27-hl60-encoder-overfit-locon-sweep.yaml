@@ -1,0 +1,106 @@
+# Does adapting AlphaGenome's CNN encoder live (LoCon) fit HL-60 specificity better than
+# a head on its frozen features?
+#
+# The same fit test and head search as 2026-09-27-hl60-encoder-overfit-frozen-sweep, with
+# LoCon adapters on the encoder's convolutions trained alongside the head (as the
+# hl60_alphagenome_encoder_locon and _live pipeline runs). Compare the two sweeps' best
+# eval/contrast_pearson_mean and eval/contrast_pearson_HL-60: the gap is what live
+# adaptation adds to how well the model can fit, on the same 16384 regions.
+#
+# Bayesian search over the head and the adapters, pruned by hyperband. Run through the
+# pipeline's parameter-sweep stage (parameter_sweeps.encoder_locon), which passes each trial
+# the pipeline's genome FASTA and run directory. Paths are relative to the UEF repo root.
+program: regulonado
+name: hl60-encoder-overfit-locon
+method: bayes
+
+metric:
+  name: eval/contrast_pearson_mean
+  goal: maximize
+
+early_terminate:
+  type: hyperband
+  min_iter: 5
+  eta: 2
+
+parameters:
+  target:
+    value: region_counts
+  preset:
+    value: pretrain
+  data.path:
+    value: results/2026-09-26-hl60-region-counts/region_counts/dataset
+  data.target_group:
+    value: HL-60
+  data.overfit_probe:
+    value: 16384
+  data.input_length:
+    value: 4096
+  data.shift_max:
+    value: 0
+  data.enable_rc_aug:
+    value: false
+
+  backbone:
+    value: alphagenome
+  backbone.pretrained_name:
+    value: all_folds
+  backbone.features:
+    value: encoder
+  trunk.finetune:
+    value: adapters
+  trunk.adapters:
+    value: [locon]
+  # The pipeline runs use rank 8, alpha 1 (a 1/8 update scale); search both, since a
+  # memorisation test may want larger updates than a generalising run.
+  trunk.locon_rank:
+    values: [4, 8, 16, 32]
+  trunk.locon_alpha:
+    values: [1, 8, 32]
+  # 1e-4 in the pipeline's encoder_locon recipe.
+  trainer.backbone_learning_rate:
+    distribution: log_uniform_values
+    min: 3.0e-5
+    max: 1.0e-3
+
+  model.hidden:
+    values: [1024, 2048, 4096]
+  model.pooling:
+    values: [shared, per_group]
+  model.dropout:
+    value: 0.0
+
+  trainer.learning_rate:
+    distribution: log_uniform_values
+    min: 1.0e-4
+    max: 2.0e-3
+  trainer.batch_size:
+    values: [128, 256]
+  trainer.eval_batch_size:
+    value: 512
+  trainer.weight_decay:
+    value: 0.0
+  trainer.scheduler:
+    value: cosine
+  trainer.warmup_steps:
+    value: 200
+  trainer.early_stopping_patience:
+    value: null
+  trainer.max_steps:
+    value: 6000
+  trainer.eval_every_n_steps:
+    value: 300
+  trainer.checkpoint_every_n_steps:
+    value: 300
+  trainer.metric_for_best_model:
+    value: eval_contrast_pearson_mean
+  trainer.wandb_job_type:
+    value: overfit-probe
+  trainer.wandb_tags:
+    value: [overfit-probe, hl60, encoder, locon]
+
+command:
+  - ${env}
+  - ${program}
+  - sweep-train
+  - ${args_json_file}

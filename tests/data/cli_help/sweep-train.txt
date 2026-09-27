@@ -3,6 +3,12 @@
                                                                                                     
  Bridge one W&B trial into Hydra's normal training configuration.                                   
                                                                                                     
+ ``target: region_counts`` trains a region-count head (default preset ``pretrain``):                
+ on a cached trunk with ``data.embeddings_dir``, else on a live trunk reading                       
+ ``data.fasta`` (default ``$REGULONADO_FASTA``, which pipeline agents set). Otherwise the           
+ trial trains the profile model (default preset ``head_only``). Trials run in                       
+ ``output_dir``, else ``$REGULONADO_SWEEP_RUNS_DIR/<run id>`` (pipeline agents set it).             
+                                                                                                    
 ╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
 │ *    config_file      PATH  W&B-generated JSON file containing one sweep trial [required]        │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

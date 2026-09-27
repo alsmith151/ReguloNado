@@ -127,14 +127,15 @@ targets:
     shift_max_bp: 0
 scaling:
   method: tmm
-parameter_sweep:
-  enabled: true
-  sweep_config: {sweep}
-  agents: 2
-  trials_per_agent: 1
-  cpus_per_agent: 4
-  mem_mb_per_agent: 64000
-  runtime_minutes_per_agent: 240
+parameter_sweeps:
+  heads:
+    enabled: true
+    sweep_config: {sweep}
+    agents: 2
+    trials_per_agent: 1
+    cpus_per_agent: 4
+    mem_mb_per_agent: 64000
+    runtime_minutes_per_agent: 240
 """
     )
 
@@ -156,7 +157,7 @@ parameter_sweep:
     )
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert str(results / "parameter-sweep" / "sweep.done") in output
+    assert str(results / "parameter-sweeps" / "heads" / "sweep.done") in output
     assert "train_phase" not in output
     assert "parameter_sweep_agent" in output
     assert "agent_0.done" in output
@@ -1265,12 +1266,13 @@ def test_region_count_parameter_sweep_waits_for_the_dataset_and_its_caches(tmp_p
     config.write_text(
         config.read_text()
         + f"""
-parameter_sweep:
-  enabled: true
-  sweep_config: {sweep}
-  target: region_counts
-  embeddings_from: [flashzoi]
-  agents: 2
+parameter_sweeps:
+  heads:
+    enabled: true
+    sweep_config: {sweep}
+    target: region_counts
+    embeddings_from: [flashzoi]
+    agents: 2
 """
     )
     result = _pipeline_dry_run(tmp_path, config, stage="parameter-sweep")
@@ -1286,7 +1288,7 @@ parameter_sweep:
     assert "train_phase" not in output
     assert "build_dataset" not in output
     assert re.search(r"parameter_sweep_agent\s+2", output)
-    assert str(results / "parameter-sweep" / "sweep.done") in output
+    assert str(results / "parameter-sweeps" / "heads" / "sweep.done") in output
 
 
 def test_region_count_parameter_sweep_reads_subsets_of_its_caches(tmp_path):
@@ -1298,12 +1300,13 @@ def test_region_count_parameter_sweep_reads_subsets_of_its_caches(tmp_path):
     config.write_text(
         config.read_text()
         + f"""
-parameter_sweep:
-  enabled: true
-  sweep_config: {sweep}
-  target: region_counts
-  embeddings_from: [alphagenome]
-  embeddings_subset: 16384
+parameter_sweeps:
+  heads:
+    enabled: true
+    sweep_config: {sweep}
+    target: region_counts
+    embeddings_from: [alphagenome]
+    embeddings_subset: 16384
 """
     )
     result = _pipeline_dry_run(tmp_path, config, stage="parameter-sweep")
@@ -1311,12 +1314,54 @@ parameter_sweep:
     assert result.returncode == 0, output
 
     cache = "alphagenome-all_folds-ctx1048576-stride524288"
-    subset = tmp_path / "results" / "parameter-sweep" / "embeddings" / cache
+    subset = tmp_path / "results" / "parameter-sweeps" / "embeddings" / f"{cache}-train16384"
     assert re.search(r"sweep_embeddings_subset\s+1", output)
     assert "regulonado embed subset" in output
     assert f"--out {subset} --regions 16384 --split train" in output
     agent_inputs = re.findall(r"rule parameter_sweep_agent:\n\s+input: (.*)", output)
     assert agent_inputs and all(str(subset / ".done") in line for line in agent_inputs)
+
+
+def test_named_parameter_sweeps_run_side_by_side_on_a_live_trunk(tmp_path):
+    """Each enabled sweep has its own directory and agents; disabled ones are skipped; a
+    live-trunk sweep waits only for the dataset, and agents pass trials the FASTA."""
+    pytest.importorskip("hydra")
+    config = _count_only_config(tmp_path, runs=[_cached_run("alphagenome")])
+    sweep = tmp_path / "sweep.yaml"
+    sweep.write_text("program: regulonado\nmethod: bayes\n")
+    config.write_text(
+        config.read_text()
+        + f"""
+parameter_sweeps:
+  encoder_frozen:
+    enabled: true
+    sweep_config: {sweep}
+    target: region_counts
+    agents: 2
+  encoder_locon:
+    enabled: true
+    sweep_config: {sweep}
+    target: region_counts
+    agents: 3
+  old:
+    enabled: false
+    sweep_config: {sweep}
+"""
+    )
+    result = _pipeline_dry_run(tmp_path, config, stage="parameter-sweep")
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+
+    sweeps = tmp_path / "results" / "parameter-sweeps"
+    assert re.search(r"parameter_sweep_agent\s+5", output)
+    assert re.search(r"create_parameter_sweep\s+2", output)
+    for name in ("encoder_frozen", "encoder_locon"):
+        assert str(sweeps / name / "sweep.done") in output
+        assert f"REGULONADO_SWEEP_RUNS_DIR={sweeps / name / 'runs'}" in output
+    assert str(sweeps / "old") not in output
+    assert f"REGULONADO_FASTA={tmp_path / 'genome.fa'}" in output
+    # Live trunk: no embedding cache is built.
+    assert "embed_chrom" not in output
 
 def test_training_typos_fail_before_scheduling(tmp_path):
     pytest.importorskip("hydra")

@@ -89,6 +89,39 @@ def test_sweep_train_runs_region_count_trials_on_a_cached_trunk(tmp_path, monkey
     assert '++trainer.wandb_project="region-sweep"' in training["settings"]
     assert not any("embeddings_dir" in setting for setting in training["settings"])
 
+
+def test_sweep_train_runs_live_trunk_region_trials_on_the_pipeline_fasta(tmp_path, monkeypatch):
+    train_module = importlib.import_module("regulonado.cli.train")
+    config_file = tmp_path / "trial.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "target": "region_counts",
+                "data.path": "/results/region_counts/dataset",
+                "backbone": "alphagenome",
+                "backbone.features": "encoder",
+                "trunk.finetune": "adapters",
+                "trunk.adapters": ["locon"],
+            }
+        )
+    )
+    captured = []
+    monkeypatch.setattr(train_module, "train", lambda **kwargs: captured.append(kwargs))
+    monkeypatch.setenv("WANDB_RUN_ID", "abc123")
+    monkeypatch.setenv("REGULONADO_FASTA", "/genome/hg38.fa")
+    monkeypatch.setenv("REGULONADO_SWEEP_RUNS_DIR", "/results/parameter-sweeps/enc/runs")
+
+    train_module.sweep_train(config_file)
+
+    (training,) = captured
+    assert training["trunk"] == "live"
+    assert training["embeddings"] is None
+    assert training["fasta"] == Path("/genome/hg38.fa")
+    assert training["output_dir"] == Path("/results/parameter-sweeps/enc/runs/abc123")
+    assert 'backbone="alphagenome"' in training["settings"]
+    assert '++trunk.adapters=["locon"]' in training["settings"]
+    assert not any("data.fasta" in setting for setting in training["settings"])
+
 def test_train_builds_a_readable_preset_command(tmp_path):
     result = runner.invoke(
         app,

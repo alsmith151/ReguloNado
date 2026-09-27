@@ -146,18 +146,19 @@ and Snakemake schedules only missing or stale work.
 W&B owns the search space and run bookkeeping. The Snakemake stage only supplies
 the dataset dependency and a GPU Slurm job, while each W&B command invokes the
 normal `regulonado train` entrypoint. The pipeline YAML does not need a `train:`
-matrix when only this stage is being used. Add the stage to the workflow YAML:
+matrix when only this stage is being used. Add sweeps to the workflow YAML by name:
 
 ```yaml
-parameter_sweep:
-  enabled: true
-  sweep_config: examples/hl60_parameter_sweep_wandb.yaml
-  agents: 24
-  trials_per_agent: 1
-  cpus_per_agent: 4
-  mem_mb_per_agent: 64000
-  runtime_minutes_per_agent: 240
-  wandb_project: regulonado-parameter-sweep
+parameter_sweeps:
+  heads:
+    enabled: true
+    sweep_config: examples/hl60_parameter_sweep_wandb.yaml
+    agents: 24
+    trials_per_agent: 1
+    cpus_per_agent: 4
+    mem_mb_per_agent: 64000
+    runtime_minutes_per_agent: 240
+    wandb_project: regulonado-parameter-sweep
 ```
 
 Run only this stage on the configured Slurm GPU profile:
@@ -166,10 +167,14 @@ Run only this stage on the configured Slurm GPU profile:
 regulonado pipeline hl60_anchor_folds.yaml parameter-sweep --preset sg
 ```
 
-The workflow registers the sweep once, then submits `agents` independent one-GPU
-jobs. Each processes `trials_per_agent` trials and forwards Slurm signals to its
-training child. W&B stores the individual runs and metrics; the workflow writes
-`results/parameter-sweep/sweep.done` after all agents finish.
+The stage runs every enabled sweep side by side, each in
+`results/parameter-sweeps/<name>/`. The workflow registers each sweep once (its id in
+`sweep.id` there; delete it to start a fresh W&B sweep), then submits `agents` independent
+one-GPU jobs. Each processes `trials_per_agent` trials and forwards Slurm signals to its
+training child, and trials write to `results/parameter-sweeps/<name>/runs/<run id>`. W&B
+stores the individual runs and metrics; the workflow writes
+`results/parameter-sweeps/<name>/sweep.done` after all its agents finish. A W&B sweep keeps
+the parameters it was created with, so after editing a sweep file, start a fresh one.
 
 For grid searches, `agents: N` with `trials_per_agent: 1` gives maximum parallelism
 and isolates every trial in its own allocation. For Bayesian searches, use fewer
@@ -185,27 +190,29 @@ for the region-count dataset, and `embeddings_from` names the `trunk: cached` ru
 embedding caches the trials read, so the agents wait for those too:
 
 ```yaml
-parameter_sweep:
-  enabled: true
-  sweep_config: examples/2026-09-27-hl60-region-overfit-sweep.yaml
-  target: region_counts
-  embeddings_from: [hl60_alphagenome_trunk, hl60_flashzoi_trunk]
+parameter_sweeps:
+  region_overfit:
+    enabled: true
+    sweep_config: examples/2026-09-27-hl60-region-overfit-sweep.yaml
+    target: region_counts
+    embeddings_from: [hl60_alphagenome_trunk, hl60_flashzoi_trunk]
 ```
 
 In the W&B sweep file, each trial sets `target: region_counts` (default preset
-`pretrain`, from `python/configs/region_experiment/`), `data.path` to
-`<results_dir>/region_counts/dataset` and, for a cached trunk, `data.embeddings_dir` to
-one of `<results_dir>/embeddings/<cache>`.
+`pretrain`, from `python/configs/region_experiment/`) and `data.path` to
+`<results_dir>/region_counts/dataset`. For a cached trunk, it sets `data.embeddings_dir`
+to one of `<results_dir>/embeddings/<cache>`. Without one, the trial runs the trunk live
+on the pipeline's `inputs.fasta`, which the agents pass it: set `backbone`,
+`backbone.features`, `data.input_length` and `trunk.*` as for a live run
+(`examples/2026-09-27-hl60-encoder-overfit-{frozen,locon}-sweep.yaml`).
 
 Opening a full cache memory-mapped reads through all of it, which on a network filesystem
 such as Ceph takes each trial many minutes of I/O before training starts. A sweep that
 needs only a few thousand regions (`data.overfit_probe`) should set `embeddings_subset:
 N`: one job per cache copies N random train regions (`regulonado embed subset`) to
-`<results_dir>/parameter-sweep/embeddings/<cache>`, and the agents wait for those copies.
-Point `data.embeddings_dir` at them, with `data.in_memory: true` and
-`data.drop_missing_from_cache: true`. Trials write to
-`<results_dir>/parameter-sweep/runs/<run id>` either way, and always report to W&B in the
-agents' project.
+`<results_dir>/parameter-sweeps/embeddings/<cache>-train<N>`, and the agents wait for
+those copies. Point `data.embeddings_dir` at them, with `data.in_memory: true` and
+`data.drop_missing_from_cache: true`. Trials always report to W&B in the agents' project.
 
 ## Label space
 

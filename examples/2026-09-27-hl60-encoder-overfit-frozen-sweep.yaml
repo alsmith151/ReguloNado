@@ -1,0 +1,107 @@
+# How well can a head fit HL-60 specificity from AlphaGenome's frozen CNN encoder?
+#
+# The encoder half of 2026-09-27-hl60-region-overfit-sweep, run live instead of from a
+# cache: each trial runs the frozen encoder on its regions' own 4 kb windows (the same
+# features the cache holds) and never reads the 64 GB encoder cache. Its LoCon partner,
+# 2026-09-27-hl60-encoder-overfit-locon-sweep, runs the same head search with the encoder
+# adapted, so the two best runs say what live adaptation adds.
+#
+# data.overfit_probe trains on 16384 train regions and evaluates on those same regions, with
+# no augmentation and no regularisation: every eval_* metric is fit to the training data.
+# For reference, the AlphaGenome trunk sweep reached contrast_pearson_mean 0.977 /
+# contrast_pearson_HL-60 0.998 (hidden 4096, lr 1e-3, 4000 steps); lr 3e-3 was worse at
+# every width and pooling made no difference.
+#
+# Bayesian search over the head for the best fit, pruned by hyperband. Run through the
+# pipeline's parameter-sweep stage (parameter_sweeps.encoder_frozen), which passes each trial
+# the pipeline's genome FASTA and run directory. Paths are relative to the UEF repo root.
+program: regulonado
+name: hl60-encoder-overfit-frozen
+method: bayes
+
+metric:
+  name: eval/contrast_pearson_mean
+  goal: maximize
+
+# Evaluations every 300 steps; the first cut comes at step 1500, after the wide AlphaGenome
+# heads had separated from the narrow ones.
+early_terminate:
+  type: hyperband
+  min_iter: 5
+  eta: 2
+
+parameters:
+  target:
+    value: region_counts
+  preset:
+    value: pretrain
+  data.path:
+    value: results/2026-09-26-hl60-region-counts/region_counts/dataset
+  data.target_group:
+    value: HL-60
+  data.overfit_probe:
+    value: 16384
+  # The encoder on each region's own 4 kb window, the central 2 kb scored -- as the cache
+  # and the _locon/_full/_live pipeline runs. No RC or shift augmentation: a fit test.
+  data.input_length:
+    value: 4096
+  data.shift_max:
+    value: 0
+  data.enable_rc_aug:
+    value: false
+
+  backbone:
+    value: alphagenome
+  backbone.pretrained_name:
+    value: all_folds
+  backbone.features:
+    value: encoder
+  trunk.finetune:
+    value: frozen
+
+  # The AlphaGenome trunk fit kept rising to 4096; the encoder's 1536-d features may need
+  # more, so 8192 is in range.
+  model.hidden:
+    values: [1024, 2048, 4096, 8192]
+  model.pooling:
+    values: [shared, per_group]
+  model.dropout:
+    value: 0.0
+
+  # 1e-3 beat 3e-3 everywhere on the trunk; search around and below it.
+  trainer.learning_rate:
+    distribution: log_uniform_values
+    min: 1.0e-4
+    max: 2.0e-3
+  # Smaller batches take more, noisier updates over the same regions: 6000 steps is ~47
+  # passes at 128, ~94 at 256, ~188 at 512.
+  trainer.batch_size:
+    values: [128, 256, 512]
+  trainer.eval_batch_size:
+    value: 512
+  trainer.weight_decay:
+    value: 0.0
+  trainer.scheduler:
+    value: cosine
+  trainer.warmup_steps:
+    value: 200
+  trainer.early_stopping_patience:
+    value: null
+  trainer.max_steps:
+    value: 6000
+  trainer.eval_every_n_steps:
+    value: 300
+  trainer.checkpoint_every_n_steps:
+    value: 300
+  trainer.metric_for_best_model:
+    value: eval_contrast_pearson_mean
+  trainer.wandb_job_type:
+    value: overfit-probe
+  trainer.wandb_tags:
+    value: [overfit-probe, hl60, encoder, frozen]
+
+command:
+  - ${env}
+  - ${program}
+  - sweep-train
+  - ${args_json_file}

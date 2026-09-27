@@ -1,26 +1,43 @@
-"""W&B parameter sweep with independently scheduled one-GPU agents."""
+"""W&B parameter sweeps with independently scheduled one-GPU agents.
 
-if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
-    _SWEEP_DIR = RESULTS / "parameter-sweep"
-    _SWEEP_AGENT_IDS = [str(index) for index in range(int(PARAMETER_SWEEP.get("agents", 1)))]
+Each enabled ``parameter_sweeps.<name>`` gets ``<results_dir>/parameter-sweeps/<name>/``:
+its W&B sweep id, the agents' markers and the trials' run directories.
+"""
+
+import re
+
+if PARAMETER_SWEEPS:
+    _SWEEPS_DIR = RESULTS / "parameter-sweeps"
+    # Region-count sweeps' copies of embedding caches, shared by every sweep reading the same
+    # cache at the same size.
+    _SWEEP_EMBEDDINGS_DIR = _SWEEPS_DIR / "embeddings"
 
 
-    _SWEEP_EMBEDDINGS_DIR = _SWEEP_DIR / "embeddings"
-    _SWEEP_SUBSET = PARAMETER_SWEEP.get("embeddings_subset")
-    # cache name -> run, for the caches the trials read.
-    _SWEEP_CACHES = {
-        embedding_cache_dir(run).name: run for run in PARAMETER_SWEEP.get("embeddings_from", [])
-    }
+    def _sweep(wildcards):
+        return PARAMETER_SWEEPS[wildcards.sweep]
 
 
-    def _sweep_inputs():
+    def _sweep_agent_ids(name):
+        return [str(index) for index in range(int(PARAMETER_SWEEPS[name].get("agents", 1)))]
+
+
+    def _sweep_cache_dirs(name):
+        """The embedding caches (or their copies) sweep *name*'s trials read."""
+        sweep = PARAMETER_SWEEPS[name]
+        caches = [embedding_cache_dir(run).name for run in sweep.get("embeddings_from", [])]
+        subset = sweep.get("embeddings_subset")
+        if subset:
+            return [_SWEEP_EMBEDDINGS_DIR / f"{cache}-train{subset}" for cache in caches]
+        return [EMBEDDINGS_DIR / cache for cache in caches]
+
+
+    def _sweep_inputs(wildcards):
         """The dataset the trials train on, and any embedding caches they read."""
-        if PARAMETER_SWEEP.get("target", "profile") == "region_counts":
-            embeddings_root = _SWEEP_EMBEDDINGS_DIR if _SWEEP_SUBSET else EMBEDDINGS_DIR
+        if _sweep(wildcards).get("target", "profile") == "region_counts":
             return {
                 "dataset": str(REGION_DATASET_DIR / "counts.parquet"),
                 "embeddings": [
-                    str(embeddings_root / cache / ".done") for cache in _SWEEP_CACHES
+                    str(path / ".done") for path in _sweep_cache_dirs(wildcards.sweep)
                 ],
             }
         return {
@@ -29,33 +46,42 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
         }
 
 
-    if _SWEEP_SUBSET:
+    _SUBSET_CACHES = sorted(
+        {
+            path.name
+            for name in PARAMETER_SWEEPS
+            if PARAMETER_SWEEPS[name].get("embeddings_subset")
+            for path in _sweep_cache_dirs(name)
+        }
+    )
+
+    if _SUBSET_CACHES:
 
         rule sweep_embeddings_subset:
-            """Copy embeddings_subset random train regions of one cache, read once from the
-            full cache so the trials need not each read through it."""
+            """Copy N random train regions of one cache, read once from the full cache so
+            the trials need not each read through it."""
             input:
                 done=str(EMBEDDINGS_DIR / "{cache}" / ".done"),
                 dataset=str(REGION_DATASET_DIR / "counts.parquet"),
             params:
                 cache_dir=str(EMBEDDINGS_DIR / "{cache}"),
                 dataset_dir=str(REGION_DATASET_DIR),
-                out_dir=str(_SWEEP_EMBEDDINGS_DIR / "{cache}"),
-                regions=int(_SWEEP_SUBSET),
+                out_dir=str(_SWEEP_EMBEDDINGS_DIR / "{cache}-train{regions}"),
             output:
-                touch(str(_SWEEP_EMBEDDINGS_DIR / "{cache}" / ".done")),
+                touch(str(_SWEEP_EMBEDDINGS_DIR / "{cache}-train{regions}" / ".done")),
             resources:
                 mem_mb=scaled_mem_mb(32000),
             wildcard_constraints:
-                cache="|".join(re.escape(name) for name in _SWEEP_CACHES),
+                cache="|".join(re.escape(name) for name in EMBEDDING_CACHES),
+                regions=r"\d+",
             log:
-                str(RESULTS / "logs" / "sweep_embeddings_subset_{cache}.log"),
+                str(RESULTS / "logs" / "sweep_embeddings_subset_{cache}-train{regions}.log"),
             shell:
                 r"""
                 set -euo pipefail
                 mkdir -p "$(dirname {log:q})"
                 regulonado embed subset {params.cache_dir:q} {params.dataset_dir:q} \
-                    --out {params.out_dir:q} --regions {params.regions} --split train \
+                    --out {params.out_dir:q} --regions {wildcards.regions} --split train \
                     > {log:q} 2>&1
                 """
 
@@ -65,15 +91,17 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
             # not merely configuration parsing.  Keep this dependency here
             # (rather than only on the agents) so the remote sweep cannot be
             # initialized while the dataset is still being built.
-            unpack(lambda w: _sweep_inputs()),
-            sweep_config=lambda w: str(PARAMETER_SWEEP["sweep_config"]),
+            unpack(_sweep_inputs),
+            sweep_config=lambda w: str(_sweep(w)["sweep_config"]),
         output:
-            sweep_id=str(_SWEEP_DIR / "sweep.id"),
+            sweep_id=str(_SWEEPS_DIR / "{sweep}" / "sweep.id"),
         params:
-            output_dir=str(_SWEEP_DIR),
-            project=str(PARAMETER_SWEEP.get("wandb_project", "regulonado-parameter-sweep")),
+            output_dir=lambda w: str(_SWEEPS_DIR / w.sweep),
+            project=lambda w: str(_sweep(w).get("wandb_project", "regulonado-parameter-sweep")),
+        wildcard_constraints:
+            sweep="|".join(re.escape(name) for name in PARAMETER_SWEEPS),
         log:
-            str(RESULTS / "logs" / "parameter_sweep_create.log"),
+            str(RESULTS / "logs" / "parameter_sweep_{sweep}_create.log"),
         shell:
             r"""
             set -euo pipefail
@@ -86,30 +114,34 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
 
     rule parameter_sweep_agent:
         input:
-            unpack(lambda w: _sweep_inputs()),
-            sweep_id=str(_SWEEP_DIR / "sweep.id"),
+            unpack(_sweep_inputs),
+            sweep_id=str(_SWEEPS_DIR / "{sweep}" / "sweep.id"),
         output:
-            done=str(_SWEEP_DIR / "agents" / "agent_{agent}.done"),
+            done=str(_SWEEPS_DIR / "{sweep}" / "agents" / "agent_{agent}.done"),
         params:
-            trials=int(PARAMETER_SWEEP.get("trials_per_agent", 1)),
-            agent_dir=str(_SWEEP_DIR / "agents"),
-            project=str(PARAMETER_SWEEP.get("wandb_project", "regulonado-parameter-sweep")),
-        threads:
-            int(PARAMETER_SWEEP.get("cpus_per_agent", 4))
+            trials=lambda w: int(_sweep(w).get("trials_per_agent", 1)),
+            agent_dir=lambda w: str(_SWEEPS_DIR / w.sweep / "agents"),
+            runs_dir=lambda w: str(_SWEEPS_DIR / w.sweep / "runs"),
+            fasta=config["inputs"]["fasta"],
+            project=lambda w: str(_sweep(w).get("wandb_project", "regulonado-parameter-sweep")),
+        threads: lambda w: int(_sweep(w).get("cpus_per_agent", 4))
         resources:
             gpu=1,
-            mem_mb=int(PARAMETER_SWEEP.get("mem_mb_per_agent", 64000)),
-            runtime=int(PARAMETER_SWEEP.get("runtime_minutes_per_agent", 240)),
+            mem_mb=lambda w: int(_sweep(w).get("mem_mb_per_agent", 64000)),
+            runtime=lambda w: int(_sweep(w).get("runtime_minutes_per_agent", 240)),
         wildcard_constraints:
-            agent="|".join(_SWEEP_AGENT_IDS),
+            sweep="|".join(re.escape(name) for name in PARAMETER_SWEEPS),
+            agent=r"\d+",
         log:
-            str(RESULTS / "logs" / "parameter_sweep_agent_{agent}.log"),
+            str(RESULTS / "logs" / "parameter_sweep_{sweep}_agent_{agent}.log"),
         shell:
             r"""
             set -euo pipefail
             mkdir -p {params.agent_dir:q}
             SWEEP_ID=$(cat {input.sweep_id:q})
             test -n "$SWEEP_ID"
+            REGULONADO_FASTA={params.fasta:q} \
+            REGULONADO_SWEEP_RUNS_DIR={params.runs_dir:q} \
             WANDB_JOB_TYPE=parameter-sweep wandb agent \
                 --project {params.project:q} \
                 --forward-signals \
@@ -120,9 +152,14 @@ if PARAMETER_SWEEP and PARAMETER_SWEEP.get("enabled", False):
 
     rule parameter_sweep:
         input:
-            expand(str(_SWEEP_DIR / "agents" / "agent_{agent}.done"), agent=_SWEEP_AGENT_IDS),
+            lambda w: expand(
+                str(_SWEEPS_DIR / w.sweep / "agents" / "agent_{agent}.done"),
+                agent=_sweep_agent_ids(w.sweep),
+            ),
         output:
-            done=str(_SWEEP_DIR / "sweep.done"),
+            done=str(_SWEEPS_DIR / "{sweep}" / "sweep.done"),
+        wildcard_constraints:
+            sweep="|".join(re.escape(name) for name in PARAMETER_SWEEPS),
         shell:
             "date -u +%FT%TZ > {output.done:q}"
 
