@@ -145,7 +145,7 @@ if PROFILE_RUN_NAMES:
         threads: 1
         resources:
             gpu=0,
-            mem_mb=scaled_mem_mb(4000),
+            mem_mb=scaled_mem_mb(8000),
             runtime=10,
         wildcard_constraints:
             run="|".join(re.escape(name) for name in PROFILE_RUN_NAMES),

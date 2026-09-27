@@ -190,7 +190,7 @@ rule track_assemble:
     output:
         table=str(TRACKS_DIR / "tracks.parquet"),
     resources:
-        mem_mb=scaled_mem_mb(4000),
+        mem_mb=scaled_mem_mb(8000),
     log:
         str(RESULTS / "logs" / "track_assemble.log"),
     shell:

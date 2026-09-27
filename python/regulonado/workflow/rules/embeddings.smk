@@ -101,7 +101,7 @@ rule embed_done:
     params:
         manifest=lambda w: str(EMBEDDINGS_DIR / w.cache / "manifest.parquet"),
     resources:
-        mem_mb=scaled_mem_mb(2000),
+        mem_mb=scaled_mem_mb(8000),
     wildcard_constraints:
         cache="|".join(re.escape(name) for name in EMBEDDING_CACHES),
     run:

@@ -75,7 +75,7 @@ checkpoint region_count_track_names:
     output:
         directory(str(REGION_COUNTS_DIR / "counts" / "_track_names")),
     resources:
-        mem_mb=scaled_mem_mb(4000),
+        mem_mb=scaled_mem_mb(8000),
     run:
         from regulonado.counts.bam import read_count_tracks
 

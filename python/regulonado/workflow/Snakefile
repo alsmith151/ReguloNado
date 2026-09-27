@@ -96,11 +96,15 @@ def final_phase(run):
 
 
 MAX_MEM_MB = int(config.get("max_mem_mb", 256_000))
+# Every cluster job re-parses the whole workflow (Python, Snakemake, the region set) before
+# its rule runs, so no job asks for less than this, however light the rule.
+MIN_MEM_MB = 8_000
 
 
 def capped_mem_mb(mem_mb):
-    """*mem_mb*, capped at ``max_mem_mb`` (larger requests can wait a long time for a node)."""
-    return min(int(mem_mb), MAX_MEM_MB)
+    """*mem_mb*, at least ``MIN_MEM_MB`` and at most ``max_mem_mb`` (larger requests can
+    wait a long time for a node)."""
+    return max(min(int(mem_mb), MAX_MEM_MB), min(MIN_MEM_MB, MAX_MEM_MB))
 
 
 def scaled_mem_mb(base_mb):
