@@ -49,6 +49,20 @@ ISM sign (`alt - ref`), with the reference base's own column at 0.
 Positions whose column is not a clean one-hot (an `N`, or a multi-hot column) have no identity
 substitution, so all four bases are scored there rather than three.
 
+## Region-count checkpoints and flanks
+
+Live-trunk `region_counts` checkpoints are supported alongside profile checkpoints. Their output
+has one bin and one scalar per cell-type group (`softplus(eta)`, or `log1p(rate)`), so set
+`bin_reduction: mean`; `topk_bins` has no meaning. With `--target HL-60`, the target resolves
+directly to the model's group name and `group_by` is ignored. Cached embedding heads cannot be
+used, because ISM must rerun the trunk after every substitution.
+
+Attribution can also score synthetic reporter-like context with `flank_mode: shuffle`,
+`dinuc-shuffle` (preferred), or `uniform`; `flank_keep: candidate` keeps just the candidate (and
+optional `flank_keep_bp`) genomic. `genomic` remains the default. These synthetic flanks are OOD
+for an endogenous-sequence model, so use the recorded genomic/neutral scores and their delta as a
+portability diagnostic rather than comparing absolute scores across modes.
+
 ## Calling the core
 
 ```

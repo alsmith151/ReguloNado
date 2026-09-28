@@ -65,6 +65,32 @@ has energy zero and useful improvements have negative energy.  Use
 the penalty.  Absolute group scores and specificity remain in the output as diagnostics.  Energy
 values from `specificity` and `selective-activation` runs are not directly comparable.
 
+### Region-count checkpoints
+
+Design also supports live-trunk `region_counts` checkpoints. Their single scalar per group is
+`softplus(eta)`, i.e. `log1p(rate)`, so the group axis is used as the design track axis and the
+one predicted bin must use `bin_reduction: mean`. Do not use `gain_transform:
+log2-fold-change`: it would take a log of an already log-scale score.
+
+For these models `energy: contrast` is the default. It uses the mean off-target score and is
+exactly the model-selection contrast up to a positive constant, so it preserves rankings. Choose
+`worst_offtarget` (soft maximum) or `max_offtarget` only when worst-case suppression is the
+actual synthesis goal; energies across those settings are not directly comparable. A region
+checkpoint must be live-trunk — cached embedding heads cannot score a mutated sequence.
+
+The model receives its 4096 bp training window but only its central scored span contributes to
+the scalar. Candidates must lie inside that span; for the AlphaGenome encoder geometry it is
+1152 bp wide. Region tables may be BED or the region-count parquet table.
+
+### Flanking context
+
+`flank_mode: genomic` is the default. To simulate a reporter construct, use `shuffle`,
+`dinuc-shuffle` (preferred), or `uniform`, with `flank_keep: candidate` to retain only the
+editable core (plus optional `flank_keep_bp`) as genomic sequence. Synthetic flanks are outside
+the model's training distribution, so treat their absolute scores as diagnostic rather than
+comparable with genomic-mode scores. Each output records genomic and neutral-flank scores and
+their difference as a portability signal.
+
 ## Fold hold-out
 
 Optimise against 3 folds and score the result on a 4th, held-out one
