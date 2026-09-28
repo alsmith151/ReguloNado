@@ -47,6 +47,8 @@ def window_for_interval(
     context_length: int,
     n_pred_bins: int,
     bin_size: int,
+    crop_bp: int | None = None,
+    snap_bp: int | None = None,
 ) -> Window:
     """Derive the prediction window centred on a BED interval's midpoint.
 
@@ -59,14 +61,40 @@ def window_for_interval(
         pred_start = center - pred_bp // 2       (pred_bp = n_pred_bins * bin_size)
         ctx_start = center - context_length // 2
 
+    ``crop_bp`` overrides how ``ctx_start`` is derived from ``pred_start``: when given, the
+    context starts exactly ``crop_bp`` bp before ``pred_start`` (``ctx_start = pred_start -
+    crop_bp``), rather than being independently centred on the interval midpoint. This matters
+    for architectures (e.g. region-count heads built on ``TrunkWindow``, see
+    ``training/regions/live.py``) whose true crop is not ``(context_length - pred_bp) // 2`` —
+    passing the model's real crop here keeps this function's window in agreement with the one
+    the model actually scores. Leaving ``crop_bp`` as ``None`` reproduces the original
+    independently-centred ``ctx_start`` exactly.
+
+    ``snap_bp`` overrides how ``pred_start`` itself is derived: when given, ``pred_start =
+    (start // snap_bp) * snap_bp`` — the interval's own ``start`` (not ``center``) floor-snapped
+    to a ``snap_bp``-wide grid — mirroring ``TrunkWindow.window_start``'s
+    ``first_raw_bin_bp = (target_start // effective) * effective``. ``snap_bp`` is that
+    ``effective`` bin width (``bin_size * pool_factor`` in ``TrunkWindow`` terms) — **not** the
+    same quantity as this function's own ``bin_size`` argument, which is the width of a whole
+    *scored* bin (``n_pred_bins * bin_size`` = the whole scored span, e.g. 1152bp in the
+    AlphaGenome-encoder worked example) and can be a coarser multiple of ``snap_bp`` (e.g.
+    128bp there). Conflating the two silently snaps to the wrong grid. Leaving ``snap_bp`` as
+    ``None`` reproduces the original centre-derived ``pred_start`` exactly.
+
     Neither ``pred_start`` nor ``ctx_start`` is clamped to ``>= 0`` and neither is clamped at
     the chromosome end — callers that read sequence or signal from the result are responsible
     for clamping/zero-padding (see :func:`one_hot_context`).
     """
     pred_bp = n_pred_bins * bin_size
     center = (start + end) // 2
-    pred_start = center - pred_bp // 2
-    ctx_start = center - context_length // 2
+    if snap_bp is None:
+        pred_start = center - pred_bp // 2
+    else:
+        pred_start = (start // snap_bp) * snap_bp
+    if crop_bp is None:
+        ctx_start = center - context_length // 2
+    else:
+        ctx_start = pred_start - crop_bp
     return Window(
         chrom=chrom,
         pred_start=pred_start,
