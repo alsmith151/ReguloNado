@@ -422,9 +422,29 @@ class RegionCountModel(PreTrainedModel):
         ``RegulonadoModel._init_weights`` for the same pattern.
         """
 
-    def _group_log_rates(self, features: Tensor) -> Tensor:
-        """Pooled features through the MLP to group log rates, with the soft eta cap applied."""
-        pooled = self.norm(self.pool(features))
+    def group_log_rates(
+        self,
+        features: Tensor | None = None,
+        *,
+        sequence: Tensor | None = None,
+        rc: Tensor | None = None,
+    ) -> Tensor:
+        """Per-group log rates ``eta`` ``[batch, n_groups]``, before ``exp``.
+
+        ``features``: ``[batch, k, d]`` (cast to float32 regardless of cache dtype); or,
+        for a live-trunk model, ``sequence``: ``[batch, 4, input_length]`` one-hot windows
+        and ``rc``: ``[batch]`` flags marking reverse-complemented rows -- the trunk turns
+        these into ``features`` first. Either way, pooled through the attention pool,
+        normalised, and the MLP (or per-group readout), with the soft ``eta_max`` cap
+        applied -- see the module docstring.
+        """
+        if sequence is not None:
+            if not hasattr(self, "trunk"):
+                raise ValueError("this model has no live trunk; pass cached `features`")
+            features = self.trunk(sequence, rc)
+        if features is None:
+            raise ValueError("pass `features` (cached) or `sequence` (live trunk)")
+        pooled = self.norm(self.pool(features.float()))
         if self.config.pooling == "per_group":
             eta = self.readout(self.mlp(pooled))
         else:
@@ -459,13 +479,7 @@ class RegionCountModel(PreTrainedModel):
         ``labels``, when given: ``[batch, n_tracks]`` raw per-track counts, ``NaN``
         where masked.
         """
-        if sequence is not None:
-            if not hasattr(self, "trunk"):
-                raise ValueError("this model has no live trunk; pass cached `features`")
-            features = self.trunk(sequence, rc)
-        if features is None:
-            raise ValueError("pass `features` (cached) or `sequence` (live trunk)")
-        eta = self._group_log_rates(features.float())
+        eta = self.group_log_rates(features, sequence=sequence, rc=rc)
         loss = None
         if labels is not None:
             loss = self.loss_fn(

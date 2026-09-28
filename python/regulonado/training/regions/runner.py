@@ -51,6 +51,7 @@ from regulonado.training.regions.data import (
     attach_region_rows,
     prepare_region_data,
 )
+from regulonado.training.regions.inference import load_state_dict_non_strict
 from regulonado.training.regions.live import (
     LiveTrunk,
     SequenceRegionDataset,
@@ -239,50 +240,12 @@ def _load_warm_start(model: RegionCountModel, checkpoint: str | Path) -> None:
     or ``data.specific_only``/track-table change) -- only :class:`CountHead`'s
     ``track_groups``-shaped buffers and parameters would then disagree in shape. Loading
     non-strictly and skipping shape mismatches keeps the rest of the head (pooling,
-    MLP) warm-started while letting a resized ``CountHead`` re-initialise.
+    MLP) warm-started while letting a resized ``CountHead`` re-initialise. See
+    :func:`~regulonado.training.regions.inference.load_state_dict_non_strict` for the
+    (warn-only, never-raising) loading logic itself, shared with the checkpoint loader
+    used for inference/attribution.
     """
-    checkpoint_path = Path(checkpoint)
-    weight_path = checkpoint_path
-    if checkpoint_path.is_dir():
-        safetensors_path = checkpoint_path / "model.safetensors"
-        bin_path = checkpoint_path / "pytorch_model.bin"
-        if safetensors_path.exists():
-            weight_path = safetensors_path
-        elif bin_path.exists():
-            weight_path = bin_path
-        else:
-            raise FileNotFoundError(
-                f"No model weights found in {checkpoint_path}; expected model.safetensors "
-                "or pytorch_model.bin"
-            )
-    if weight_path.suffix == ".safetensors":
-        from safetensors.torch import load_file
-
-        state_dict = load_file(str(weight_path), device="cpu")
-    else:
-        state_dict = torch.load(weight_path, map_location="cpu", weights_only=True)
-
-    model_state = model.state_dict()
-    compatible: dict[str, torch.Tensor] = {}
-    skipped: list[str] = []
-    for name, tensor in state_dict.items():
-        target = model_state.get(name)
-        if target is not None and target.shape == tensor.shape:
-            compatible[name] = tensor
-        else:
-            skipped.append(name)
-    missing, unexpected = model.load_state_dict(compatible, strict=False)
-    if skipped:
-        logger.warning(
-            f"warm start: skipped {len(skipped)} shape-mismatched tensor(s): {skipped[:10]}"
-        )
-    unexpected = [name for name in unexpected if not name.endswith("num_batches_tracked")]
-    if unexpected:
-        logger.warning(f"warm start: unexpected checkpoint tensor(s): {unexpected[:10]}")
-    if missing:
-        logger.warning(
-            f"warm start: checkpoint has no value for {len(missing)} tensor(s): {missing[:10]}"
-        )
+    load_state_dict_non_strict(model, checkpoint)
 
 
 @dataclass
