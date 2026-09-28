@@ -40,7 +40,12 @@ def _merge_tsvs(paths, out_path):
 
 if DESIGN:
 
+    DESIGN_CHECKPOINT_DIRS = DESIGN.get("checkpoint_dirs")
+    DESIGN_HOLDOUT_CHECKPOINT = DESIGN.get("holdout_checkpoint")
+
     def _design_run_names():
+        if DESIGN_CHECKPOINT_DIRS:
+            return []
         explicit = DESIGN.get("design_runs")
         if explicit:
             return explicit
@@ -68,10 +73,6 @@ if DESIGN:
     DESIGN_TARGETS = DESIGN["targets"]
     DESIGN_TARGET_NAMES = [target["name"] for target in DESIGN_TARGETS]
     DESIGN_TARGET_BY_NAME = {target["name"]: target for target in DESIGN_TARGETS}
-    DESIGN_CHECKPOINT_DIRS = DESIGN.get("checkpoint_dirs")
-    DESIGN_HOLDOUT_CHECKPOINT = DESIGN.get("holdout_checkpoint")
-    if DESIGN_CHECKPOINT_DIRS and len(DESIGN_CHECKPOINT_DIRS) != len(DESIGN_RUN_NAMES):
-        raise ValueError("design.checkpoint_dirs must match the number of design runs")
 
     _design_requested_shards = DESIGN.get("shards", 1)
 
@@ -212,7 +213,9 @@ if DESIGN:
         input:
             shard=lambda w: str(Path(checkpoints.shard_candidates.get().output[0])
                                  / f"{w.shard}.bed"),
-            intervals=downstream_intervals(DESIGN_RUN_NAMES),
+            intervals=downstream_intervals(
+                DESIGN_RUN_NAMES, model_kind=DESIGN.get("model_kind", "auto")
+            ),
             checkpoints=_design_checkpoint_state_inputs,
             holdout=_design_holdout_state_input,
         params:

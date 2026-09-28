@@ -41,11 +41,14 @@ def _attr_merge_tsvs(paths, out_path):
 
 if ATTRIBUTION:
 
-    ATTRIBUTION_RUN_NAMES = ATTRIBUTION.get("runs") or downstream_default_runs()
+    ATTRIBUTION_CHECKPOINT_DIRS = ATTRIBUTION.get("checkpoint_dirs")
+    ATTRIBUTION_RUN_NAMES = (
+        ATTRIBUTION.get("runs")
+        or ([] if ATTRIBUTION_CHECKPOINT_DIRS else downstream_default_runs())
+    )
     ATTRIBUTION_TARGETS = ATTRIBUTION["targets"]
     ATTRIBUTION_TARGET_NAMES = [target["name"] for target in ATTRIBUTION_TARGETS]
     ATTRIBUTION_TARGET_BY_NAME = {target["name"]: target for target in ATTRIBUTION_TARGETS}
-    ATTRIBUTION_CHECKPOINT_DIRS = ATTRIBUTION.get("checkpoint_dirs")
 
     _attr_candidates_path = Path(ATTRIBUTION["candidates"])
     # The candidates file may itself be another rule's output, in which case it does not exist
@@ -142,7 +145,9 @@ if ATTRIBUTION:
     rule attribute_shard:
         input:
             shard=str(ATTRIBUTION_DIR / "shards" / "{shard}.bed"),
-            intervals=downstream_intervals(ATTRIBUTION_RUN_NAMES),
+            intervals=downstream_intervals(
+                ATTRIBUTION_RUN_NAMES, model_kind=ATTRIBUTION.get("model_kind", "auto")
+            ),
             checkpoints=_attr_checkpoint_state_inputs,
         params:
             track_selector_args=lambda w: _attr_track_selector_args(

@@ -100,6 +100,35 @@ def test_parameter_sweep_does_not_require_training_matrix() -> None:
     _validate_against_schema(config.to_dict())
 
 
+def test_region_downstream_explicit_checkpoints_need_no_train() -> None:
+    """A finished live region checkpoint can run attribution/design without recreating train."""
+    target = RegionCountsTargetConfig(
+        regions="regions.parquet",
+        anchor_regions="anchors.bed",
+        background_regions="background.parquet",
+    )
+    config = RegulonadoConfig(
+        results_dir="results",
+        inputs=InputsConfig(fasta="genome.fa", bam_dir="bams"),
+        targets=TargetsConfig(region_counts=target),
+        attribution=AttributionConfig(
+            candidates="candidates.bed",
+            checkpoint_dirs=["locon-target"],
+            model_kind="region_counts",
+            targets=[AttributionTarget(name="hl60", target="HL-60")],
+        ),
+        design=DesignConfig(
+            from_attribution="hl60",
+            checkpoint_dirs=["locon-target"],
+            model_kind="region_counts",
+            targets=[DesignTarget(name="hl60", target="HL-60")],
+        ),
+    )
+
+    assert config.train is None
+    _validate_against_schema(config.to_dict())
+
+
 # ---------------------------------------------------------------------- #
 #  Schema round-trip                                                       #
 # ---------------------------------------------------------------------- #

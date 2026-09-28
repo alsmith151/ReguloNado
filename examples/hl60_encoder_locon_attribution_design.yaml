@@ -1,0 +1,78 @@
+# Run ISM attribution then enhancer design with the completed live AlphaGenome-encoder LoCon
+# checkpoint. This deliberately has no ``train:`` section: it consumes the final saved model
+# directly, so invoking the workflow cannot retrain or select a cached-embedding head.
+#
+# Replace the three /path/to values and candidates with your local paths. The checkpoint must be
+# the final target-stage directory containing model.safetensors/config.json, not checkpoint-N.
+
+results_dir: /path/to/results/2026-09-26-hl60-region-counts
+
+inputs:
+  fasta: /path/to/hg38.fa
+  bam_dir: /path/to/aligned_bams
+  track_annotations: /path/to/track_annotations.parquet
+
+targets:
+  region_counts:
+    regions: data/interim/05-model-dataset/regions-ccre-signal-min1-full/regions.parquet
+    target_width: 1000
+    threads: 4
+    anchor_regions: resources/common_essential_windows.bed
+    background_regions: data/interim/01-track-qc/null-windows.parquet
+    exclude_regions: data/interim/04-examined-outputs/all-kmeans-peak-groups.parquet
+
+attribution:
+  # BED or region-table parquet of the candidates you want to triage.
+  candidates: /path/to/hl60_candidate_shortlist.bed
+  shards: 8
+  checkpoint_dirs:
+    - /path/to/results/2026-09-26-hl60-region-counts/train/hl60_alphagenome_encoder_locon/target
+  model_kind: region_counts
+  method: ism
+  bin_reduction: mean
+  fold_reduction: mean
+  batch_size: 8
+  fold_mode: resident
+  on_missing: skip
+  stride: 1
+  smooth_bp: 25
+  quantile: 0.90
+  min_width_bp: 50
+  merge_gap_bp: 20
+  min_zscore: 1.5
+  max_cores_per_candidate: 1
+  anchor: centroid
+  fix_width: 300
+  flank_mode: genomic
+  flank_keep: candidate
+  flank_keep_bp: 0
+  bigwig: true
+  targets:
+    - name: hl60
+      target: HL-60
+
+design:
+  # Chains directly from attribution.core_regions.bed above.
+  from_attribution: hl60
+  shards: 8
+  checkpoint_dirs:
+    - /path/to/results/2026-09-26-hl60-region-counts/train/hl60_alphagenome_encoder_locon/target
+  model_kind: region_counts
+  energy: contrast
+  bin_reduction: mean
+  gain_transform: raw
+  fold_mode: resident
+  batch_size: 8
+  on_missing: skip
+  rounds: 10
+  top_k: 1
+  ism_stride: 1
+  flank_mode: genomic
+  flank_keep: candidate
+  flank_keep_bp: 0
+  wandb: true
+  wandb_project: regulonado-design
+  targets:
+    - name: hl60
+      target: HL-60
+      method: ism

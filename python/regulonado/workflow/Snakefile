@@ -87,8 +87,22 @@ def downstream_default_runs():
     return list(PROFILE_RUN_NAMES or REGION_RUN_NAMES)
 
 
-def downstream_intervals(runs):
-    """Return the interval table belonging to one homogeneous downstream fold set."""
+def downstream_intervals(runs, *, model_kind="auto"):
+    """Return the interval table belonging to one homogeneous downstream fold set.
+
+    Explicit checkpoint directories intentionally need no ``train:`` section. In that case
+    there are no run names from which to infer the target, so require the caller's explicit
+    ``model_kind`` rather than guessing from whichever target happens to be configured.
+    """
+    if not runs:
+        if model_kind == "profile":
+            return PROFILE["intervals"]
+        if model_kind == "region_counts":
+            return REGION_COUNTS["regions"]
+        raise ValueError(
+            "checkpoint_dirs without train runs require attribution/design.model_kind to be "
+            "'profile' or 'region_counts', so the workflow can select its interval table"
+        )
     targets = {RUN_BY_NAME[run].get("target", "profile") for run in runs}
     if len(targets) != 1:
         raise ValueError(
