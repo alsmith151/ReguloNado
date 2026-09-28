@@ -14,6 +14,7 @@ from regulonado.design.attribution import (
     call_cores,
     grad_scan,
     ism_scan,
+    merge_attribution_bigwig,
     write_attributions,
 )
 from regulonado.design.sequence import DatasetWindowIndex, Seed, resolve_seeds
@@ -635,6 +636,59 @@ def test_bigwig_survives_overlapping_candidates(tmp_path):
     handle = pybigtools.open(str(tmp_path / "attributions.bw"))
     assert handle.chroms() == {"chr1": CONTEXT}
     assert len(list(handle.records("chr1"))) > 0
+
+
+def _write_fai(path, chrom_sizes):
+    path.write_text("".join(f"{chrom}\t{size}\t0\t0\t0\n" for chrom, size in chrom_sizes.items()))
+
+
+def test_merge_bigwig_preserves_sparse_scanned_positions(tmp_path):
+    """Stride/position-restricted rows must stay on their explicit genomic coordinates."""
+    import pandas as pd
+    import pybigtools
+
+    fasta = tmp_path / "genome.fa"
+    _write_fai(tmp_path / "genome.fa.fai", {"chr1": 100})
+    pd.DataFrame(
+        {
+            "name": ["c0", "c0"],
+            "chrom": ["chr1", "chr1"],
+            "position": [10, 12],
+            "importance": [1.0, 3.0],
+        }
+    ).to_csv(tmp_path / "attributions.tsv", sep="\t", index=False)
+
+    out = merge_attribution_bigwig(
+        tmp_path / "attributions.tsv", tmp_path / "merged.bw", fasta_path=fasta
+    )
+    handle = pybigtools.open(str(out))
+    assert list(handle.records("chr1")) == [(10, 11, 1.0), (12, 13, 3.0)]
+
+
+def test_merge_bigwig_averages_overlaps_and_retains_nonoverlapping_tails(tmp_path):
+    import pandas as pd
+    import pybigtools
+
+    fasta = tmp_path / "genome.fa"
+    _write_fai(tmp_path / "genome.fa.fai", {"chr1": 100})
+    pd.DataFrame(
+        {
+            "name": ["c0", "c0", "c1", "c1"],
+            "chrom": ["chr1"] * 4,
+            "position": [10, 11, 11, 12],
+            "importance": [2.0, 2.0, 4.0, 4.0],
+        }
+    ).to_csv(tmp_path / "attributions.tsv", sep="\t", index=False)
+
+    out = merge_attribution_bigwig(
+        tmp_path / "attributions.tsv", tmp_path / "merged.bw", fasta_path=fasta
+    )
+    handle = pybigtools.open(str(out))
+    assert list(handle.records("chr1")) == [
+        (10, 11, 2.0),
+        (11, 12, 3.0),
+        (12, 13, 4.0),
+    ]
 
 
 def test_called_cores_resolve_back_into_design(tmp_path):

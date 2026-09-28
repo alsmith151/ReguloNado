@@ -352,9 +352,7 @@ def _smooth(importance: np.ndarray, smooth_bp: int) -> np.ndarray:
     import pandas as pd
 
     window = max(1, int(smooth_bp))
-    return (
-        pd.Series(importance).rolling(window, center=True, min_periods=1).mean().to_numpy()
-    )
+    return pd.Series(importance).rolling(window, center=True, min_periods=1).mean().to_numpy()
 
 
 def call_cores(
@@ -618,9 +616,22 @@ def _core_frame(records: list[AttributionRecord]):
     return pd.DataFrame(
         rows,
         columns=[
-            "name", "candidate", "chrom", "start", "end", "width", "rank", "score",
-            "zscore", "peak", "anchor", "fixed_width", "clamped", "candidate_start",
-            "candidate_end", "fold_label",
+            "name",
+            "candidate",
+            "chrom",
+            "start",
+            "end",
+            "width",
+            "rank",
+            "score",
+            "zscore",
+            "peak",
+            "anchor",
+            "fixed_width",
+            "clamped",
+            "candidate_start",
+            "candidate_end",
+            "fold_label",
         ],
     )
 
@@ -713,8 +724,17 @@ def _attribution_frame(records: list[AttributionRecord]):
     if not frames:
         return pd.DataFrame(
             columns=[
-                "name", "chrom", "position", "ref_base", "importance", "importance_smooth",
-                "in_core", "delta_A", "delta_C", "delta_G", "delta_T",
+                "name",
+                "chrom",
+                "position",
+                "ref_base",
+                "importance",
+                "importance_smooth",
+                "in_core",
+                "delta_A",
+                "delta_C",
+                "delta_G",
+                "delta_T",
             ]
         )
     return pd.concat(frames, ignore_index=True)
@@ -726,47 +746,141 @@ def _write_attribution_bigwig(
     chrom_sizes: dict[str, int],
     rtol: float,
 ) -> None:
-    """Per-base importance track, reusing genomics' collapse + pybigtools writer."""
-    import pandas as pd
+    """Write one shard's per-base importance track, from explicit genomic positions.
 
-    from regulonado.genomics import collapse_bins, drop_overlaps, write_bigwigs
+    Builds its intervals through :func:`_attribution_bigwig_intervals`, off the same
+    ``_attribution_frame`` rows that become ``attributions.tsv`` -- so this shard's BigWig and
+    its TSV cannot disagree, and neither can it disagree with the merged BigWig that
+    :func:`merge_attribution_bigwig` later rebuilds from those same rows.
 
-    intervals: list[tuple[str, int, int, float]] = []
-    for record in records:
-        seed, ism = record.seed, record.ism
-        chrom_length = chrom_sizes.get(seed.chrom)
-        if chrom_length is None:
-            continue
-        intervals.extend(
-            collapse_bins(
-                np.nan_to_num(ism.importance, nan=0.0),
-                seed.chrom,
-                seed.window.ctx_start + ism.editable.start,
-                1,
-                rtol,
-                chrom_length,
-            )
-        )
+    Consequences worth knowing, both inherited from that helper: a base covered by several
+    overlapping candidates holds their mean rather than one arbitrary candidate's value, and a
+    position the scan skipped (``stride > 1``, ``--positions``) is absent from the track rather
+    than written as zero. Absent and zero are different claims -- "not measured" versus "measured
+    as unimportant" -- and a genome browser renders them differently.
+    """
+    from regulonado.genomics import write_bigwigs
+
+    intervals = _attribution_bigwig_intervals(
+        _attribution_frame(records), chrom_sizes=chrom_sizes, rtol=rtol
+    )
     if not intervals:
         return
-
-    # Candidates sharing a dataset window can overlap; pybigtools rejects overlapping intervals.
-    frame = pd.DataFrame(intervals, columns=["chrom", "start", "end", "value"])
-    frame, n_dropped = drop_overlaps(frame, chrom_sizes)
-    if n_dropped:
-        logger.warning(
-            f"{n_dropped} overlapping interval(s) dropped from attributions.bw — "
-            f"overlapping spans keep only the first one's profile in the overlap. "
-            f"The per-candidate values in attributions.tsv are unaffected."
-        )
 
     write_bigwigs(
         out_dir,
         ["attributions"],
         [0],
-        {0: list(frame.itertuples(index=False, name=None))},
+        {0: intervals},
         chrom_sizes,
     )
+
+
+def _attribution_bigwig_intervals(
+    frame, *, chrom_sizes: dict[str, int], rtol: float
+) -> list[tuple[str, int, int, float]]:
+    """Aggregate attribution rows and return sorted, non-overlapping BigWig intervals.
+
+    The single interval-building path behind both the per-shard writer
+    (:func:`_write_attribution_bigwig`) and the cross-shard merge
+    (:func:`merge_attribution_bigwig`), so the two cannot drift: a merged BigWig and a
+    single-shard one built over the same candidates now agree by construction.
+
+    Replaces an earlier ``collapse_bins`` + ``genomics.drop_overlaps`` pipeline that had two
+    defects, both of which showed up as wrong values in the *merged* track rather than as an
+    error:
+
+    1. **Order-dependence.** pybigtools rejects overlapping intervals, and candidates sharing a
+       dataset window overlap genomically. ``drop_overlaps`` resolved that by keeping whichever
+       interval came first and discarding the rest, so an overlapped base reported one arbitrary
+       candidate's profile -- and *which* one depended on candidate and shard ordering. Every
+       value at a base is now averaged instead, which is both order-independent and
+       shard-count-independent.
+
+    2. **Sparse scans treated as dense.** ``attributions.tsv`` only carries the positions
+       actually scanned, so it is sparse whenever ``stride > 1`` or ``--positions`` is used. The
+       old merge path handed each candidate group to ``collapse_bins`` as if it were a dense run
+       starting at the group's first position, which silently shifted every value after the
+       first gap to the wrong coordinate. This works from the explicit ``position`` column
+       throughout, so skipped positions stay absent rather than being shifted or written as
+       zero.
+    """
+    import pandas as pd
+
+    from regulonado.genomics import collapse_bins
+
+    if frame.empty:
+        return []
+
+    # Checked explicitly because this helper is also reached from `merge_attribution_bigwig`,
+    # whose frame is read back off disk and so is not guaranteed to be one `_attribution_frame`
+    # produced -- a truncated or hand-edited TSV should name the missing column, not raise a
+    # bare KeyError several lines later.
+    required = {"chrom", "position", "importance"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(
+            "Attribution table is missing required BigWig column(s): " + ", ".join(sorted(missing))
+        )
+
+    values = frame.loc[:, ["chrom", "position", "importance"]].copy()
+    values["chrom"] = values["chrom"].astype(str)
+    # Asymmetric on purpose: an unparseable *position* is a corrupt table and must not be
+    # guessed at, since a wrong coordinate writes signal to the wrong locus silently. An
+    # unparseable *importance* is a single missing measurement, which collapses to 0.0 the same
+    # way a NaN from the scan itself does.
+    values["position"] = pd.to_numeric(values["position"], errors="raise").astype("int64")
+    values["importance"] = pd.to_numeric(values["importance"], errors="coerce").fillna(0.0)
+    # Drop anything the BigWig header cannot describe. The header is written from `chrom_sizes`
+    # (this FASTA's .fai), so a row on an unlisted contig or past a listed contig's end has no
+    # valid place in the output. Filtering rather than raising is the defensive choice: this
+    # runs at the end of a long shard fan-out, and dropping a handful of undescribable rows is
+    # a better failure than discarding every candidate's attributions with them.
+    values = values[values["chrom"].isin(chrom_sizes)]
+    values = values[
+        (values["position"] >= 0) & (values["position"] < values["chrom"].map(chrom_sizes))
+    ]
+    if values.empty:
+        return []
+
+    # The fix for defect 1: one mean per genomic base, collapsing every overlapping candidate's
+    # contribution into the single value a BigWig can hold. sort=False because pandas' own
+    # lexicographic group order is not the order the file needs -- the explicit sort below
+    # imposes that instead.
+    values = values.groupby(["chrom", "position"], as_index=False, sort=False)["importance"].mean()
+    # Sorted for the contiguous-run detection below, which reads `np.diff(positions)` and so is
+    # only correct on ascending positions -- NOT to satisfy the writer, which re-sorts by the
+    # same key itself (`genomics.write_bigwigs`). Ranking chromosomes by `chrom_sizes` insertion
+    # order (FASTA/.fai order) rather than sorting the names matches what the writer will do, so
+    # the intervals this returns are already in final file order: useful when reading them back
+    # in a test, and harmless otherwise.
+    chrom_rank = {chrom: rank for rank, chrom in enumerate(chrom_sizes)}
+    values["_chrom_rank"] = values["chrom"].map(chrom_rank)
+    values = values.sort_values(["_chrom_rank", "position"], kind="stable")
+
+    intervals: list[tuple[str, int, int, float]] = []
+    for chrom, group in values.groupby("chrom", sort=False):
+        positions = group["position"].to_numpy(dtype=np.int64)
+        importance = group["importance"].to_numpy(dtype=float)
+        # The fix for defect 2. `collapse_bins` takes a start coordinate plus a dense vector and
+        # assumes every element is the next base along, so it can only be handed runs that are
+        # genuinely contiguous. Split wherever the position step is not exactly 1 -- at stride
+        # gaps, at `--positions` gaps, and between candidates -- and give each run its own true
+        # start coordinate.
+        block_starts = np.r_[0, np.flatnonzero(np.diff(positions) != 1) + 1]
+        block_ends = np.r_[block_starts[1:], len(positions)]
+        for start, end in zip(block_starts, block_ends):
+            intervals.extend(
+                collapse_bins(
+                    importance[start:end],
+                    str(chrom),
+                    int(positions[start]),
+                    1,
+                    rtol,
+                    chrom_sizes[str(chrom)],
+                )
+            )
+    return intervals
 
 
 def merge_attribution_bigwig(
@@ -774,35 +888,26 @@ def merge_attribution_bigwig(
 ) -> Path:
     """Rebuild a single BigWig from a merged ``attributions.tsv``.
 
-    Used by the workflow's merge step: shards hold disjoint candidates but can still overlap
-    genomically, so the per-shard BigWigs cannot simply be concatenated. Chromosome sizes come
-    from the FASTA's ``.fai`` index.
+    Used by the workflow's merge step. Shards hold disjoint *candidates* but those candidates
+    can still overlap *genomically*, so the per-shard BigWigs cannot simply be concatenated --
+    the overlaps have to be resolved against the full set of values at each base, which only the
+    merged TSV has. Rebuilding from the TSV rather than from the shard BigWigs is what makes the
+    result independent of how many shards the run happened to use.
+
+    ``rtol`` is pinned at 0.01 rather than threaded through from ``AttributionConfig``: this
+    runs as its own workflow step with no config in scope, and the value only sets how
+    aggressively equal-ish neighbouring bases are run-length merged. Chromosome sizes come from
+    the FASTA's ``.fai`` index.
     """
     import pandas as pd
 
-    from regulonado.genomics import collapse_bins, drop_overlaps, read_chrom_sizes, write_bigwigs
+    from regulonado.genomics import read_chrom_sizes, write_bigwigs
 
     out_path = Path(out_path)
     chrom_sizes = read_chrom_sizes(Path(f"{fasta_path}.fai"))
 
     frame = pd.read_csv(attributions_tsv, sep="\t")
-    intervals: list[tuple[str, int, int, float]] = []
-    if not frame.empty:
-        for (name, chrom), group in frame.groupby(["name", "chrom"], sort=False):
-            chrom_length = chrom_sizes.get(str(chrom))
-            if chrom_length is None:
-                continue
-            group = group.sort_values("position")
-            intervals.extend(
-                collapse_bins(
-                    np.nan_to_num(group["importance"].to_numpy(dtype=float), nan=0.0),
-                    str(chrom),
-                    int(group["position"].iloc[0]),
-                    1,
-                    0.01,
-                    chrom_length,
-                )
-            )
+    intervals = _attribution_bigwig_intervals(frame, chrom_sizes=chrom_sizes, rtol=0.01)
 
     if not intervals:
         # pybigtools still needs a valid header, so emit an empty-but-well-formed file.
@@ -811,20 +916,11 @@ def merge_attribution_bigwig(
         pybigtools.open(str(out_path), "w").write(chrom_sizes, iter([]))
         return out_path
 
-    frame = pd.DataFrame(intervals, columns=["chrom", "start", "end", "value"])
-    frame, n_dropped = drop_overlaps(frame, chrom_sizes)
-    if n_dropped:
-        logger.warning(
-            f"{n_dropped} overlapping interval(s) dropped from {out_path.name} — "
-            f"overlapping spans keep only the first one's profile in the overlap. "
-            f"The per-candidate values in attributions.tsv are unaffected."
-        )
-
     written = write_bigwigs(
         out_path.parent,
         [out_path.stem],
         [0],
-        {0: list(frame.itertuples(index=False, name=None))},
+        {0: intervals},
         chrom_sizes,
     )
     return written[0]
