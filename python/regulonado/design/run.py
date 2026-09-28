@@ -52,6 +52,7 @@ def _trajectory_table(wandb_module, history: list[dict]):
         "target_gain",
         "offtarget_boost",
         "n_edits",
+        "edit_penalty",
     ]
     dynamic = sorted(
         {key for entry in history for key in entry if key not in (*fixed, "positions")}
@@ -262,6 +263,16 @@ def _log_projected_passes(config: "DesignConfig", seeds: list["Seed"]) -> None:
     )
 
 
+def _needs_reference(config: "DesignConfig") -> bool:
+    """Whether the energy needs ``set_reference`` before it can score.
+
+    ``selective-activation`` measures gain against the seed's group scores; a non-zero
+    ``edit_penalty_weight`` measures drift against the seed's sequence. Either one alone is
+    enough, and ``SpecificityEnergy.set_reference`` caches both.
+    """
+    return config.objective == "selective-activation" or config.edit_penalty_weight > 0
+
+
 def _energy_kwargs(config: "DesignConfig") -> dict[str, Any]:
     return dict(
         target_alpha=config.target_alpha,
@@ -275,6 +286,8 @@ def _energy_kwargs(config: "DesignConfig") -> dict[str, Any]:
         offtarget_boost_tolerance=config.offtarget_boost_tolerance,
         gain_transform=config.gain_transform,
         gain_pseudocount=config.gain_pseudocount,
+        edit_penalty_weight=config.edit_penalty_weight,
+        edit_budget=config.edit_budget,
     )
 
 
@@ -392,6 +405,8 @@ def _finish_wandb_run(
     wandb_run.summary["final_specificity"] = float(final_result.specificity[0])
     wandb_run.summary["final_target_gain"] = float(final_result.target_gain[0])
     wandb_run.summary["final_offtarget_boost"] = float(final_result.offtarget_boost[0])
+    wandb_run.summary["final_n_edits"] = float(final_result.n_edits[0])
+    wandb_run.summary["final_edit_penalty"] = float(final_result.edit_penalty[0])
     if holdout_result is not None:
         wandb_run.summary["holdout_energy"] = float(holdout_result.energy[0])
         wandb_run.summary["holdout_target"] = float(holdout_result.target[0])
@@ -488,7 +503,9 @@ def _score_one_candidate(
         context = apply_neutral_flanks(context, keep, mode=config.flank_mode, rng=rng)
 
     energy_fn = _build_energy_fn(config, ensemble, groups, seed.bins)
-    if config.objective == "selective-activation":
+    # The reference is the post-flank context, so a neutral-flank run measures gain and drift
+    # against the sequence the search actually starts from, not its genomic original.
+    if _needs_reference(config):
         energy_fn.set_reference(context[None])
 
     wandb_run = (
@@ -515,7 +532,7 @@ def _score_one_candidate(
     holdout_result = None
     if holdout_ensemble is not None:
         holdout_energy_fn = _build_energy_fn(config, holdout_ensemble, groups, seed.bins)
-        if config.objective == "selective-activation":
+        if _needs_reference(config):
             holdout_energy_fn.set_reference(context[None])
         holdout_result = holdout_energy_fn(state.context[None])
 
@@ -638,6 +655,8 @@ def _build_run_info(
         "offtarget_temperature": config.offtarget_temperature,
         "offtarget_boost_weight": config.offtarget_boost_weight,
         "offtarget_boost_tolerance": config.offtarget_boost_tolerance,
+        "edit_penalty_weight": config.edit_penalty_weight,
+        "edit_budget": config.edit_budget,
         "gain_transform": config.gain_transform,
         "gain_pseudocount": config.gain_pseudocount,
         "batch_size": config.batch_size,

@@ -554,6 +554,16 @@ $defs:
         exclusiveMinimum: 0
         title: Gain Pseudocount
         type: number
+      edit_penalty_weight:
+        default: 0.0
+        minimum: 0
+        title: Edit Penalty Weight
+        type: number
+      edit_budget:
+        default: 0
+        minimum: 0
+        title: Edit Budget
+        type: integer
       target_alpha:
         default: 1.0
         title: Target Alpha

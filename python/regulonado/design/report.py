@@ -99,6 +99,7 @@ def _write_designs_tsv(path: Path, records: list[DesignRecord]) -> None:
             "score_neutral": record.score_neutral,
             "flank_delta": record.score_neutral - record.score_genomic,
             "n_edits": n_edits,
+            "edit_penalty": float(result.edit_penalty[0]) if result is not None else "",
             "per_fold_energy": (
                 ",".join(f"{v:.6g}" for v in result.per_fold_energy[:, 0].tolist())
                 if result is not None
@@ -131,6 +132,9 @@ def _write_designs_tsv(path: Path, records: list[DesignRecord]) -> None:
         )
         row["holdout_offtarget_boost"] = (
             float(holdout.offtarget_boost[0]) if holdout is not None else ""
+        )
+        row["holdout_edit_penalty"] = (
+            float(holdout.edit_penalty[0]) if holdout is not None else ""
         )
         for name, value in _group_columns(holdout).items():
             row[f"holdout_{name}"] = value
@@ -170,6 +174,7 @@ def _write_trajectory(path: Path, records: list[DesignRecord]) -> None:
                 "target_gain": entry.get("target_gain", ""),
                 "offtarget_boost": entry.get("offtarget_boost", ""),
                 "n_edits": entry.get("n_edits", ""),
+                "edit_penalty": entry.get("edit_penalty", ""),
                 "sequence": entry.get("sequence", ""),
             }
             row.update(

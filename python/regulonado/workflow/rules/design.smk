@@ -122,6 +122,7 @@ if DESIGN:
         "model_queries_per_batch", "top_n", "mu", "recomb_rate", "threshold", "rho",
         "on_missing", "offtarget_reduction", "objective", "offtarget_boost_weight",
         "offtarget_boost_tolerance", "offtarget_temperature", "gain_transform", "gain_pseudocount",
+        "edit_penalty_weight", "edit_budget",
         "target_alpha", "bending_factor", "bin_reduction", "topk_bins", "fold_mode", "batch_size",
         "device", "exclude_tracks", "wandb", "wandb_project", "wandb_group", "model_kind",
         "energy", "flank_mode", "flank_keep", "flank_keep_bp",

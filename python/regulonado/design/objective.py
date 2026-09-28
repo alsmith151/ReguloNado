@@ -234,6 +234,8 @@ class EnergyResult:
     target_gain: torch.Tensor  # (B,), relative to the seed for selective activation
     per_group_gain: torch.Tensor  # (B, n_groups), same order as group_names
     offtarget_boost: torch.Tensor  # (B,), aggregated positive off-target gain
+    n_edits: torch.Tensor  # (B,), substitutions vs the reference sequence
+    edit_penalty: torch.Tensor  # (B,), the drift term already added into `energy`
     objective: str
     has_reference: bool
     gain_transform: str
@@ -267,6 +269,8 @@ class SpecificityEnergy(nn.Module):
         offtarget_boost_tolerance: float = 0.0,
         gain_transform: Literal["raw", "log2-fold-change"] = "raw",
         gain_pseudocount: float = 1.0,
+        edit_penalty_weight: float = 0.0,
+        edit_budget: int = 0,
     ) -> None:
         super().__init__()
         self.ensemble = ensemble
@@ -286,7 +290,10 @@ class SpecificityEnergy(nn.Module):
         self.offtarget_boost_tolerance = float(offtarget_boost_tolerance)
         self.gain_transform = gain_transform
         self.gain_pseudocount = float(gain_pseudocount)
+        self.edit_penalty_weight = float(edit_penalty_weight)
+        self.edit_budget = int(edit_budget)
         self._reference_group_scores: dict[str, torch.Tensor] | None = None
+        self._reference_sequence: torch.Tensor | None = None
         if self.topk_bins < 1:
             raise ValueError("topk_bins must be >= 1")
         if self.objective not in ("specificity", "selective-activation"):
@@ -301,6 +308,10 @@ class SpecificityEnergy(nn.Module):
             raise ValueError(f"Unknown gain_transform={self.gain_transform!r}")
         if self.gain_pseudocount <= 0:
             raise ValueError("gain_pseudocount must be > 0")
+        if self.edit_penalty_weight < 0:
+            raise ValueError("edit_penalty_weight must be >= 0")
+        if self.edit_budget < 0:
+            raise ValueError("edit_budget must be >= 0")
 
     def bend(self, tensor: torch.Tensor) -> torch.Tensor:
         if not self.bending_factor:
@@ -362,16 +373,61 @@ class SpecificityEnergy(nn.Module):
         }
 
     def set_reference(self, one_hot_seed) -> None:
-        """Cache per-fold group scores for an unedited, single-sequence seed."""
+        """Cache the unedited, single-sequence seed: per-fold group scores and the sequence.
+
+        The group scores are what ``selective-activation`` measures gain against; the sequence
+        itself is what :meth:`_edit_penalty` measures drift from. Callers set the reference when
+        either is in play -- see ``design.run._score_one_candidate``.
+        """
         preds = self.ensemble.predict(one_hot_seed)
         if preds.shape[1] != 1:
-            raise ValueError("selective-activation reference must contain exactly one sequence")
+            raise ValueError("the design reference must contain exactly one sequence")
         summary = self._summarize_predictions(preds)
         group_scores = summary["group_scores"]
         assert isinstance(group_scores, dict)
         self._reference_group_scores = {
             name: score.detach().clone() for name, score in group_scores.items()
         }
+        sequence = one_hot_seed
+        if not isinstance(sequence, torch.Tensor):
+            sequence = torch.as_tensor(sequence)
+        self._reference_sequence = sequence.detach().clone()
+
+    def _edit_penalty(self, one_hot_batch) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(n_edits, penalty)`` for a batch, both ``(B,)`` and both in the energy's own units.
+
+        ``n_edits`` is the Hamming distance to the reference sequence. Positions outside the
+        search's editable span are identical to the reference by construction, so counting over
+        the whole context is the same as counting over the editable span -- the energy does not
+        need to know where that span is.
+
+        A position counts as one edit when its one-hot *column* differs at all, rather than when
+        ``argmax`` differs: an ``N`` base is an all-zero column, whose ``argmax`` is an arbitrary
+        0 that would silently compare equal to an ``A``.
+
+        The penalty is ``weight * relu(n_edits - edit_budget)``. With the default
+        ``edit_budget=0`` that is a flat per-edit cost, so a greedy search accepts an edit only
+        when it buys more than ``edit_penalty_weight`` of energy -- which makes the search
+        self-terminating rather than bounded by its round count.
+        """
+        reference = self._reference_sequence
+        if reference is None:
+            raise RuntimeError(
+                f"edit_penalty_weight={self.edit_penalty_weight} requires "
+                "set_reference(unedited_seed) before scoring"
+            )
+        batch = one_hot_batch
+        if not isinstance(batch, torch.Tensor):
+            batch = torch.as_tensor(batch)
+        reference = reference.to(device=batch.device)
+        if batch.shape[1:] != reference.shape[1:]:
+            raise ValueError(
+                f"batch shape {tuple(batch.shape)} is not broadcastable against reference "
+                f"shape {tuple(reference.shape)}"
+            )
+        n_edits = (batch != reference).any(dim=-2).sum(dim=-1).to(batch.dtype)
+        penalty = self.edit_penalty_weight * torch.relu(n_edits - self.edit_budget)
+        return n_edits, penalty
 
     def _gain(self, score: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
         if self.gain_transform == "raw":
@@ -454,6 +510,16 @@ class SpecificityEnergy(nn.Module):
         else:
             raise ValueError(f"Unknown fold_reduction={self.fold_reduction!r}")
 
+        # Added after the fold reduction, not inside per_fold_energy: the drift term is a
+        # property of the sequence alone, identical for every fold, so folding it in would make
+        # `mean_plus_std` treat a constant as if it carried cross-fold disagreement.
+        if self.edit_penalty_weight:
+            n_edits, edit_penalty = self._edit_penalty(one_hot_batch)
+            energy = energy + edit_penalty
+        else:
+            n_edits = torch.zeros_like(energy)
+            edit_penalty = torch.zeros_like(energy)
+
         per_group = torch.stack([group_scores[name] for name in group_names], dim=-1).mean(dim=0)
         per_group_gain = torch.stack([group_gains[name] for name in group_names], dim=-1).mean(
             dim=0
@@ -475,6 +541,8 @@ class SpecificityEnergy(nn.Module):
             target_gain=target_gain_by_fold.mean(dim=0),
             per_group_gain=per_group_gain,
             offtarget_boost=smooth_boost.mean(dim=0),
+            n_edits=n_edits,
+            edit_penalty=edit_penalty,
             objective=self.objective,
             has_reference=self._reference_group_scores is not None,
             gain_transform=self.gain_transform,

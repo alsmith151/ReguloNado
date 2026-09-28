@@ -75,6 +75,11 @@ def _round_metrics(result, *, round_index: int, n_edits: int | None, **extra) ->
     offtarget_boost = getattr(result, "offtarget_boost", None)
     if offtarget_boost is not None:
         entry["offtarget_boost"] = float(_to_numpy(offtarget_boost)[0])
+    # `n_edits` above is the search's own committed-edit counter, which is the authoritative
+    # one; the energy's drift term is reported here as the cost that counter incurred.
+    edit_penalty = getattr(result, "edit_penalty", None)
+    if edit_penalty is not None:
+        entry["edit_penalty"] = float(_to_numpy(edit_penalty)[0])
     per_group = getattr(result, "per_group", None)
     group_names = getattr(result, "group_names", None)
     if per_group is not None and group_names is not None:

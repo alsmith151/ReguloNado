@@ -625,3 +625,138 @@ def test_flank_keep_span_candidate_vs_scored_span_and_padding():
     )
     span = attribute_run._flank_keep_span(clamped_config, seed, ensemble)
     assert span == slice(0, 200)  # clamped to the context
+
+
+# --------------------------------------------------------------------------- #
+# 8. The edit-budget / drift penalty                                         #
+# --------------------------------------------------------------------------- #
+#
+# `_StubRegionEnsemble` returns a fixed prediction regardless of input, so the base energy is
+# constant across every sequence here and any change in `energy` is attributable to the drift
+# term alone -- which is exactly what these tests need to isolate.
+def _penalty_fixture(n_groups: int = 3, **kwargs):
+    torch.manual_seed(0)
+    preds = torch.rand(1, 1, n_groups, 1) * 5.0
+    ensemble = _StubRegionEnsemble(preds)
+    group_names = [f"g{i}" for i in range(n_groups)]
+    groups = group_track_groups(group_names, target=group_names[0])
+    energy = SpecificityEnergy(ensemble, groups, slice(0, 1), **kwargs)
+    return energy
+
+
+def _substituted(context: np.ndarray, positions: list[int]) -> np.ndarray:
+    """Copy of `context` with each named position switched to a different base."""
+    out = context.copy()
+    for position in positions:
+        current = int(out[:, position].argmax())
+        out[:, position] = 0
+        out[(current + 1) % 4, position] = 1
+    return out
+
+
+def test_edit_penalty_weight_zero_leaves_the_energy_untouched():
+    """The regression pin: at the default weight the drift term must not perturb anything."""
+    context = _motif_context()
+    baseline = _penalty_fixture()
+    penalised = _penalty_fixture(edit_penalty_weight=0.0)
+    penalised.set_reference(context[None])
+
+    edited = _substituted(context, [10, 20, 30])
+    assert float(penalised(edited[None]).energy[0]) == float(baseline(edited[None]).energy[0])
+    assert float(penalised(edited[None]).edit_penalty[0]) == 0.0
+    assert float(penalised(edited[None]).n_edits[0]) == 0.0
+
+
+def test_edit_penalty_counts_substitutions_and_scales_by_weight():
+    context = _motif_context()
+    energy_fn = _penalty_fixture(edit_penalty_weight=0.25)
+    energy_fn.set_reference(context[None])
+
+    unedited = energy_fn(context[None])
+    assert float(unedited.n_edits[0]) == 0.0
+    assert float(unedited.edit_penalty[0]) == 0.0
+
+    edited = energy_fn(_substituted(context, [10, 20, 30])[None])
+    assert float(edited.n_edits[0]) == 3.0
+    assert float(edited.edit_penalty[0]) == pytest.approx(0.75)
+    # The penalty is the whole difference: this stub's base energy is sequence-independent.
+    assert float(edited.energy[0]) - float(unedited.energy[0]) == pytest.approx(0.75)
+
+
+def test_edit_penalty_counts_an_n_base_as_one_edit():
+    """An `N` is an all-zero one-hot column whose argmax is an arbitrary 0, which would compare
+    equal to an `A`. Counting per-column difference instead is what keeps this honest."""
+    context = _motif_context()
+    energy_fn = _penalty_fixture(edit_penalty_weight=1.0)
+    energy_fn.set_reference(context[None])
+
+    position = int(np.flatnonzero(context[0] == 1)[0])  # a position that really is an 'A'
+    masked = context.copy()
+    masked[:, position] = 0  # -> N
+    assert float(energy_fn(masked[None]).n_edits[0]) == 1.0
+
+
+def test_edit_budget_is_a_free_allowance_before_the_penalty_bites():
+    context = _motif_context()
+    energy_fn = _penalty_fixture(edit_penalty_weight=1.0, edit_budget=4)
+    energy_fn.set_reference(context[None])
+
+    within = energy_fn(_substituted(context, [10, 20, 30])[None])
+    assert float(within.n_edits[0]) == 3.0
+    assert float(within.edit_penalty[0]) == 0.0
+
+    beyond = energy_fn(_substituted(context, [10, 20, 30, 40, 50, 60])[None])
+    assert float(beyond.n_edits[0]) == 6.0
+    assert float(beyond.edit_penalty[0]) == pytest.approx(2.0)  # relu(6 - 4) * 1.0
+
+
+def test_edit_penalty_without_a_reference_raises():
+    energy_fn = _penalty_fixture(edit_penalty_weight=0.1)
+    with pytest.raises(RuntimeError, match="set_reference"):
+        energy_fn(_motif_context()[None])
+
+
+def test_negative_edit_penalty_settings_are_rejected():
+    with pytest.raises(ValueError, match="edit_penalty_weight must be >= 0"):
+        _penalty_fixture(edit_penalty_weight=-0.1)
+    with pytest.raises(ValueError, match="edit_budget must be >= 0"):
+        _penalty_fixture(edit_budget=-1)
+
+
+@pytest.mark.parametrize("factory", [contrast_energy, worst_offtarget_energy, max_offtarget_energy])
+def test_edit_penalty_reaches_every_region_energy_factory(factory):
+    """The factories forward **kwargs to SpecificityEnergy, so the drift term must arrive
+    intact through all three rather than only the one that happens to be the default."""
+    torch.manual_seed(0)
+    context = _motif_context()
+    ensemble = _StubRegionEnsemble(torch.rand(1, 1, 3, 1) * 5.0)
+    groups = group_track_groups(["g0", "g1", "g2"], target="g0")
+    energy_fn = factory(ensemble, groups, slice(0, 1), edit_penalty_weight=0.5)
+    energy_fn.set_reference(context[None])
+
+    result = energy_fn(_substituted(context, [10, 20])[None])
+    assert float(result.n_edits[0]) == 2.0
+    assert float(result.edit_penalty[0]) == pytest.approx(1.0)
+
+
+def test_edit_penalty_makes_greedy_ism_stop_earlier():
+    """The point of the term: an edit is only accepted when it buys more than its cost, so a
+    heavy weight must terminate the search sooner than no penalty at all."""
+    from regulonado.design.search import ism_greedy
+
+    # NOT `_motif_context()`: that one is already a pure poly-A block, i.e. saturated for
+    # `_FakeRegionEnsemble`, so even an unpenalised search finds no improving edit. Starting
+    # from a context with no 'A' at all leaves every motif position worth one unit of signal.
+    rng = np.random.default_rng(0)
+    context = one_hot("".join(rng.choice(list("CGT"), CONTEXT)))
+    seed = _seed()
+    groups = group_track_groups(["g0", "g1", "g2"], target="g1")
+
+    def _run(weight: float) -> int:
+        ensemble = _FakeRegionEnsemble(n_folds=1)
+        energy_fn = SpecificityEnergy(ensemble, groups, slice(0, 1), edit_penalty_weight=weight)
+        energy_fn.set_reference(context[None])
+        state = ism_greedy(energy_fn, seed, context, rounds=8, top_k=1, batch_size=16)
+        return state.history[-1]["n_edits"]
+
+    assert _run(10.0) < _run(0.0)

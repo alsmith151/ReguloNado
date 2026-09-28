@@ -650,6 +650,13 @@ class DesignConfig(BaseModel):
     offtarget_temperature: float = Field(default=1.0, gt=0)
     gain_transform: Literal["raw", "log2-fold-change"] = "raw"
     gain_pseudocount: float = Field(default=1.0, gt=0)
+    # Drift guard: `edit_penalty_weight * relu(n_edits - edit_budget)` is added to the energy,
+    # where n_edits is the Hamming distance from the unedited seed. In the energy's own units
+    # (for a region model, log1p(rate)), so the weight reads directly as the minimum energy
+    # gain an edit must buy to be worth making -- which makes a greedy search self-terminating
+    # instead of bounded by `rounds`. The default 0.0 disables the term entirely.
+    edit_penalty_weight: float = Field(default=0.0, ge=0)
+    edit_budget: int = Field(default=0, ge=0)
     target_alpha: float = 1.0
     bending_factor: float = 0.0
     bin_reduction: Literal["mean", "topk"] = "mean"
