@@ -23,8 +23,12 @@ __all__ = [
     "EnergyResult",
     "SpecificityEnergy",
     "TrackGroups",
+    "contrast_energy",
+    "group_track_groups",
+    "max_offtarget_energy",
     "resolve_track_group_indices",
     "resolve_track_groups",
+    "worst_offtarget_energy",
 ]
 
 # group_by column -> the RegulonadoConfig.track_metadata key holding its id vector.
@@ -120,6 +124,47 @@ def resolve_track_group_indices(
         config=config,
     )
     return groups.target_idx.nonzero().flatten().tolist()
+
+
+def group_track_groups(
+    group_names: list[str] | None, *, target: str, exclude_groups: tuple[str, ...] = ()
+) -> TrackGroups:
+    """``TrackGroups`` over a region model's group axis -- no track sheet needed.
+
+    A region model's "track" axis (``RegionSequencePredictor.track_names``) IS its group axis
+    (each group has exactly one scalar output), so there is no track-to-group resolution to do
+    the way :func:`resolve_track_groups` needs for a per-track model: each mask is simply
+    one-hot over ``group_names``. This is pure construction, not lookup -- no track sheet,
+    dataset, or model config argument.
+    """
+    if not group_names:
+        raise ValueError(
+            "group_names is empty or None; a region ensemble's group_track_groups needs "
+            "group_names (RegionSequencePredictor.group_names / RegionFoldEnsemble.group_names)"
+        )
+    excluded = set(exclude_groups)
+    unknown_excluded = excluded.difference(group_names)
+    if unknown_excluded:
+        raise ValueError(
+            "Excluded group(s) not present in group_names: " + ", ".join(sorted(unknown_excluded))
+        )
+    labels: list[str | None] = [None if name in excluded else name for name in group_names]
+    distinct = sorted({label for label in labels if label is not None})
+    if target not in distinct:
+        raise ValueError(
+            f"Target group {target!r} matches no group; available groups: "
+            f"{', '.join(distinct) or 'none'}"
+        )
+
+    target_idx = torch.tensor([label == target for label in labels], dtype=torch.bool)
+    other_group_masks = {
+        group: torch.tensor([label == group for label in labels], dtype=torch.bool)
+        for group in distinct
+        if group != target
+    }
+    return TrackGroups(
+        labels=labels, target=target, target_idx=target_idx, other_group_masks=other_group_masks
+    )
 
 
 def _labels_from_track_sheet(
@@ -435,3 +480,70 @@ class SpecificityEnergy(nn.Module):
             gain_transform=self.gain_transform,
             gain_pseudocount=self.gain_pseudocount,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Named energy factories for region-count models                             #
+# --------------------------------------------------------------------------- #
+#
+# All three read a region ensemble's per-group softplus(eta) scores -- scale is
+# log1p(rate), roughly 0-8 for realistic count magnitudes -- so any finite `a_min`/`a_max`
+# clamp bound passed through **kwargs must be given in that log space, not in raw counts.
+# `bend`'s default `bending_factor=0.0` is a no-op (see `SpecificityEnergy.bend`); none of
+# these factories touch it.
+#
+# Absolute energies are NOT comparable across the three: `logsumexp` adds a constant
+# `log(G-1)` relative to `mean`/`max` (a soft maximum over `n` terms of similar scale sits
+# roughly `log(n)` above the plain mean), so only rankings/argmin *within* one factory's
+# objective are meaningful, never a magnitude compared across factories.
+def _region_energy(
+    ensemble, groups: TrackGroups, bins: slice, *, fixed_offtarget_reduction, **kwargs
+):
+    if "offtarget_reduction" in kwargs:
+        raise TypeError(
+            f"offtarget_reduction is fixed by this factory (to {fixed_offtarget_reduction!r}); "
+            "construct SpecificityEnergy directly if you need a different one"
+        )
+    return SpecificityEnergy(
+        ensemble, groups, bins, offtarget_reduction=fixed_offtarget_reduction, **kwargs
+    )
+
+
+def contrast_energy(ensemble, groups: TrackGroups, bins: slice, **kwargs) -> SpecificityEnergy:
+    """The selection metric ``contrast_pearson_<group>``, up to a positive constant.
+
+    ``offtarget_reduction="mean"``: with the default ``target_alpha=1.0``, this energy's
+    ``specificity`` equals ``-(n_groups / (n_groups - 1))`` times
+    ``RegionContrastReadout(ensemble, group_index=target, centre=True)``'s centred score --
+    i.e. the *same* quantity ``training/regions/metrics.py``'s ``_contrast`` computes for
+    ``contrast_pearson_<group>``, just rescaled. Lower energy therefore means higher contrast,
+    with identical argmin and rankings to the training-time metric. This is the default choice
+    for region models: it is literally what they are selected on.
+    """
+    return _region_energy(ensemble, groups, bins, fixed_offtarget_reduction="mean", **kwargs)
+
+
+def worst_offtarget_energy(
+    ensemble, groups: TrackGroups, bins: slice, **kwargs
+) -> SpecificityEnergy:
+    """Soft-max over off-target groups: punishes the single worst off-target cell type.
+
+    ``offtarget_reduction="logsumexp"``: a smooth (temperature-controlled via
+    ``offtarget_temperature``) approximation to the hard worst-case in
+    :func:`max_offtarget_energy`, differentiable everywhere and dominated by whichever
+    off-target group currently scores highest. Use this over :func:`contrast_energy` when a
+    single leaky off-target cell type is unacceptable even if the *average* off-target signal
+    is low.
+    """
+    return _region_energy(ensemble, groups, bins, fixed_offtarget_reduction="logsumexp", **kwargs)
+
+
+def max_offtarget_energy(ensemble, groups: TrackGroups, bins: slice, **kwargs) -> SpecificityEnergy:
+    """Hard worst-case off-target: ``offtarget_reduction="max"``.
+
+    Like :func:`worst_offtarget_energy` but with a true (non-differentiable-at-the-max) maximum
+    instead of its smooth approximation -- use when the search method doesn't need gradients
+    through the energy (e.g. greedy ISM-based search) and an exact worst-case is preferred to
+    an approximation.
+    """
+    return _region_energy(ensemble, groups, bins, fixed_offtarget_reduction="max", **kwargs)

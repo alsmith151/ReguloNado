@@ -662,6 +662,40 @@ class DesignConfig(BaseModel):
     wandb_project: str = "regulonado-design"
     wandb_group: str | None = None
 
+    # Model-kind dispatch: "auto" sniffs every checkpoint (see
+    # design.predictor.checkpoint_model_kind/load_fold_ensemble); an explicit value asserts
+    # what the checkpoints must sniff as and raises if they don't.
+    model_kind: Literal["auto", "profile", "region_counts"] = "auto"
+
+    # Which named energy a region-model design run optimises (design.objective's
+    # contrast_energy/worst_offtarget_energy/max_offtarget_energy factories); ignored for a
+    # profile model, which always uses plain SpecificityEnergy(offtarget_reduction=...) above.
+    # "contrast" sets offtarget_reduction="mean" underneath and is provably the selection
+    # metric contrast_pearson_<group> up to a positive constant
+    # (specificity == -G/(G-1) * contrast, see contrast_energy's docstring and
+    # tests/test_region_design.py's algebraic pin test) -- it is the default because it is
+    # literally what region models are selected on. "worst_offtarget"
+    # (offtarget_reduction="logsumexp") and "max_offtarget" (offtarget_reduction="max") are
+    # different objectives -- punishing the single worst off-target group rather than the
+    # average -- whose calibration evidence (what a given energy value or search budget
+    # achieves in practice) does not transfer from "contrast" experience.
+    energy: Literal["contrast", "worst_offtarget", "max_offtarget"] = "contrast"
+
+    # Neutral-flank simulation: replace the candidate's genomic flank with synthetic
+    # background before scoring, e.g. to approximate an MPRA reporter construct where the
+    # designed element is not at its native locus. "genomic" (the default) is a no-op --
+    # profile behaviour with this field at its default is provably unchanged. See
+    # design.sequence.apply_neutral_flanks for the mode semantics and their out-of-distribution
+    # caveats.
+    flank_mode: Literal["genomic", "shuffle", "dinuc-shuffle", "uniform"] = "genomic"
+    # Which span survives flanking untouched: "candidate" is the editable span the search may
+    # mutate; "scored_span" is the predicted-crop span the energy actually reads out (may be
+    # wider or narrower than "candidate" once score_pad_bp/crop geometry are accounted for).
+    flank_keep: Literal["candidate", "scored_span"] = "scored_span"
+    # Widens the kept span by this many bp on each side (then clamps to the context) before
+    # flanking -- e.g. to keep a little genomic context around a narrow candidate's own edges.
+    flank_keep_bp: int = Field(default=0, ge=0)
+
     @model_validator(mode="after")
     def _target_names_are_unique(self) -> "DesignConfig":
         names = [target.name for target in self.targets]
@@ -723,6 +757,40 @@ class DesignConfig(BaseModel):
                     f"({population_size}) — the first population_size queries just score the "
                     "initial population, leaving none for AdaLead to actually search with"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _region_settings_are_compatible(self) -> "DesignConfig":
+        """A convenience, config-time check -- only enforceable when ``model_kind`` is given
+        explicitly, since under ``"auto"`` the checkpoint isn't read until ``run_design`` loads
+        it. The authoritative version of this check re-runs at runtime, in
+        ``design.run.run_design``, once ``isinstance(ensemble, RegionFoldEnsemble)`` is known.
+
+        A region-count model has one degenerate bin per group (see
+        ``design.region_predictor.RegionSequencePredictor``), so ``bin_reduction="topk"``/
+        ``topk_bins`` (which select among several *bins*) are meaningless, and
+        ``gain_transform="log2-fold-change"`` would double-transform a score that is already
+        ``log1p(rate)``-shaped (``softplus(eta)``) -- taking a further log/ratio of an already
+        logarithmic quantity, not the fold-change over raw counts the transform is meant for.
+        """
+        if self.model_kind != "region_counts":
+            return self
+        if self.bin_reduction != "mean":
+            raise ValueError(
+                f"design.model_kind='region_counts' requires bin_reduction='mean' (a region "
+                f"model has one degenerate bin per group); got {self.bin_reduction!r}"
+            )
+        if "topk_bins" in self.model_fields_set:
+            raise ValueError(
+                "design.model_kind='region_counts' has no bin window for topk_bins to select "
+                "within; leave it unset"
+            )
+        if self.gain_transform != "raw":
+            raise ValueError(
+                "design.model_kind='region_counts' requires gain_transform='raw'; region scores "
+                f"are already log1p(rate)-shaped, so {self.gain_transform!r} would take a log "
+                "of a log"
+            )
         return self
 
 
@@ -826,6 +894,16 @@ class AttributionConfig(BaseModel):
     batch_size: int = Field(default=8, ge=1)
     device: str | None = None
 
+    # Model-kind dispatch: see DesignConfig.model_kind's docstring comment -- identical
+    # semantics, applied to attribution.checkpoint_dirs instead of design's.
+    model_kind: Literal["auto", "profile", "region_counts"] = "auto"
+
+    # Neutral-flank simulation: see DesignConfig.flank_mode/flank_keep/flank_keep_bp's docstring
+    # comments -- identical semantics, applied where attribution builds its scoring context.
+    flank_mode: Literal["genomic", "shuffle", "dinuc-shuffle", "uniform"] = "genomic"
+    flank_keep: Literal["candidate", "scored_span"] = "scored_span"
+    flank_keep_bp: int = Field(default=0, ge=0)
+
     @model_validator(mode="after")
     def _target_names_are_unique(self) -> "AttributionConfig":
         names = [target.name for target in self.targets]
@@ -848,6 +926,30 @@ class AttributionConfig(BaseModel):
             raise ValueError(
                 "attribution.stride is ignored once positions restricts the sweep to explicit "
                 "coordinates; set only one of them"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _region_settings_are_compatible(self) -> "AttributionConfig":
+        """A convenience, config-time check -- only enforceable when ``model_kind`` is given
+        explicitly, since under ``"auto"`` the checkpoint isn't read until ``run_attribution``
+        loads it. The authoritative version re-runs at runtime, in
+        ``design.attribute_run.run_attribution``, once ``isinstance(ensemble,
+        RegionFoldEnsemble)`` is known. See ``DesignConfig._region_settings_are_compatible``'s
+        docstring for why ``bin_reduction='topk'``/``topk_bins`` are meaningless for a region
+        model (no ``gain_transform`` field exists on this config to check).
+        """
+        if self.model_kind != "region_counts":
+            return self
+        if self.bin_reduction != "mean":
+            raise ValueError(
+                f"attribution.model_kind='region_counts' requires bin_reduction='mean' (a "
+                f"region model has one degenerate bin per group); got {self.bin_reduction!r}"
+            )
+        if "topk_bins" in self.model_fields_set:
+            raise ValueError(
+                "attribution.model_kind='region_counts' has no bin window for topk_bins to "
+                "select within; leave it unset"
             )
         return self
 
@@ -956,39 +1058,65 @@ class RegulonadoConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _downstream_runs_predict_profiles(self) -> "RegulonadoConfig":
-        """Prediction, attribution and design read bigWig-shaped profile models."""
-        referenced: list[tuple[str, list[str]]] = []
+    def _downstream_runs_are_supported(self) -> "RegulonadoConfig":
+        """``prediction.run`` stays profile-only: nothing in ``predict.py`` handles a scalar
+        region-count head. ``attribution.runs``/``design.design_runs``/``design.holdout_run``
+        may each name a profile or a region_counts run (``design.predictor.load_fold_ensemble``
+        dispatches on the checkpoint), but every run named *within one stage* must share a
+        target -- a mixed-target ensemble is meaningless (what would it mean to ensemble a
+        per-bin-track model with a per-group-scalar model?) and would otherwise fail obscurely
+        inside ``FoldEnsemble``/``RegionFoldEnsemble``'s ``_assert_consistent``.
+        ``design.holdout_run`` is checked alongside ``design.design_runs`` for the same reason:
+        it re-scores the same candidates against the same target.
+        """
         if self.prediction is not None:
-            referenced.append(("prediction.run", [self.prediction.run]))
-        if self.design is not None:
-            referenced.append(
-                ("design.holdout_run", [self.design.holdout_run] if self.design.holdout_run else [])
-            )
-            referenced.append(("design.design_runs", self.design.design_runs or []))
-        if self.attribution is not None:
-            referenced.append(("attribution.runs", self.attribution.runs or []))
-        if not any(names for _, names in referenced):
-            if self.prediction is not None and self.train is None:
+            if self.train is None:
                 raise ValueError(
                     "prediction requires train so prediction.run can resolve a checkpoint"
                 )
+            all_runs = {run.name for run in self.train.runs}
+            if self.prediction.run not in all_runs:
+                raise ValueError(
+                    "prediction.run names a train.runs entry that doesn't exist: "
+                    f"{self.prediction.run!r}"
+                )
+            if self.prediction.run not in self._profile_run_names():
+                raise ValueError(
+                    f"prediction.run names run(s) {self.prediction.run!r} that don't predict "
+                    "profiles; prediction needs target: profile runs"
+                )
+
+        stage_run_lists: list[tuple[str, list[str]]] = []
+        if self.attribution is not None:
+            stage_run_lists.append(("attribution.runs", self.attribution.runs or []))
+        if self.design is not None:
+            design_names = list(self.design.design_runs or [])
+            if self.design.holdout_run:
+                design_names = [*design_names, self.design.holdout_run]
+            stage_run_lists.append(("design.design_runs/holdout_run", design_names))
+
+        if not any(names for _, names in stage_run_lists):
             return self
         if self.train is None:
-            raise ValueError(f"{referenced[0][0]} names a run, but train is not configured")
-        all_runs = {run.name for run in self.train.runs}
-        profile_runs = self._profile_run_names()
-        for label, names in referenced:
+            first_label = next(label for label, names in stage_run_lists if names)
+            raise ValueError(f"{first_label} names a run, but train is not configured")
+
+        all_runs = {run.name: run for run in self.train.runs}
+        for label, names in stage_run_lists:
+            if not names:
+                continue
             unknown = sorted(name for name in names if name not in all_runs)
             if unknown:
                 raise ValueError(
                     f"{label} names train.runs entries that don't exist: {', '.join(unknown)}"
                 )
-            wrong = sorted(name for name in names if name not in profile_runs)
-            if wrong:
+            by_target = sorted({(name, all_runs[name].target) for name in names})
+            distinct_targets = {target for _, target in by_target}
+            if len(distinct_targets) > 1:
+                listing = ", ".join(f"{name} ({target})" for name, target in by_target)
                 raise ValueError(
-                    f"{label} names run(s) {', '.join(wrong)} that don't predict profiles; "
-                    "prediction, attribution and design need target: profile runs"
+                    f"{label} must all predict the same target (a mixed-target ensemble is "
+                    f"meaningless); got mixed targets: {listing}"
                 )
         return self
 

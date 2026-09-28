@@ -30,6 +30,8 @@ class DesignRecord:
     state: DesignState  # final design state (context/editable/energy/history)
     result: Any  # EnergyResult on the final context, scored on the design folds
     holdout_result: Any  # EnergyResult on the final context, scored on the held-out fold
+    score_genomic: float  # final target-group score with native genomic flanks
+    score_neutral: float  # final target-group score with the selected synthetic flanks
 
 
 def write_designs(out_dir: str | Path, records: list[DesignRecord], *, run_info: dict) -> None:
@@ -93,6 +95,9 @@ def _write_designs_tsv(path: Path, records: list[DesignRecord]) -> None:
             "target_score": float(result.target[0]) if result is not None else "",
             "target_gain": float(result.target_gain[0]) if result is not None else "",
             "offtarget_boost": float(result.offtarget_boost[0]) if result is not None else "",
+            "score_genomic": record.score_genomic,
+            "score_neutral": record.score_neutral,
+            "flank_delta": record.score_neutral - record.score_genomic,
             "n_edits": n_edits,
             "per_fold_energy": (
                 ",".join(f"{v:.6g}" for v in result.per_fold_energy[:, 0].tolist())

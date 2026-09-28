@@ -41,7 +41,7 @@ def _attr_merge_tsvs(paths, out_path):
 
 if ATTRIBUTION:
 
-    ATTRIBUTION_RUN_NAMES = ATTRIBUTION.get("runs") or list(PROFILE_RUN_NAMES)
+    ATTRIBUTION_RUN_NAMES = ATTRIBUTION.get("runs") or downstream_default_runs()
     ATTRIBUTION_TARGETS = ATTRIBUTION["targets"]
     ATTRIBUTION_TARGET_NAMES = [target["name"] for target in ATTRIBUTION_TARGETS]
     ATTRIBUTION_TARGET_BY_NAME = {target["name"]: target for target in ATTRIBUTION_TARGETS}
@@ -88,7 +88,8 @@ if ATTRIBUTION:
         "method", "bin_reduction", "topk_bins", "fold_reduction", "pad", "stride", "positions",
         "on_missing", "smooth_bp", "quantile", "min_width_bp", "merge_gap_bp", "min_zscore",
         "max_cores_per_candidate", "anchor", "fix_width", "bigwig", "rtol", "fold_mode",
-        "batch_size", "device", "exclude_tracks",
+        "batch_size", "device", "exclude_tracks", "model_kind", "flank_mode", "flank_keep",
+        "flank_keep_bp",
     }
 
     def _attr_settings_json(wildcards):
@@ -141,7 +142,7 @@ if ATTRIBUTION:
     rule attribute_shard:
         input:
             shard=str(ATTRIBUTION_DIR / "shards" / "{shard}.bed"),
-            intervals=PROFILE["intervals"],
+            intervals=downstream_intervals(ATTRIBUTION_RUN_NAMES),
             checkpoints=_attr_checkpoint_state_inputs,
         params:
             track_selector_args=lambda w: _attr_track_selector_args(

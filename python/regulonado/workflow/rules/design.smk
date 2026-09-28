@@ -45,7 +45,7 @@ if DESIGN:
         if explicit:
             return explicit
         holdout = DESIGN.get("holdout_run")
-        return [name for name in PROFILE_RUN_NAMES if name != holdout]
+        return [name for name in downstream_default_runs() if name != holdout]
 
     def _design_candidates_path():
         """The candidate BED: 'candidates' verbatim, or chained from an attribution target's
@@ -122,7 +122,8 @@ if DESIGN:
         "on_missing", "offtarget_reduction", "objective", "offtarget_boost_weight",
         "offtarget_boost_tolerance", "offtarget_temperature", "gain_transform", "gain_pseudocount",
         "target_alpha", "bending_factor", "bin_reduction", "topk_bins", "fold_mode", "batch_size",
-        "device", "exclude_tracks", "wandb", "wandb_project", "wandb_group",
+        "device", "exclude_tracks", "wandb", "wandb_project", "wandb_group", "model_kind",
+        "energy", "flank_mode", "flank_keep", "flank_keep_bp",
     }
     # DesignConfig rejects an ISM-only/AdaLead-only key that doesn't match a target's own
     # method (regulonado/config/models.py:_method_specific_settings_are_consistent). The
@@ -206,7 +207,7 @@ if DESIGN:
         input:
             shard=lambda w: str(Path(checkpoints.shard_candidates.get().output[0])
                                  / f"{w.shard}.bed"),
-            intervals=PROFILE["intervals"],
+            intervals=downstream_intervals(DESIGN_RUN_NAMES),
             checkpoints=_design_checkpoint_state_inputs,
             holdout=_design_holdout_state_input,
         params:

@@ -73,8 +73,34 @@ RUN_BY_NAME = {run["name"]: run for run in RUNS}
 # Every phase name any recipe uses: the train rules' {phase} wildcard.
 PHASE_NAMES = sorted({phase["name"] for phases in RECIPES.values() for phase in phases})
 CACHED_RUNS = [run for run in RUNS if run.get("trunk", "live") == "cached"]
-# Prediction, attribution and design read profile models; they default to all of them.
+# Prediction remains profile-only. Attribution and design may also use a live-trunk
+# region-count model.
 PROFILE_RUN_NAMES = [run["name"] for run in RUNS if run.get("target", "profile") == "profile"]
+REGION_RUN_NAMES = [run["name"] for run in RUNS if run.get("target") == "region_counts"]
+
+
+def downstream_default_runs():
+    """Implicit folds for attribution/design, never mixing output targets.
+
+    Prefer profile folds when both kinds exist to preserve existing configurations.
+    """
+    return list(PROFILE_RUN_NAMES or REGION_RUN_NAMES)
+
+
+def downstream_intervals(runs):
+    """Return the interval table belonging to one homogeneous downstream fold set."""
+    targets = {RUN_BY_NAME[run].get("target", "profile") for run in runs}
+    if len(targets) != 1:
+        raise ValueError(
+            "attribution/design runs must share one target to choose their interval table; "
+            f"got {sorted(targets)}"
+        )
+    target = next(iter(targets))
+    if target == "profile":
+        return PROFILE["intervals"]
+    if target == "region_counts":
+        return REGION_COUNTS["regions"]
+    raise ValueError(f"Unsupported downstream target {target!r}")
 
 
 def run_phases(run):

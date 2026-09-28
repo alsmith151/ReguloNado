@@ -9,11 +9,18 @@ folds.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Sequence
 
-__all__ = ["FoldEnsemble", "FoldSpec", "SequencePredictor"]
+__all__ = [
+    "FoldEnsemble",
+    "FoldSpec",
+    "SequencePredictor",
+    "checkpoint_model_kind",
+    "load_fold_ensemble",
+]
 
 
 @dataclass(slots=True)
@@ -213,6 +220,11 @@ class FoldEnsemble:
     def track_names(self) -> list[str]:
         return self._track_names
 
+    @property
+    def crop_bp(self) -> int:
+        """Base pairs trimmed from each side of the context before the predicted crop."""
+        return (self.context_length - self.n_pred_bins * self.bin_size) // 2
+
     def gradient(
         self,
         one_hot_context,
@@ -263,3 +275,77 @@ class FoldEnsemble:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
         return torch.stack(outputs, dim=0)
+
+
+# --------------------------------------------------------------------------- #
+# Model-kind dispatch                                                        #
+# --------------------------------------------------------------------------- #
+def checkpoint_model_kind(checkpoint_dir: str | Path) -> Literal["profile", "region_counts"]:
+    """Sniff a checkpoint's model kind from its HF ``config.json``'s ``model_type``.
+
+    ``"regulonado_region_count"`` (``training.regions.model.RegionCountConfig.model_type``)
+    means ``region_counts``; anything else -- including the ordinary ``"regulonado"`` model
+    type, and a legacy run root with no ``config.json`` at all -- means ``profile``. That
+    "no config.json" case matches the legacy fallback ``load_model_for_inference`` already
+    uses for the same layout (see its ``resolved_config.json`` branch): a region-count
+    checkpoint always has a ``config.json`` (``RegionCountModel``/``RegionCountConfig`` are
+    plain HF-style ``PreTrainedModel``/``PretrainedConfig`` subclasses that always save one),
+    so there is no legacy region-count layout to fall back for.
+    """
+    config_path = Path(checkpoint_dir) / "config.json"
+    if not config_path.exists():
+        return "profile"
+    model_type = json.loads(config_path.read_text()).get("model_type")
+    if model_type == "regulonado_region_count":
+        return "region_counts"
+    return "profile"
+
+
+def load_fold_ensemble(
+    folds: Sequence[FoldSpec],
+    *,
+    device: str | None = None,
+    batch_size: int = 1,
+    mode: Literal["resident", "sequential"] = "resident",
+    model_kind: Literal["auto", "profile", "region_counts"] = "auto",
+) -> "FoldEnsemble":
+    """Build a :class:`FoldEnsemble` or a region-model :class:`RegionFoldEnsemble`, chosen by
+    sniffing every fold's checkpoint (see :func:`checkpoint_model_kind`).
+
+    Every fold must sniff to the same kind -- a mix would silently build a profile ensemble
+    that ignores the region fold(s) or vice versa, with no shape error to catch it, so this
+    raises instead, naming which checkpoint(s) disagree. If ``model_kind`` is given explicitly
+    (rather than ``"auto"``) and contradicts what the checkpoints actually sniff as, this also
+    raises, naming both the requested and the sniffed kind -- an explicit ``model_kind`` is a
+    caller assertion, not a hint to coerce loading toward.
+
+    ``region_predictor`` (which imports AlphaGenome-adjacent machinery) is imported lazily,
+    and only on the region branch, so a profile-only caller never pays for that import.
+    """
+    if not folds:
+        raise ValueError("load_fold_ensemble needs at least one fold")
+
+    sniffed = [(spec, checkpoint_model_kind(spec.checkpoint_dir)) for spec in folds]
+    distinct_kinds = {kind for _, kind in sniffed}
+    if len(distinct_kinds) > 1:
+        by_kind: dict[str, list[str]] = {}
+        for spec, kind in sniffed:
+            by_kind.setdefault(kind, []).append(str(spec.checkpoint_dir))
+        detail = "; ".join(f"{kind}: {', '.join(dirs)}" for kind, dirs in sorted(by_kind.items()))
+        raise ValueError(f"Folds disagree on model kind ({detail})")
+
+    sniffed_kind = next(iter(distinct_kinds))
+    if model_kind != "auto" and model_kind != sniffed_kind:
+        dirs = ", ".join(str(spec.checkpoint_dir) for spec in folds)
+        raise ValueError(
+            f"model_kind={model_kind!r} was requested but checkpoint(s) sniff as "
+            f"{sniffed_kind!r}: {dirs}"
+        )
+
+    if sniffed_kind == "region_counts":
+        from regulonado.design import region_predictor
+
+        return region_predictor.RegionFoldEnsemble(
+            folds, device=device, batch_size=batch_size, mode=mode
+        )
+    return FoldEnsemble(folds, device=device, batch_size=batch_size, mode=mode)

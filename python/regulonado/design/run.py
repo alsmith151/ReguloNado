@@ -81,7 +81,7 @@ def _seed_everything(seed: int | None) -> int:
 
 def _load_folds(config: "DesignConfig") -> tuple["FoldEnsemble", "FoldEnsemble | None"]:
     """Load the design fold ensemble and, if configured, the held-out ensemble."""
-    from regulonado.design.predictor import FoldEnsemble, FoldSpec
+    from regulonado.design.predictor import FoldSpec, load_fold_ensemble
 
     if not config.checkpoint_dirs:
         raise ValueError(
@@ -93,18 +93,23 @@ def _load_folds(config: "DesignConfig") -> tuple["FoldEnsemble", "FoldEnsemble |
     design_folds = [
         FoldSpec(checkpoint_dir=Path(c), dataset_dir=dataset_dir) for c in config.checkpoint_dirs
     ]
-    ensemble = FoldEnsemble(
-        design_folds, device=config.device, batch_size=config.batch_size, mode=config.fold_mode
+    ensemble = load_fold_ensemble(
+        design_folds,
+        device=config.device,
+        batch_size=config.batch_size,
+        mode=config.fold_mode,
+        model_kind=config.model_kind,
     )
 
     if config.holdout_checkpoint is None:
         return ensemble, None
 
-    holdout_ensemble = FoldEnsemble(
+    holdout_ensemble = load_fold_ensemble(
         [FoldSpec(checkpoint_dir=Path(config.holdout_checkpoint), dataset_dir=dataset_dir)],
         device=config.device,
         batch_size=config.batch_size,
         mode=config.fold_mode,
+        model_kind=config.model_kind,
     )
     holdout_geometry = (
         holdout_ensemble.context_length,
@@ -118,6 +123,35 @@ def _load_folds(config: "DesignConfig") -> tuple["FoldEnsemble", "FoldEnsemble |
             f"geometry {design_geometry}"
         )
     return ensemble, holdout_ensemble
+
+
+def _check_region_settings(config: "DesignConfig", ensemble) -> None:
+    """Authoritative re-check of ``DesignConfig._region_settings_are_compatible``.
+
+    The config-time validator can only fire when ``model_kind`` was given explicitly (under
+    ``"auto"`` the checkpoint isn't readable at config-validation time); this runs unconditionally
+    once the ensemble is loaded and its real kind is known.
+    """
+    from regulonado.design.region_predictor import RegionFoldEnsemble
+
+    if not isinstance(ensemble, RegionFoldEnsemble):
+        return
+    if config.bin_reduction != "mean":
+        raise ValueError(
+            f"{ensemble} is a region-count ensemble, which requires bin_reduction='mean'; got "
+            f"{config.bin_reduction!r}"
+        )
+    if "topk_bins" in config.model_fields_set:
+        raise ValueError(
+            "This is a region-count ensemble, which has no bin window for topk_bins to select "
+            "within; leave it unset"
+        )
+    if config.gain_transform != "raw":
+        raise ValueError(
+            "This is a region-count ensemble, which requires gain_transform='raw'; region scores "
+            f"are already log1p(rate)-shaped, so {config.gain_transform!r} would take a log of a "
+            "log"
+        )
 
 
 def _resolve_intervals(config: "DesignConfig") -> Path:
@@ -141,14 +175,20 @@ def _resolve_intervals(config: "DesignConfig") -> Path:
 def _resolve_seeds(
     config: "DesignConfig", ensemble: "FoldEnsemble", intervals: Path
 ) -> list["Seed"]:
+    from regulonado.design.region_predictor import RegionFoldEnsemble
     from regulonado.design.sequence import DatasetWindowIndex, resolve_seeds
 
-    index = DatasetWindowIndex.from_bed(
-        intervals,
+    index_kwargs = dict(
         context_length=ensemble.context_length,
         n_pred_bins=ensemble.n_pred_bins,
         bin_size=ensemble.bin_size,
+        crop_bp=ensemble.crop_bp,
+        snap_bp=getattr(ensemble, "snap_bp", None),
     )
+    if isinstance(ensemble, RegionFoldEnsemble) and intervals.suffix.lower() == ".parquet":
+        index = DatasetWindowIndex.from_region_table(intervals, **index_kwargs)
+    else:
+        index = DatasetWindowIndex.from_bed(intervals, **index_kwargs)
     seeds = resolve_seeds(
         config.candidates,
         index,
@@ -161,6 +201,25 @@ def _resolve_seeds(
 
 
 def _resolve_groups(config: "DesignConfig", target: "DesignTarget", ensemble: "FoldEnsemble"):
+    from regulonado.design.region_predictor import RegionFoldEnsemble
+
+    if isinstance(ensemble, RegionFoldEnsemble):
+        from regulonado.design.objective import group_track_groups
+
+        if target.group_by != "source":
+            logger.info(
+                f"group_by={target.group_by!r} is ignored for region models: 'target' resolves "
+                "directly against the ensemble's group_names"
+            )
+        groups = group_track_groups(
+            ensemble.group_names, target=target.target, exclude_groups=tuple(config.exclude_tracks)
+        )
+        logger.info(
+            f"Target group {target.target!r} (region ensemble); "
+            f"{len(groups.other_group_masks)} off-target group(s)"
+        )
+        return groups
+
     from regulonado.design.objective import resolve_track_groups
 
     track_sheet = Path(config.track_sheet) if config.track_sheet else None
@@ -344,6 +403,53 @@ def _finish_wandb_run(
     wandb_run.finish()
 
 
+def _flank_keep_span(config: "DesignConfig", seed: "Seed", ensemble) -> slice:
+    """The context-coordinate span :func:`apply_neutral_flanks` leaves untouched.
+
+    Mirrors ``attribute_run._flank_keep_span``: ``"candidate"`` is the candidate's own editable
+    span; ``"scored_span"`` is the predicted-crop span the energy actually reads (``seed.bins``
+    mapped back through ``ensemble.crop_bp``/``bin_size``). Both are widened by
+    ``config.flank_keep_bp`` on each side and clamped to the context.
+    """
+    if config.flank_keep == "candidate":
+        base_start, base_stop = seed.editable.start, seed.editable.stop
+    else:
+        base_start = ensemble.crop_bp + seed.bins.start * ensemble.bin_size
+        base_stop = ensemble.crop_bp + seed.bins.stop * ensemble.bin_size
+    pad = config.flank_keep_bp
+    return slice(max(0, base_start - pad), min(ensemble.context_length, base_stop + pad))
+
+
+def _build_energy_fn(config: "DesignConfig", ensemble, groups, bins):
+    """``SpecificityEnergy`` for a profile ensemble; a named region-model energy factory
+    (``config.energy``) for a region ensemble -- see ``DesignConfig.energy``'s docstring comment
+    for why the two families of objectives aren't interchangeable.
+    """
+    from regulonado.design.region_predictor import RegionFoldEnsemble
+
+    kwargs = _energy_kwargs(config)
+    if isinstance(ensemble, RegionFoldEnsemble):
+        from regulonado.design.objective import (
+            contrast_energy,
+            max_offtarget_energy,
+            worst_offtarget_energy,
+        )
+
+        # Fixed by the chosen factory instead -- offtarget_reduction is exactly what
+        # distinguishes contrast_energy/worst_offtarget_energy/max_offtarget_energy.
+        kwargs.pop("offtarget_reduction", None)
+        factory = {
+            "contrast": contrast_energy,
+            "worst_offtarget": worst_offtarget_energy,
+            "max_offtarget": max_offtarget_energy,
+        }[config.energy]
+        return factory(ensemble, groups, bins, **kwargs)
+
+    from regulonado.design.objective import SpecificityEnergy
+
+    return SpecificityEnergy(ensemble, groups, bins, **kwargs)
+
+
 def _score_one_candidate(
     config: "DesignConfig",
     candidate_index: int,
@@ -360,8 +466,8 @@ def _score_one_candidate(
     wandb_module,
     target: "DesignTarget",
 ):
-    from regulonado.design.objective import SpecificityEnergy
     from regulonado.design.report import DesignRecord
+    from regulonado.design.sequence import apply_neutral_flanks
     from regulonado.genomics import one_hot_context
 
     logger.info(
@@ -371,9 +477,17 @@ def _score_one_candidate(
     chrom_length = chrom_sizes.get(seed.chrom)
     if chrom_length is None:
         raise ValueError(f"Chromosome {seed.chrom!r} not present in {config.fasta}")
-    context = one_hot_context(fasta, seed.window, ensemble.context_length, chrom_length)
+    genomic_context = one_hot_context(fasta, seed.window, ensemble.context_length, chrom_length)
+    context = genomic_context
 
-    energy_fn = SpecificityEnergy(ensemble, groups, seed.bins, **_energy_kwargs(config))
+    # A no-op path at the default mode="genomic" -- skipped entirely so profile behaviour stays
+    # provably untouched, rather than routed through an identity call to apply_neutral_flanks.
+    if config.flank_mode != "genomic":
+        rng = np.random.default_rng(np.random.SeedSequence([run_seed, candidate_index]))
+        keep = _flank_keep_span(config, seed, ensemble)
+        context = apply_neutral_flanks(context, keep, mode=config.flank_mode, rng=rng)
+
+    energy_fn = _build_energy_fn(config, ensemble, groups, seed.bins)
     if config.objective == "selective-activation":
         energy_fn.set_reference(context[None])
 
@@ -386,11 +500,21 @@ def _score_one_candidate(
     )
     final_result = energy_fn(state.context[None])
 
+    # Always record portability on the final edited insert.  Under genomic mode this is exactly
+    # the already-computed final score; under a synthetic mode it costs one additional forward
+    # pass and distinguishes a design whose apparent gain depends on its native flanks.
+    score_neutral = float(final_result.target[0])
+    if config.flank_mode == "genomic":
+        score_genomic = score_neutral
+    else:
+        genomic_final = genomic_context.copy()
+        genomic_final[:, seed.editable] = state.context[:, seed.editable]
+        genomic_result = energy_fn(genomic_final[None])
+        score_genomic = float(genomic_result.target[0])
+
     holdout_result = None
     if holdout_ensemble is not None:
-        holdout_energy_fn = SpecificityEnergy(
-            holdout_ensemble, groups, seed.bins, **_energy_kwargs(config)
-        )
+        holdout_energy_fn = _build_energy_fn(config, holdout_ensemble, groups, seed.bins)
         if config.objective == "selective-activation":
             holdout_energy_fn.set_reference(context[None])
         holdout_result = holdout_energy_fn(state.context[None])
@@ -415,6 +539,8 @@ def _score_one_candidate(
         state=state,
         result=final_result,
         holdout_result=holdout_result,
+        score_genomic=score_genomic,
+        score_neutral=score_neutral,
     )
     report_entry = {
         "name": seed.name,
@@ -517,6 +643,11 @@ def _build_run_info(
         "batch_size": config.batch_size,
         "device": str(config.device or ("cuda" if torch.cuda.is_available() else "cpu")),
         "track_names": ensemble.track_names,
+        "model_kind": config.model_kind,
+        "energy": config.energy,
+        "flank_mode": config.flank_mode,
+        "flank_keep": config.flank_keep,
+        "flank_keep_bp": config.flank_keep_bp,
         "reproducibility": {
             "torch_deterministic": bool(torch.are_deterministic_algorithms_enabled())
         },
@@ -557,6 +688,9 @@ def run_design(config: "DesignConfig") -> DesignResult:
     run_seed = _seed_everything(config.seed)
     intervals = _resolve_intervals(config)
     ensemble, holdout_ensemble = _load_folds(config)
+    _check_region_settings(config, ensemble)
+    if holdout_ensemble is not None:
+        _check_region_settings(config, holdout_ensemble)
     seeds = _resolve_seeds(config, ensemble, intervals)
     groups = _resolve_groups(config, target, ensemble)
 

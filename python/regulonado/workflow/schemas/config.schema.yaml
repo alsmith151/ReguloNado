@@ -219,6 +219,35 @@ $defs:
         - type: 'null'
         default: null
         title: Device
+      model_kind:
+        default: auto
+        enum:
+        - auto
+        - profile
+        - region_counts
+        title: Model Kind
+        type: string
+      flank_mode:
+        default: genomic
+        enum:
+        - genomic
+        - shuffle
+        - dinuc-shuffle
+        - uniform
+        title: Flank Mode
+        type: string
+      flank_keep:
+        default: scored_span
+        enum:
+        - candidate
+        - scored_span
+        title: Flank Keep
+        type: string
+      flank_keep_bp:
+        default: 0
+        minimum: 0
+        title: Flank Keep Bp
+        type: integer
     required:
     - candidates
     - targets
@@ -582,6 +611,43 @@ $defs:
         - type: 'null'
         default: null
         title: Wandb Group
+      model_kind:
+        default: auto
+        enum:
+        - auto
+        - profile
+        - region_counts
+        title: Model Kind
+        type: string
+      energy:
+        default: contrast
+        enum:
+        - contrast
+        - worst_offtarget
+        - max_offtarget
+        title: Energy
+        type: string
+      flank_mode:
+        default: genomic
+        enum:
+        - genomic
+        - shuffle
+        - dinuc-shuffle
+        - uniform
+        title: Flank Mode
+        type: string
+      flank_keep:
+        default: scored_span
+        enum:
+        - candidate
+        - scored_span
+        title: Flank Keep
+        type: string
+      flank_keep_bp:
+        default: 0
+        minimum: 0
+        title: Flank Keep Bp
+        type: integer
     required:
     - targets
     title: DesignConfig

@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
     from regulonado.config.models import AttributionConfig
     from regulonado.design.attribution import AttributionRecord
@@ -35,7 +37,7 @@ class AttributionResult:
 
 
 def _load_ensemble(config: "AttributionConfig") -> "FoldEnsemble":
-    from regulonado.design.predictor import FoldEnsemble, FoldSpec
+    from regulonado.design.predictor import FoldSpec, load_fold_ensemble
 
     if not config.checkpoint_dirs:
         raise ValueError(
@@ -43,12 +45,38 @@ def _load_ensemble(config: "AttributionConfig") -> "FoldEnsemble":
         )
     logger.info(f"Loading {len(config.checkpoint_dirs)} fold(s)...")
     dataset_dir = Path(config.dataset_dir) if config.dataset_dir else None
-    return FoldEnsemble(
+    return load_fold_ensemble(
         [FoldSpec(checkpoint_dir=Path(c), dataset_dir=dataset_dir) for c in config.checkpoint_dirs],
         device=config.device,
         batch_size=config.batch_size,
         mode=config.fold_mode,
+        model_kind=config.model_kind,
     )
+
+
+def _check_region_settings(config: "AttributionConfig", ensemble) -> None:
+    """Authoritative re-check of ``AttributionConfig._region_settings_are_compatible``.
+
+    The config-time validator can only fire when ``model_kind`` was given explicitly (under
+    ``"auto"`` the checkpoint isn't readable at config-validation time); this runs unconditionally
+    once the ensemble is loaded and its real kind is known, so a region-count checkpoint loaded
+    under ``model_kind="auto"`` still gets caught before wasting a scan on settings that make no
+    sense for it.
+    """
+    from regulonado.design.region_predictor import RegionFoldEnsemble
+
+    if not isinstance(ensemble, RegionFoldEnsemble):
+        return
+    if config.bin_reduction != "mean":
+        raise ValueError(
+            f"{ensemble} is a region-count ensemble, which requires bin_reduction='mean'; got "
+            f"{config.bin_reduction!r}"
+        )
+    if "topk_bins" in config.model_fields_set:
+        raise ValueError(
+            "This is a region-count ensemble, which has no bin window for topk_bins to select "
+            "within; leave it unset"
+        )
 
 
 def _resolve_track_indices(config: "AttributionConfig", ensemble: "FoldEnsemble") -> list[int]:
@@ -59,6 +87,26 @@ def _resolve_track_indices(config: "AttributionConfig", ensemble: "FoldEnsemble"
         indices = resolve_tracks([target.track], ensemble.track_names)
         logger.info(
             f"Attributing against track {ensemble.track_names[indices[0]]!r} (index {indices[0]})"
+        )
+        return indices
+
+    from regulonado.design.region_predictor import RegionFoldEnsemble
+
+    if isinstance(ensemble, RegionFoldEnsemble):
+        from regulonado.design.objective import group_track_groups
+
+        if target.group_by != "source":
+            logger.info(
+                f"group_by={target.group_by!r} is ignored for region models: 'target' resolves "
+                "directly against the ensemble's group_names"
+            )
+        groups = group_track_groups(
+            ensemble.group_names, target=target.target, exclude_groups=tuple(config.exclude_tracks)
+        )
+        indices = groups.target_idx.nonzero().flatten().tolist()
+        logger.info(
+            f"Attributing against group {target.target!r}: "
+            f"{len(indices)} region group(s): {[ensemble.group_names[i] for i in indices]}"
         )
         return indices
 
@@ -167,6 +215,13 @@ def _build_run_info(
         "anchor": config.anchor,
         "fix_width": config.fix_width,
         "n_candidates": n_candidates,
+        "model_kind": config.model_kind,
+        "flank_mode": config.flank_mode,
+        "flank_keep": config.flank_keep,
+        "flank_keep_bp": config.flank_keep_bp,
+        # The fixed constant `_score_one_candidate` seeds np.random.SeedSequence with per
+        # candidate index -- see its docstring comment for why this has no config knob.
+        "flank_seed": 0,
     }
 
 
@@ -181,6 +236,24 @@ def _seed_scan_positions(
         if chrom == seed.chrom
         for position in range(start, end)
     ]
+
+
+def _flank_keep_span(config: "AttributionConfig", seed: "Seed", ensemble) -> slice:
+    """The context-coordinate span :func:`apply_neutral_flanks` leaves untouched.
+
+    ``"candidate"`` is the candidate's own editable span; ``"scored_span"`` is the predicted-crop
+    span the readout actually reads (``seed.bins`` mapped back through ``ensemble.crop_bp``/
+    ``bin_size``) -- these differ whenever ``pad``/``score_pad_bp``-style widening put the
+    editable span and the scored bins at different widths. Both are then widened by
+    ``config.flank_keep_bp`` on each side and clamped to the context.
+    """
+    if config.flank_keep == "candidate":
+        base_start, base_stop = seed.editable.start, seed.editable.stop
+    else:
+        base_start = ensemble.crop_bp + seed.bins.start * ensemble.bin_size
+        base_stop = ensemble.crop_bp + seed.bins.stop * ensemble.bin_size
+    pad = config.flank_keep_bp
+    return slice(max(0, base_start - pad), min(ensemble.context_length, base_stop + pad))
 
 
 def _score_one_candidate(
@@ -202,6 +275,8 @@ def _score_one_candidate(
         grad_scan,
         ism_scan,
     )
+    from regulonado.design.region_predictor import RegionContrastReadout, RegionFoldEnsemble
+    from regulonado.design.sequence import apply_neutral_flanks
     from regulonado.genomics import one_hot_context
 
     logger.info(f"[{index}/{total}] {seed.name} ({seed.chrom}:{seed.cand_start}-{seed.cand_end})")
@@ -209,6 +284,16 @@ def _score_one_candidate(
     if chrom_length is None:
         raise ValueError(f"Chromosome {seed.chrom!r} not present in {config.fasta}")
     context = one_hot_context(fasta, seed.window, ensemble.context_length, chrom_length)
+
+    # A no-op path at the default mode="genomic" -- skipped entirely so profile behaviour stays
+    # provably untouched, rather than routed through an identity call to apply_neutral_flanks.
+    if config.flank_mode != "genomic":
+        # No AttributionConfig.seed knob exists (attribution's scans are otherwise
+        # deterministic), so the "run seed" component is a fixed constant here; the candidate
+        # index still makes every candidate's background independent and reruns deterministic.
+        rng = np.random.default_rng(np.random.SeedSequence([0, index]))
+        keep = _flank_keep_span(config, seed, ensemble)
+        context = apply_neutral_flanks(context, keep, mode=config.flank_mode, rng=rng)
 
     if config.method == "gradient":
         result = grad_scan(
@@ -224,15 +309,21 @@ def _score_one_candidate(
             stride=config.stride,
         )
     else:
-        result = ism_scan(
-            TrackReadout(
+        if isinstance(ensemble, RegionFoldEnsemble):
+            readout = RegionContrastReadout(
+                ensemble, group_index=track_indices[0], fold_reduction=config.fold_reduction
+            )
+        else:
+            readout = TrackReadout(
                 ensemble,
                 track_indices=track_indices,
                 bins=seed.bins,
                 reduction=config.bin_reduction,
                 topk_bins=config.topk_bins,
                 fold_reduction=config.fold_reduction,
-            ),
+            )
+        result = ism_scan(
+            readout,
             seed,
             context,
             positions=_seed_scan_positions(seed, scan_positions),
@@ -343,14 +434,22 @@ def run_attribution(config: "AttributionConfig", *, call_cores: bool = True) -> 
     out_dir = Path(config.out_dir)
     intervals = _resolve_intervals(config)
     ensemble = _load_ensemble(config)
+    _check_region_settings(config, ensemble)
     track_indices = _resolve_track_indices(config, ensemble)
 
-    index = DatasetWindowIndex.from_bed(
-        intervals,
+    from regulonado.design.region_predictor import RegionFoldEnsemble
+
+    index_kwargs = dict(
         context_length=ensemble.context_length,
         n_pred_bins=ensemble.n_pred_bins,
         bin_size=ensemble.bin_size,
+        crop_bp=ensemble.crop_bp,
+        snap_bp=getattr(ensemble, "snap_bp", None),
     )
+    if isinstance(ensemble, RegionFoldEnsemble) and intervals.suffix.lower() == ".parquet":
+        index = DatasetWindowIndex.from_region_table(intervals, **index_kwargs)
+    else:
+        index = DatasetWindowIndex.from_bed(intervals, **index_kwargs)
     seeds = resolve_seeds(config.candidates, index, on_missing=config.on_missing, pad=config.pad)
     logger.info(f"Resolved {len(seeds)} candidate(s) against dataset windows")
     _log_projected_passes(seeds, config)
