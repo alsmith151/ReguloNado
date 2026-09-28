@@ -55,7 +55,7 @@ if ATTRIBUTION:
     # at DAG-construction time; fall back to the requested shard count rather than collapsing
     # to a single shard. Empty shards degrade gracefully (resolve_seeds returns []).
     _attr_n_candidates = (
-        sum(1 for line in _attr_candidates_path.read_text().splitlines() if line.strip())
+        len(candidate_bed_lines(_attr_candidates_path))
         if _attr_candidates_path.exists()
         else 0
     )
@@ -134,7 +134,7 @@ if ATTRIBUTION:
         run:
             # Round-robin, not contiguous blocks, so chromosome clustering in the BED
             # doesn't make one shard dominate the runtime.
-            lines = [line for line in Path(input[0]).read_text().splitlines() if line.strip()]
+            lines = candidate_bed_lines(input[0])
             buckets = [[] for _ in output]
             for index, line in enumerate(lines):
                 buckets[index % len(buckets)].append(line)

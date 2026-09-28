@@ -197,7 +197,7 @@ if DESIGN:
         run:
             # Round-robin, not contiguous blocks, so chromosome clustering in the BED
             # doesn't make one shard dominate the runtime.
-            lines = [line for line in Path(input[0]).read_text().splitlines() if line.strip()]
+            lines = candidate_bed_lines(input[0])
             n_shards = max(1, min(_design_requested_shards, len(lines))) if lines else (
                 _design_requested_shards
             )

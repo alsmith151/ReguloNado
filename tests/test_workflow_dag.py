@@ -12,6 +12,74 @@ import pytest
 WORKFLOW = Path(__file__).parents[1] / "python" / "regulonado" / "workflow" / "Snakefile"
 
 
+def test_attribution_shards_parquet_candidates_with_explicit_region_checkpoint(tmp_path):
+    """A downstream-only region workflow must not decode a parquet candidate table as text."""
+    snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
+    if snakemake is None:
+        pytest.skip("Snakemake is an optional workflow dependency")
+
+    import pandas as pd
+
+    fasta = tmp_path / "genome.fa"
+    candidates = tmp_path / "candidates.parquet"
+    checkpoint = tmp_path / "locon-target"
+    fasta.touch()
+    checkpoint.mkdir()
+    pd.DataFrame(
+        {
+            "chrom": ["chr1", "chr2"],
+            "start": [10, 20],
+            "end": [30, 50],
+            "region_id": ["first", "second"],
+        }
+    ).to_parquet(candidates)
+
+    results = tmp_path / "results"
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"""
+results_dir: {results}
+inputs:
+  fasta: {fasta}
+  bam_dir: {tmp_path / 'bams'}
+targets:
+  region_counts:
+    regions: {candidates}
+    anchor_regions: {tmp_path / 'anchors.bed'}
+    background_regions: {tmp_path / 'background.parquet'}
+scaling:
+  method: tmm
+attribution:
+  candidates: {candidates}
+  shards: 2
+  checkpoint_dirs: [{checkpoint}]
+  model_kind: region_counts
+  targets: [{{name: hl60, target: HL-60}}]
+"""
+    )
+    target = results / "attribution" / "shards" / "0.bed"
+    result = subprocess.run(
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            str(target),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "XDG_CACHE_HOME": str(tmp_path / "cache")},
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert (results / "attribution" / "shards" / "0.bed").read_text() == "chr1\t10\t30\tfirst\n"
+    assert (results / "attribution" / "shards" / "1.bed").read_text() == "chr2\t20\t50\tsecond\n"
+
+
 def test_dataset_sentinel_is_readme_md(tmp_path):
     """The build_dataset rule outputs README.md as the completion sentinel."""
     snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))

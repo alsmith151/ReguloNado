@@ -117,6 +117,36 @@ def downstream_intervals(runs, *, model_kind="auto"):
     raise ValueError(f"Unsupported downstream target {target!r}")
 
 
+def candidate_bed_lines(path):
+    """Return candidate intervals as BED lines, including parquet candidate tables.
+
+    Workflow sharding writes BED shards because the downstream CLI accepts BED uniformly.
+    Candidate tables, however, are often the same parquet tables used to withhold regions from
+    training. Reading those as text both fails with an opaque UTF-8 decoding error and prevents
+    attribution from starting. Preserve an existing BED verbatim; for parquet, serialise its
+    genomic span and a stable name (``name``, then ``region_id``, then row order).
+    """
+    path = Path(path)
+    if path.suffix.lower() != ".parquet":
+        return [line for line in path.read_text().splitlines() if line.strip()]
+
+    import pandas as pd
+
+    frame = pd.read_parquet(path)
+    required = {"chrom", "start", "end"}
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError(
+            f"Candidate parquet {path} needs columns chrom, start and end; missing {missing}"
+        )
+    name_column = next((name for name in ("name", "region_id") if name in frame.columns), None)
+    lines = []
+    for index, row in frame.iterrows():
+        name = row[name_column] if name_column is not None else f"candidate_{index}"
+        lines.append(f"{row['chrom']}\t{int(row['start'])}\t{int(row['end'])}\t{name}")
+    return lines
+
+
 def run_phases(run):
     """*run*'s phases, in recipe order."""
     return RECIPES[RUN_BY_NAME[run]["recipe"]]
