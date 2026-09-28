@@ -152,6 +152,11 @@ if DESIGN:
         shared_keys = _DESIGN_SETTINGS_KEYS - irrelevant
         merged = {k: v for k, v in DESIGN.items() if k in shared_keys}
         merged.update(flatten_settings(target.get("settings", {})))
+        # Schema validation fills the ordinary profile default (topk_bins=10) even when the
+        # user did not set it. Region-count models have one degenerate bin, so their config
+        # rightfully rejects that meaningless setting; only pass it for an actual top-k run.
+        if merged.get("bin_reduction") != "topk":
+            merged.pop("topk_bins", None)
         # Keep each configured design target in its own W&B project/group by default. An
         # explicit wandb_project/wandb_group above or in the target's own settings wins.
         merged.setdefault("wandb_project", "regulonado-design")
