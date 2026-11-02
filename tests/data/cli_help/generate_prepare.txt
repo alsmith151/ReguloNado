@@ -1,0 +1,13 @@
+                                                                                                    
+ Usage: root generate prepare [OPTIONS]                                                             
+                                                                                                    
+ Prepare numeric labels and chromosome-disjoint DNA from region counts.                             
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --dataset-dir        PATH  [required]                                                         │
+│ *  --fasta              PATH  [required]                                                         │
+│ *  --params             PATH  [required]                                                         │
+│ *  --out                PATH  [required]                                                         │
+│    --help                     Show this message and exit.                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

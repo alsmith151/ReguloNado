@@ -249,6 +249,10 @@ def track_records(metadata: Mapping[str, Any]) -> list[dict[str, Any]]:
     records = metadata.get("final_track_records")
     if not isinstance(records, list) or not records:
         raise ValueError("Dataset metadata does not contain any track records")
+    from regulonado.tracks_table import reject_renamed_fields
+
+    for record in records:
+        reject_renamed_fields(record, source="dataset metadata")
     return [dict(record) for record in records]
 
 
@@ -459,7 +463,7 @@ def resolve_scale_and_clip(
         for the active space.
     """
     scale_factors = _track_array(records, "scale_factor", dtype=np.float32, fill_value=1.0)
-    background = _track_array(records, "background", dtype=np.float32, fill_value=0.0)
+    background = _track_array(records, "background_median_stored", dtype=np.float32, fill_value=0.0)
 
     if label_space == "counts":
         soft_key, hard_key = "clip_soft_counts", "clip_hard_counts"
@@ -541,8 +545,8 @@ def group_contrast_unit_factors(
     ``exposure`` happens to equal the track's anchor reference with zero background — see
     the group-contrast-head plan). The exact conversion, derived from
     ``target_specificity.to_anchor_units``'s ``a = max(y - bg, 0) * sf`` (``y`` = stored
-    mean coverage, ``bg`` = ``record["background"]``, ``sf`` = ``record["scale_factor"]``,
-    verified numerically on real records to satisfy ``sf == 1 / (anchor_reference - bg)``)
+    mean coverage, ``bg`` = ``record["background_median_stored"]``, ``sf`` = ``record["scale_factor"]``,
+    verified numerically on real records to satisfy ``sf == 1 / (housekeeping_median_stored - bg)``)
     and ``counts = y * count_factors``, ``normalised = counts / exposure``:
 
         y = normalised * exposure / count_factors
@@ -576,7 +580,7 @@ def group_contrast_unit_factors(
     # the track records directly rather than going through resolve_scale_and_clip
     # (which would otherwise demand a clip-column family the caller never uses).
     scale_factors = _track_array(records, "scale_factor", dtype=np.float32, fill_value=1.0)
-    background = _track_array(records, "background", dtype=np.float32, fill_value=0.0)
+    background = _track_array(records, "background_median_stored", dtype=np.float32, fill_value=0.0)
     exposure = count_space.exposure.astype(np.float64)
     count_factors = count_space.count_factors.astype(np.float64)
     sf = scale_factors.astype(np.float64)

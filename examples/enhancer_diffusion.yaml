@@ -1,0 +1,14 @@
+# Numeric-conditioned masked diffusion training: regulonado generate train
+# --table enhancers.tsv --params examples/enhancer_diffusion.yaml --out runs/mdlm
+activity_columns: [HL60_activity, K562_activity]
+max_length: 512
+width: 128
+layers: 4
+heads: 4
+batch_size: 16
+epochs: 30
+learning_rate: 0.0003
+condition_dropout: 0.1
+validation_chromosomes: [chr8, chr9]
+device: auto
+seed: 17

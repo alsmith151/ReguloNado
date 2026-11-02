@@ -437,6 +437,42 @@ $defs:
         - type: 'null'
         default: null
         title: Seed
+      gradient_learning_rate:
+        default: 0.1
+        exclusiveMinimum: 0
+        title: Gradient Learning Rate
+        type: number
+      gradient_temperature:
+        default: 1.0
+        exclusiveMinimum: 0
+        title: Gradient Temperature
+        type: number
+      diffusion_checkpoint:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Diffusion Checkpoint
+      diffusion_activities:
+        additionalProperties:
+          type: number
+        title: Diffusion Activities
+        type: object
+      diffusion_samples:
+        default: 32
+        minimum: 1
+        title: Diffusion Samples
+        type: integer
+      diffusion_steps:
+        default: 64
+        minimum: 1
+        title: Diffusion Steps
+        type: integer
+      diffusion_guidance:
+        default: 1.0
+        minimum: 0
+        title: Diffusion Guidance
+        type: number
       rounds:
         default: 20
         minimum: 1
@@ -680,6 +716,8 @@ $defs:
         enum:
         - ism
         - adalead
+        - gradient
+        - diffusion
         title: Method
         type: string
       settings:
@@ -690,6 +728,300 @@ $defs:
     - name
     - target
     title: DesignTarget
+    type: object
+  DiffusionConfig:
+    additionalProperties: false
+    properties:
+      activity_columns:
+        items:
+          type: string
+        minItems: 1
+        title: Activity Columns
+        type: array
+      architecture:
+        default: transformer
+        enum:
+        - transformer
+        - alphagenome_encoder
+        title: Architecture
+        type: string
+      encoder_checkpoint:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Encoder Checkpoint
+      encoder_sha256:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Encoder Sha256
+      encoder_compute_dtype:
+        default: float32
+        enum:
+        - float32
+        - float16
+        - bfloat16
+        title: Encoder Compute Dtype
+        type: string
+      stratified_timesteps:
+        default: false
+        title: Stratified Timesteps
+        type: boolean
+      max_length:
+        default: 512
+        minimum: 1
+        title: Max Length
+        type: integer
+      width:
+        default: 128
+        minimum: 8
+        title: Width
+        type: integer
+      layers:
+        default: 4
+        minimum: 1
+        title: Layers
+        type: integer
+      heads:
+        default: 4
+        minimum: 1
+        title: Heads
+        type: integer
+      batch_size:
+        default: 16
+        minimum: 1
+        title: Batch Size
+        type: integer
+      epochs:
+        default: 30
+        minimum: 1
+        title: Epochs
+        type: integer
+      learning_rate:
+        default: 0.0003
+        exclusiveMinimum: 0
+        title: Learning Rate
+        type: number
+      condition_dropout:
+        default: 0.1
+        maximum: 1
+        minimum: 0
+        title: Condition Dropout
+        type: number
+      condition_sampling_weights:
+        additionalProperties:
+          type: number
+        title: Condition Sampling Weights
+        type: object
+      early_stopping_patience:
+        default: 0
+        minimum: 0
+        title: Early Stopping Patience
+        type: integer
+      early_stopping_min_delta:
+        default: 0.001
+        minimum: 0
+        title: Early Stopping Min Delta
+        type: number
+      early_stopping_min_epochs:
+        default: 0
+        minimum: 0
+        title: Early Stopping Min Epochs
+        type: integer
+      diagnostic_examples:
+        default: 0
+        minimum: 0
+        title: Diagnostic Examples
+        type: integer
+      num_workers:
+        default: 0
+        minimum: 0
+        title: Num Workers
+        type: integer
+      sampling_weight_column:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Sampling Weight Column
+      reverse_complement_probability:
+        default: 0.5
+        maximum: 1
+        minimum: 0
+        title: Reverse Complement Probability
+        type: number
+      heldout_chromosomes:
+        items:
+          type: string
+        title: Heldout Chromosomes
+        type: array
+      lr_schedule:
+        default: constant
+        enum:
+        - constant
+        - plateau
+        title: Lr Schedule
+        type: string
+      warmup_epochs:
+        default: 0
+        minimum: 0
+        title: Warmup Epochs
+        type: integer
+      scheduler_patience:
+        default: 8
+        minimum: 1
+        title: Scheduler Patience
+        type: integer
+      min_learning_rate:
+        default: 1.0e-06
+        exclusiveMinimum: 0
+        title: Min Learning Rate
+        type: number
+      validation_chromosomes:
+        items:
+          type: string
+        title: Validation Chromosomes
+        type: array
+      seed:
+        default: 0
+        minimum: 0
+        title: Seed
+        type: integer
+      device:
+        default: auto
+        title: Device
+        type: string
+    required:
+    - activity_columns
+    title: DiffusionConfig
+    type: object
+  DiffusionStageConfig:
+    additionalProperties: false
+    description: Prepare numeric DNA labels and train a masked denoiser in the existing
+      DAG.
+    properties:
+      dataset_dir:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Dataset Dir
+      encoder_run:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Encoder Run
+      specificity_regions:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Specificity Regions
+      priority_sampling_weight:
+        default: 1.0
+        minimum: 1
+        title: Priority Sampling Weight
+        type: number
+      priority_views:
+        default: 1
+        minimum: 1
+        title: Priority Views
+        type: integer
+      priority_jitter_bp:
+        default: 0
+        minimum: 0
+        title: Priority Jitter Bp
+        type: integer
+      priority_reverse_complement:
+        default: true
+        title: Priority Reverse Complement
+        type: boolean
+      target:
+        default: HL-60
+        title: Target
+        type: string
+      group_by:
+        default: group
+        title: Group By
+        type: string
+      core_length:
+        default: 200
+        minimum: 1
+        title: Core Length
+        type: integer
+      train_regions:
+        anyOf:
+        - minimum: 1
+          type: integer
+        - type: 'null'
+        default: null
+        title: Train Regions
+      validation_regions:
+        anyOf:
+        - minimum: 1
+          type: integer
+        - type: 'null'
+        default: 8192
+        title: Validation Regions
+      validation_chromosomes:
+        items:
+          type: string
+        title: Validation Chromosomes
+        type: array
+      test_chromosomes:
+        items:
+          type: string
+        title: Test Chromosomes
+        type: array
+      ccre_classes:
+        items:
+          type: string
+        title: Ccre Classes
+        type: array
+      seed:
+        default: 17
+        minimum: 0
+        title: Seed
+        type: integer
+      training:
+        $ref: '#/$defs/DiffusionConfig'
+      wandb_project:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Wandb Project
+      wandb_entity:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Wandb Entity
+      wandb_run_name:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        title: Wandb Run Name
+      cpus:
+        default: 8
+        minimum: 1
+        title: Cpus
+        type: integer
+      mem_mb:
+        default: 64000
+        minimum: 1000
+        title: Mem Mb
+        type: integer
+      runtime_minutes:
+        default: 2880
+        minimum: 1
+        title: Runtime Minutes
+        type: integer
+    title: DiffusionStageConfig
     type: object
   InputsConfig:
     additionalProperties: false
@@ -1440,6 +1772,10 @@ properties:
   attribution:
     anyOf:
     - $ref: '#/$defs/AttributionConfig'
+    - type: 'null'
+  diffusion:
+    anyOf:
+    - $ref: '#/$defs/DiffusionStageConfig'
     - type: 'null'
 required:
 - results_dir

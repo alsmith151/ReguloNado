@@ -527,7 +527,7 @@ class TestResolveScaleAndClip:
         records = [
             {
                 "scale_factor": 2.0,
-                "background": 1.0,
+                "background_median_stored": 1.0,
                 "clip_soft_counts": 3.0,
                 "clip_hard_counts": 30.0,
                 # Other families present too, must NOT be picked.

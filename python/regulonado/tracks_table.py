@@ -111,7 +111,7 @@ class TrackTableSchema(pa.DataFrameModel):
         the two is populated alongside it, depending on which scaling method ran), so
         the check cannot be symmetric the way it is for a single family: "scale_factor
         present" does not imply either family is present, only the other way round.
-        ``scale_background`` is excluded entirely: it is only ever populated by the
+        ``scale_background_median_stored`` is excluded entirely: it is only ever populated by the
         anchor method, so it is legitimately absent even when a track has a
         ``scale_factor``/anchor-clip triple.
         """
@@ -279,6 +279,26 @@ def verify_fingerprint(path: str | Path, expected: dict[str, Any]) -> list[str]:
     return problems
 
 
+#: Field names renamed when the anchor diagnostics got self-describing names. No alias is
+#: kept: a table or dataset still using them must be rebuilt, and silently reading it
+#: would drop the background subtraction (a missing background reads as 0).
+RENAMED_FIELDS: dict[str, str] = {
+    "background": "background_median_stored",
+    "anchor_reference": "housekeeping_median_stored",
+    "scale_background": "scale_background_median_stored",
+    "scale_anchor_reference": "scale_housekeeping_median_stored",
+    "scale_quality": "scale_qc_tier",
+}
+
+
+def reject_renamed_fields(names: Any, *, source: str) -> None:
+    """Raise if ``names`` (columns or record keys) still use a pre-rename field name."""
+    stale = sorted(set(names) & RENAMED_FIELDS.keys())
+    if stale:
+        renames = ", ".join(f"{old} -> {RENAMED_FIELDS[old]}" for old in stale)
+        raise ValueError(f"{source} uses renamed fields ({renames}); rebuild it")
+
+
 def to_track_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     """Included rows, ordered by ``track_index``, as the flat dicts training code reads.
 
@@ -290,11 +310,12 @@ def to_track_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     the only thing ever stored, so an id means the same thing regardless of
     which stage populated the label.
     """
+    reject_renamed_fields(df.columns, source="track table")
     included = df[df["status"] == "included"].sort_values("track_index")
 
     numeric_rename = {
         "scale_factor": "scale_factor",
-        "scale_background": "background",
+        "scale_background_median_stored": "background_median_stored",
         # Three unit-specific clip families (see the module docstring's "Clip
         # thresholds" note and TrackTableSchema.scaling_columns_present_together) —
         # training code (runner.resolve_scale_and_clip) picks the one matching the
@@ -305,7 +326,7 @@ def to_track_records(df: pd.DataFrame) -> list[dict[str, Any]]:
         "scale_clip_hard_anchor": "clip_hard_anchor",
         "scale_clip_soft_squash": "clip_soft_squash",
         "scale_clip_hard_squash": "clip_hard_squash",
-        "scale_anchor_reference": "anchor_reference",
+        "scale_housekeeping_median_stored": "housekeeping_median_stored",
         "scale_library_size": "library_size",
         "fp_genome_sum": "genome_sum",
         "fragment_length": "fragment_length",

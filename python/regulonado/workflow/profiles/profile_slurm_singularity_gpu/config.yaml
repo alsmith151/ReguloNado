@@ -77,3 +77,8 @@ set-resources:
     slurm_partition: "CHANGEME_GPU_PARTITION"
     slurm_account: "CHANGEME_GPU_ACCOUNT"
     cpus_per_task: 4
+
+  diffusion_train:
+    slurm_partition: "CHANGEME_GPU_PARTITION"
+    slurm_account: "CHANGEME_GPU_ACCOUNT"
+    cpus_per_task: 8

@@ -222,3 +222,18 @@ def test_bigwig_dir_style_track_name_falls_back_to_stem(tmp_path):
 
     df = discover_tracks([bw])
     assert df.loc[df["status"] == "included", "track_name"].tolist() == ["my_track"]
+
+
+def test_renamed_fields_are_rejected_not_silently_dropped():
+    import pandas as pd
+    import pytest
+
+    from regulonado.tracks_table import reject_renamed_fields, to_track_records
+
+    with pytest.raises(ValueError, match="background -> background_median_stored"):
+        reject_renamed_fields({"background": 1.0, "scale_factor": 2.0}, source="record")
+    old_table = pd.DataFrame(
+        {"track_name": ["a"], "status": ["included"], "track_index": [0], "scale_background": [1.0]}
+    )
+    with pytest.raises(ValueError, match="rebuild"):
+        to_track_records(old_table)

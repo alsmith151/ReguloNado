@@ -133,7 +133,7 @@ workflow, so a hand-written config cannot slip past.
 ## Assemble into tracks.parquet
 
 Every scaling command writes bare column names (`scale_factor`, `clip_soft`, `background`, ...);
-`tracks assemble` namespaces them (`scale_factor`, `scale_clip_soft`, `scale_background`, ...) and
+`tracks assemble` namespaces them (`scale_factor`, `scale_clip_soft`, `scale_background_median_stored`, ...) and
 merges them into `tracks.parquet` by `track_name`:
 
 ```bash

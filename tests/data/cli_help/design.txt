@@ -20,7 +20,7 @@
 │ --fasta                     PATH  Genome FASTA (needs a .fai index).                             │
 │ --target                    TEXT  Target group value in the --group-by column.                   │
 │ --group-by                  TEXT  Track annotation column defining cell-type groups.             │
-│ --method                    TEXT  'ism' or 'adalead'.                                            │
+│ --method                    TEXT  'ism', 'adalead', 'gradient', or 'diffusion'.                  │
 │ --out                       PATH  Directory to write design outputs.                             │
 │ --intervals                 PATH  Build-time interval BED the folds were trained on; default:    │
 │                                   the 'bed_file' recorded in --dataset-dir's tracks.parquet.     │

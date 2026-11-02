@@ -48,8 +48,8 @@ def _make_records(
             {
                 "track_name": f"track{t}",
                 "scale_factor": scale_factor,
-                "background": background,
-                "anchor_reference": anchor_reference,
+                "background_median_stored": background,
+                "housekeeping_median_stored": anchor_reference,
                 "fragment_length": 200.0,
                 "library_size": 1e7,
                 "group": groups[t] if groups is not None else f"group{t}",
@@ -94,7 +94,7 @@ class TestUnitConversion:
             a_helper = scaled_target
 
         scale_factor = np.array([r["scale_factor"] for r in records], dtype=np.float32)
-        background = np.array([r["background"] for r in records], dtype=np.float32)
+        background = np.array([r["background_median_stored"] for r in records], dtype=np.float32)
         a_expected = to_anchor_units(
             y.T,  # (R=n_bins, T=n_tracks)
             scale_factor=scale_factor,
@@ -160,7 +160,7 @@ class TestUnitConversion:
         # labels is lossy (log + gauge), so instead recompute group_linear directly via the
         # same weights applied to to_anchor_units(y) and compare in linear anchor units.
         scale_factor = np.array([r["scale_factor"] for r in records], dtype=np.float32)
-        background = np.array([r["background"] for r in records], dtype=np.float32)
+        background = np.array([r["background_median_stored"] for r in records], dtype=np.float32)
         a_expected = to_anchor_units(
             y.T, scale_factor=scale_factor, background=background, background_mode="subtract"
         ).T  # (T, L)

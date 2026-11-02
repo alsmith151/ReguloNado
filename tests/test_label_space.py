@@ -20,8 +20,8 @@ BIN_SIZE = 32
 
 def _records(**overrides) -> list[dict]:
     base = [
-        {"track_name": "a", "anchor_reference": 10.0, "background": 2.0, "fragment_length": 160.0},
-        {"track_name": "b", "anchor_reference": 20.0, "background": 4.0, "fragment_length": 80.0},
+        {"track_name": "a", "housekeeping_median_stored": 10.0, "background_median_stored": 2.0, "fragment_length": 160.0},
+        {"track_name": "b", "housekeeping_median_stored": 20.0, "background_median_stored": 4.0, "fragment_length": 80.0},
     ]
     for field, values in overrides.items():
         for record, value in zip(base, values):
@@ -100,7 +100,7 @@ def test_exposure_none_predicts_count_units():
 def test_non_positive_exposure_is_rejected():
     with pytest.raises(ValueError, match="not positive for tracks: a"):
         resolve_count_label_space(
-            _records(background=[10.0, 4.0]),
+            _records(background_median_stored=[10.0, 4.0]),
             count_unit="mean_coverage",
             exposure="anchor_minus_background",
             bin_size=BIN_SIZE,

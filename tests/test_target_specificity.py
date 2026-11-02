@@ -9,8 +9,10 @@ from regulonado.normalization import track_window_stat
 from regulonado.target_specificity import (
     group_index_from_records,
     group_mean,
+    noise_units,
     region_statistic,
     rolling_window_stat,
+    specificity_states,
     target_specificity_score,
     to_anchor_units,
 )
@@ -71,11 +73,11 @@ def test_region_statistic_rolling_max_uses_valid_bins_only():
 
 def test_group_index_from_records_basic_and_filters():
     records = [
-        {"group": "HL-60", "assay_class": "chip", "quality": "informative"},
-        {"group": "HL-60", "assay_class": "chip", "quality": "informative"},
-        {"group": "Jurkat", "assay_class": "atac", "quality": "informative"},
-        {"group": "K562", "assay_class": "chip", "quality": "weak"},
-        {"group": None, "assay_class": "chip", "quality": "informative"},
+        {"group": "HL-60", "assay_class": "chip", "qc_tier": "informative"},
+        {"group": "HL-60", "assay_class": "chip", "qc_tier": "informative"},
+        {"group": "Jurkat", "assay_class": "atac", "qc_tier": "informative"},
+        {"group": "K562", "assay_class": "chip", "qc_tier": "weak"},
+        {"group": None, "assay_class": "chip", "qc_tier": "informative"},
     ]
     group_index, group_names = group_index_from_records(records)
     assert group_names == ["HL-60", "Jurkat", "K562"]
@@ -85,7 +87,7 @@ def test_group_index_from_records_basic_and_filters():
     assert group_names == ["HL-60", "K562"]
     assert group_index.tolist() == [0, 0, -1, 1, -1]
 
-    group_index, group_names = group_index_from_records(records, quality={"informative"})
+    group_index, group_names = group_index_from_records(records, qc_tier={"informative"})
     assert group_names == ["HL-60", "Jurkat"]
     assert group_index.tolist() == [0, 0, 1, -1, -1]
 
@@ -409,3 +411,49 @@ def test_end_to_end_on_synthetic_bigwigs(tmp_path):
     )
     assert result.score[0] > 0.0
     assert result.target_rank[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# noise_units / specificity_states
+# ---------------------------------------------------------------------------
+
+
+def test_noise_units_maps_background_median_to_zero_and_p99_to_one():
+    signal = np.array([[2.0, 10.0], [4.0, 30.0]])
+    units = noise_units(
+        signal, background_median=np.array([2.0, 10.0]), background_p99=np.array([4.0, 20.0])
+    )
+    np.testing.assert_allclose(units, [[0.0, 0.0], [1.0, 2.0]])
+
+
+def test_noise_units_rejects_degenerate_background():
+    with pytest.raises(ValueError):
+        noise_units(np.ones((1, 1)), background_median=np.ones(1), background_p99=np.ones(1))
+
+
+def test_weakest_target_track_decides_detection():
+    # Region 0: all tracks strong. Region 1: one replicate barely above noise.
+    target = np.array([[5.0, 6.0, 4.0], [9.0, 9.0, 1.5]])
+    states = specificity_states(np.array([2.0, 2.0]), target)
+    assert states.tolist() == ["specific", "target_not_detected"]
+
+
+def test_detected_but_weak_contrast_is_shared():
+    target = np.array([[5.0, 5.0], [5.0, 5.0]])
+    states = specificity_states(np.array([0.5, 1.0]), target, min_specificity_log2=1.0)
+    assert states.tolist() == ["shared", "specific"]
+
+
+def test_reference_track_above_noise_vetoes_specific():
+    # Both regions pass the contrast; region 1 has one reference track clearly marked.
+    target = np.array([[5.0, 5.0], [5.0, 5.0]])
+    reference = np.array([[1.0, 2.0, 0.5], [1.0, 6.0, 0.5]])
+    states = specificity_states(
+        np.array([2.0, 2.0]),
+        target,
+        reference_noise_units=reference,
+        max_reference_noise_units=5.0,
+    )
+    assert states.tolist() == ["specific", "shared"]
+    # Without the reference matrix the veto is skipped.
+    assert specificity_states(np.array([2.0, 2.0]), target).tolist() == ["specific", "specific"]

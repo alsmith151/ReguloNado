@@ -1,0 +1,16 @@
+                                                                                                    
+ Usage: root generate [OPTIONS] COMMAND [ARGS]...                                                   
+                                                                                                    
+ Train and sample small enhancer diffusion models.                                                  
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --help          Show this message and exit.                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────────────────────────╮
+│ train                                                                                            │
+│ sample                                                                                           │
+│ select   Select a diverse panel from scored pools (lower score is better).                       │
+│ prepare  Prepare numeric labels and chromosome-disjoint DNA from region counts.                  │
+│ fit      Train the pipeline denoiser, resuming a matching last checkpoint.                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

@@ -21,11 +21,11 @@ CHECKS = ("sparsity", "interval_signal", "replicate_concordance", "anchor")
 # Diagnostics the anchor check reuses straight from the scale-factor table —
 # it is free under anchor scaling and never triggers its own BigWig scan.
 ANCHOR_SCALE_COLUMNS = (
-    "scale_quality",
-    "scale_heldout_recovery",
-    "scale_anchor_reference",
-    "scale_background_q50",
-    "scale_background_q99",
+    "scale_qc_tier",
+    "scale_housekeeping_heldout_frac_above_p99",
+    "scale_housekeeping_median_stored",
+    "scale_background_median_stored",
+    "scale_background_p99_stored",
 )
 
 

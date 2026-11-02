@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from regulonado.config.diffusion import DiffusionConfig
 from regulonado.training.overrides import merge_training_settings
 
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -22,7 +23,11 @@ NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # (profile models); python/configs/region_experiment/*.yaml over train_regions.yaml
 # (region-count heads, on a cached or a live trunk).
 PROFILE_PRESETS = (
-    "head_only", "unfreeze_output", "deep_finetune", "peak_finetune", "lora_finetune"
+    "head_only",
+    "unfreeze_output",
+    "deep_finetune",
+    "peak_finetune",
+    "lora_finetune",
 )
 REGION_PRESETS = ("pretrain", "specific", "target")
 PRESETS_BY_TARGET = {"profile": PROFILE_PRESETS, "region_counts": REGION_PRESETS}
@@ -565,7 +570,7 @@ class DesignTarget(BaseModel):
     name: str
     target: str
     group_by: str = "source"
-    method: Literal["ism", "adalead"] = "ism"
+    method: Literal["ism", "adalead", "gradient", "diffusion"] = "ism"
     settings: dict[str, Any] = Field(default_factory=dict)
 
     _check_name = field_validator("name")(staticmethod(_validate_name))
@@ -626,6 +631,14 @@ class DesignConfig(BaseModel):
     # (AdaLead-only) at this top level when every target in the file shares one `method` — for a
     # mixed-method file (like examples/enhancer_design.yaml) set them per-target instead, via
     # `targets[i].settings`.
+    gradient_learning_rate: float = Field(default=0.1, gt=0)
+    gradient_temperature: float = Field(default=1.0, gt=0)
+    diffusion_checkpoint: str | None = None
+    diffusion_activities: dict[str, float] = Field(default_factory=dict)
+    diffusion_samples: int = Field(default=32, ge=1)
+    diffusion_steps: int = Field(default=64, ge=1)
+    diffusion_guidance: float = Field(default=1.0, ge=0)
+
     rounds: int = Field(default=20, ge=1)
     pad: int = Field(default=0, ge=0)
     # Widens only the scored bins (e.g. to pick up a nucleosome-free-region dip flanking a
@@ -728,11 +741,41 @@ class DesignConfig(BaseModel):
             "threshold",
             "rho",
         }
+        gradient_only = {"gradient_learning_rate", "gradient_temperature"}
+        diffusion_only = {
+            "diffusion_checkpoint",
+            "diffusion_activities",
+            "diffusion_samples",
+            "diffusion_steps",
+            "diffusion_guidance",
+        }
         set_fields = self.model_fields_set
         for target in self.targets:
             explicit = {name for name in (ism_only | adalead_only) if name in set_fields}
             explicit |= set(target.settings)
-            forbidden = adalead_only if target.method == "ism" else ism_only
+            for keys, method in [(gradient_only, "gradient"), (diffusion_only, "diffusion")]:
+                chosen = (self.model_fields_set | set(target.settings)) & keys
+                if chosen and target.method != method:
+                    # Shared defaults emitted by the workflow are filtered per target.
+                    raise ValueError(
+                        f"{method}-only settings used by {target.method}: {sorted(chosen)}"
+                    )
+            if (
+                target.method == "gradient"
+                and target.settings.get("fold_mode", self.fold_mode) != "resident"
+            ):
+                raise ValueError("Gradient design requires fold_mode: resident")
+            if target.method == "diffusion" and not target.settings.get(
+                "diffusion_checkpoint", self.diffusion_checkpoint
+            ):
+                raise ValueError("diffusion_checkpoint is required for diffusion design")
+            forbidden = (
+                adalead_only
+                if target.method == "ism"
+                else ism_only
+                if target.method == "adalead"
+                else ism_only | adalead_only
+            )
             bad = sorted(explicit & forbidden)
             if bad:
                 other = "AdaLead" if target.method == "ism" else "ISM"
@@ -961,6 +1004,63 @@ class AttributionConfig(BaseModel):
         return self
 
 
+class DiffusionStageConfig(BaseModel):
+    """Prepare numeric DNA labels and train a masked denoiser in the existing DAG."""
+
+    model_config = ConfigDict(extra="forbid")
+    dataset_dir: str | None = None
+    encoder_run: str | None = None
+    specificity_regions: str | None = None
+    priority_sampling_weight: float = Field(default=1.0, ge=1, allow_inf_nan=False)
+    priority_views: int = Field(default=1, ge=1)
+    priority_jitter_bp: int = Field(default=0, ge=0)
+    priority_reverse_complement: bool = True
+    target: str = "HL-60"
+    group_by: str = "group"
+    core_length: int = Field(default=200, ge=1)
+    train_regions: int | None = Field(default=None, ge=1)
+    validation_regions: int | None = Field(default=8192, ge=1)
+    validation_chromosomes: list[str] = Field(default_factory=lambda: ["chr8", "chr10"])
+    test_chromosomes: list[str] = Field(default_factory=lambda: ["chr9", "chr18"])
+    ccre_classes: list[str] = Field(default_factory=list)
+    seed: int = Field(default=17, ge=0)
+    training: DiffusionConfig = Field(
+        default_factory=lambda: DiffusionConfig(
+            activity_columns=[
+                "target_activity",
+                "offtarget_mean",
+                "offtarget_max",
+                "target_contrast",
+            ]
+        )
+    )
+    wandb_project: str | None = None
+    wandb_entity: str | None = None
+    wandb_run_name: str | None = None
+    cpus: int = Field(default=8, ge=1)
+    mem_mb: int = Field(default=64000, ge=1000)
+    runtime_minutes: int = Field(default=2880, ge=1)
+
+    @model_validator(mode="after")
+    def compatible(self):
+        if set(self.validation_chromosomes) & set(self.test_chromosomes):
+            raise ValueError("Diffusion validation/test chromosomes must be disjoint")
+        if self.core_length > self.training.max_length:
+            raise ValueError("diffusion.core_length exceeds training.max_length")
+        if "target_specificity" in self.training.activity_columns and not self.specificity_regions:
+            raise ValueError("target_specificity needs diffusion.specificity_regions")
+        if self.encoder_run and self.training.encoder_checkpoint:
+            raise ValueError("Choose encoder_run or training.encoder_checkpoint, not both")
+        if self.training.architecture == "alphagenome_encoder":
+            if not (self.encoder_run or self.training.encoder_checkpoint):
+                raise ValueError(
+                    "Encoder diffusion needs encoder_run or training.encoder_checkpoint"
+                )
+        elif self.encoder_run or self.training.encoder_checkpoint:
+            raise ValueError("Encoder source is only used by alphagenome_encoder diffusion")
+        return self
+
+
 class RegulonadoConfig(BaseModel):
     """Top-level workflow config."""
 
@@ -987,6 +1087,22 @@ class RegulonadoConfig(BaseModel):
     prediction: PredictionConfig | None = None
     design: DesignConfig | None = None
     attribution: AttributionConfig | None = None
+    diffusion: DiffusionStageConfig | None = None
+
+    @model_validator(mode="after")
+    def _diffusion_sources_exist(self):
+        if self.diffusion is None:
+            return self
+        if not self.diffusion.dataset_dir and self.targets.region_counts is None:
+            raise ValueError("diffusion needs dataset_dir or targets.region_counts")
+        if self.diffusion.encoder_run:
+            runs = {run.name: run for run in (self.train.runs if self.train else [])}
+            run = runs.get(self.diffusion.encoder_run)
+            if run is None or run.target != "region_counts" or run.trunk != "live":
+                raise ValueError("diffusion.encoder_run must name a live region-count training run")
+            if run.backbone.type != "alphagenome" or run.backbone.features != "encoder":
+                raise ValueError("diffusion.encoder_run must use the AlphaGenome encoder")
+        return self
 
     def track_format(self) -> str:
         """``bigwig`` when a profile target is configured, else ``bam``.

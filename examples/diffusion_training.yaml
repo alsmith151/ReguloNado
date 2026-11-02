@@ -1,0 +1,46 @@
+# Existing region-count dataset + trained encoder; use the normal sg GPU profile.
+results_dir: results/diffusion-full
+inputs:
+  fasta: /path/to/hg38.fa
+qc:
+  checks: []
+diffusion:
+  dataset_dir: /path/to/region_counts/dataset
+  specificity_regions: /path/to/regions_more_specific_to_HL60.bed
+  target: HL-60
+  train_regions: null          # all eligible training regions
+  validation_regions: 8192    # null uses all validation regions
+  ccre_classes: []             # all classes; [dELS, pELS] restricts to enhancers
+  validation_chromosomes: [chr8, chr10]
+  test_chromosomes: [chr9, chr18]
+  core_length: 200
+  priority_sampling_weight: 4  # relative probability per curated view
+  priority_views: 4            # upper bound on distinct views per curated locus
+  priority_jitter_bp: 50       # jitter within the original target span
+  priority_reverse_complement: true
+  wandb_project: regulonado-design
+  training:
+    architecture: alphagenome_encoder
+    encoder_checkpoint: /path/to/alphagenome-encoder
+    encoder_compute_dtype: bfloat16
+    activity_columns: [target_activity, offtarget_mean, offtarget_max, target_contrast, target_specificity]
+    max_length: 200
+    width: 128
+    layers: 4
+    heads: 4
+    batch_size: 128
+    num_workers: 8
+    epochs: 200
+    learning_rate: 0.0003
+    lr_schedule: plateau
+    warmup_epochs: 2
+    scheduler_patience: 8
+    min_learning_rate: 0.000001
+    early_stopping_patience: 40
+    early_stopping_min_epochs: 40
+    early_stopping_min_delta: 0.0001
+    diagnostic_examples: 128
+    stratified_timesteps: true
+    reverse_complement_probability: 0.5
+    device: cuda
+    seed: 17

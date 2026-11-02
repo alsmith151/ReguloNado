@@ -62,6 +62,10 @@ class SequencePredictor:
         import numpy as np
         import torch
 
+        if isinstance(one_hot_batch, torch.Tensor) and one_hot_batch.requires_grad:
+            chunk = one_hot_batch.to(device=self.device, dtype=self.dtype)
+            return self.model(chunk, **self.track_metadata)[:, : len(self.track_names)]
+
         if isinstance(one_hot_batch, np.ndarray):
             one_hot_batch = torch.from_numpy(one_hot_batch)
 

@@ -170,7 +170,9 @@ def _validate_training_matrix(configfile: Path) -> None:
             source = (
                 ["data.embeddings_dir=/config-validation"]
                 if cached
-                else ["data.fasta=/config-validation"] if regions else []
+                else ["data.fasta=/config-validation"]
+                if regions
+                else []
             )
             overrides = [
                 "data.path=/config-validation",
@@ -194,7 +196,7 @@ def pipeline(
     stage: Annotated[
         Optional[str],
         typer.Argument(
-            help="Stage to run: train, parameter-sweep, attribution, or design."
+            help="Stage to run: train, diffusion, parameter-sweep, attribution, or design."
         ),
     ] = None,
     cores: Annotated[int, typer.Option("--cores", "-c", min=1, help="Local execution cores.")] = 1,
@@ -255,7 +257,7 @@ def pipeline(
             f"Workflow config not found: {configfile}", param_hint="--configfile"
         )
     _validate_training_matrix(configfile)
-    valid_stages = ("train", "parameter-sweep", "attribution", "design")
+    valid_stages = ("train", "diffusion", "parameter-sweep", "attribution", "design")
     if stage is not None and stage not in valid_stages:
         raise typer.BadParameter(f"Expected one of: {', '.join(valid_stages)}", param_hint="stage")
     if stage is not None and target is not None:
@@ -319,6 +321,14 @@ def pipeline(
             for rule, values in source.items():
                 rule_resources.setdefault(rule, {}).update(values)
 
+    # Existing installed GPU profiles already place train_phase on a GPU partition.
+    # Reuse that placement for the new stage without overriding its own resources.
+    if "diffusion_train" not in rule_resources and "train_phase" in rule_resources:
+        rule_resources["diffusion_train"] = {
+            key: value
+            for key, value in rule_resources["train_phase"].items()
+            if key in {"slurm_partition", "slurm_account"}
+        }
     snakefile = Path(__file__).resolve().parents[1] / "workflow" / "Snakefile"
     resource_settings = ResourceSettings(
         cores=cores if selected_executor == "local" else None,
@@ -354,6 +364,10 @@ def pipeline(
                 )
                 for run in config.train.runs
             )
+        elif stage == "diffusion":
+            if not raw.get("diffusion"):
+                raise typer.BadParameter("Config has no diffusion stage", param_hint="stage")
+            selected_targets.add(str(results / "diffusion" / "model" / "training_summary.json"))
         elif stage == "parameter-sweep":
             sweeps = [
                 name

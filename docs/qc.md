@@ -27,7 +27,7 @@ Dropping happens in `tracks assemble` (`--drop-degenerate`, driven by `qc.drop_d
 | `sparsity` | Gates on the free header metrics (`qc_bases_covered >= 1`, `qc_n_chroms_with_signal >= 1`, not constant) | Free |
 | `interval_signal` | `qc_nonzero_bin_fraction`, `qc_interval_mean/sd`, `qc_dynamic_range` (q99/q50), `qc_top1pct_signal_fraction` | One BigWig scan over `targets.profile.intervals` |
 | `replicate_concordance` | `qc_replicate_r` (median Pearson to tracks sharing `scaling_group`/`condition`), `qc_nearest_other_r`, `qc_nearest_is_replicate` | Same scan as `interval_signal` |
-| `anchor` | Reuses `scale_quality`, `scale_heldout_recovery`, `scale_anchor_reference`, `scale_background_q50/q99` from `--scale-factors` | Free — no second scan |
+| `anchor` | Reuses `scale_qc_tier`, `scale_housekeeping_heldout_frac_above_p99`, `scale_housekeeping_median_stored`, `scale_background_median_stored`/`scale_background_p99_stored` from `--scale-factors` | Free — no second scan |
 
 `interval_signal` and `replicate_concordance` share one BigWig scan
 (`regulonado tracks interval-means`, `qc.py:track_interval_means`) — the same scan `tmm` scaling
@@ -48,7 +48,7 @@ exist under that scaling method. This is enforced by a config cross-validator, n
 
 ## When *not* to use the `anchor` check
 
-`quality` is `anchor_reference > background_q50` against housekeeping promoters — a claim about
+`qc_tier` is `housekeeping_median_stored > background_median_stored` against housekeeping promoters — a claim about
 ATAC/H3K27ac-like enhancer activity. On assays where that comparison isn't meaningful (most
 non-accessibility, non-active-enhancer marks), don't enable it; use `sparsity`/`interval_signal`/
 `replicate_concordance` instead, which make no assay-specific assumption.

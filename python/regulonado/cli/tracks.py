@@ -31,18 +31,17 @@ tracks_app = typer.Typer(
 # clip_soft_counts/clip_hard_counts (stored mean-coverage units), is populated by the
 # QC step's interval-quantile computation, not by this scale_factors merge at all.
 _SCALE_COLUMN_RENAME = {
-    "background": "scale_background",
+    "background_median_stored": "scale_background_median_stored",
     "clip_soft_anchor": "scale_clip_soft_anchor",
     "clip_hard_anchor": "scale_clip_hard_anchor",
     "clip_soft_squash": "scale_clip_soft_squash",
     "clip_hard_squash": "scale_clip_hard_squash",
-    "anchor_reference": "scale_anchor_reference",
-    "background_q50": "scale_background_q50",
-    "background_q99": "scale_background_q99",
-    "heldout_reference": "scale_heldout_reference",
-    "heldout_recovery": "scale_heldout_recovery",
+    "housekeeping_median_stored": "scale_housekeeping_median_stored",
+    "background_p99_stored": "scale_background_p99_stored",
+    "housekeeping_heldout_median_stored": "scale_housekeeping_heldout_median_stored",
+    "housekeeping_heldout_frac_above_p99": "scale_housekeeping_heldout_frac_above_p99",
     "window_stat_bp": "scale_window_stat_bp",
-    "quality": "scale_quality",
+    "qc_tier": "scale_qc_tier",
     "tmm_factor": "scale_tmm_factor",
     "library_size": "scale_library_size",
     "bamnado_method": "scale_bamnado_method",
@@ -428,11 +427,11 @@ def qc_cmd(
             else pd.read_csv(scale_factors)
         )
         by_name = sf.set_index("track_name") if "track_name" in sf.columns else None
-        if by_name is None or "quality" not in by_name.columns:
+        if by_name is None or "qc_tier" not in by_name.columns:
             typer.echo("--scale-factors has no 'track_name'/'quality' column", err=True)
             raise typer.Exit(1)
         metrics["qc_anchor_verdict"] = [
-            by_name.loc[name, "quality"] if name in by_name.index else None
+            by_name.loc[name, "qc_tier"] if name in by_name.index else None
             for name in included["track_name"]
         ]
 
@@ -521,7 +520,7 @@ def assemble(
         # and raw-count-unit (squash) clip column families -- "inferred" covers every
         # non-anchor method (original/tmm/seqnado/bamnado), which all write the
         # squash family via normalization.compute_clip_thresholds.
-        scaling_method = "anchor" if "scale_anchor_reference" in merged.columns else "inferred"
+        scaling_method = "anchor" if "scale_housekeeping_median_stored" in merged.columns else "inferred"
 
     if qc_report is not None:
         qc_df = pd.read_parquet(qc_report) if str(qc_report).endswith(".parquet") \

@@ -40,7 +40,7 @@ silently corrupts.
 | *(none)* | annotation | `sample_id`, `condition`, `source`, `assay`, `ip`, `scaling_group`, ... — **labels, not ids** |
 | *(none)* | dedupe | `dedupe_key`, `dedupe_method`, `duplicate_of` |
 | `fp_` | fingerprint | `size_bytes`, `mtime_ns`, `bases_covered`, `genome_sum`, `content_hash` (nullable) — verified against disk at `tracks qc`/`build`/(warn-only) `train`, never joined on |
-| `scale_` | scaling | `factor`, `background`, `clip_soft`, `clip_hard`, plus method diagnostics (`anchor_reference`, `background_q50/q99`, `heldout_recovery`, `quality`, `tmm_factor`, `library_size`, ...) |
+| `scale_` | scaling | `factor`, `clip_soft`, `clip_hard`, plus anchor diagnostics (`background_median_stored`, `background_p99_stored`, `housekeeping_median_stored`, `housekeeping_heldout_frac_above_p99`, `qc_tier`; see `normalization.ANCHOR_COLUMNS`) and other methods' (`tmm_factor`, `library_size`, ...) |
 | `qc_` | QC | `verdict`, `failed_rules` (list), plus one column per computed metric — see [qc.md](qc.md) |
 
 **Categorical ids are derived, never stored.** `condition_id`/`source_id`/`assay_type_id`/

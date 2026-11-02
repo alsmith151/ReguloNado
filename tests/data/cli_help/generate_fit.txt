@@ -1,0 +1,14 @@
+                                                                                                    
+ Usage: root generate fit [OPTIONS]                                                                 
+                                                                                                    
+ Train the pipeline denoiser, resuming a matching last checkpoint.                                  
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --table                  PATH  [required]                                                     │
+│ *  --manifest               PATH  [required]                                                     │
+│ *  --params                 PATH  [required]                                                     │
+│ *  --out                    PATH  [required]                                                     │
+│    --encoder-run-dir        PATH                                                                 │
+│    --help                         Show this message and exit.                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

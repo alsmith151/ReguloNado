@@ -11,6 +11,7 @@ from regulonado.cli.counts import counts_app
 from regulonado.cli.dataset import dataset
 from regulonado.cli.design import design
 from regulonado.cli.embed import embed_app
+from regulonado.cli.generate import generate_app
 from regulonado.cli.normalization import normalization_app
 from regulonado.cli.pipeline import pipeline as _pipeline
 from regulonado.cli.predict import predict
@@ -120,6 +121,9 @@ app.add_typer(tracks_app, name="tracks")
 app.add_typer(attribute_app, name="attribute")
 app.add_typer(counts_app, name="counts")
 app.add_typer(embed_app, name="embed")
+
+
+app.add_typer(generate_app, name="generate")
 
 
 if __name__ == "__main__":

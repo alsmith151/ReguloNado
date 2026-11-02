@@ -1,0 +1,20 @@
+                                                                                                    
+ Usage: root generate sample [OPTIONS]                                                              
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --checkpoint          PATH                  [required]                                        │
+│ *  --activities          TEXT                  JSON numeric profile, e.g. {"HL60": 2.5, "K562":  │
+│                                                0.2}.                                             │
+│                                                [required]                                        │
+│ *  --length              INTEGER RANGE [x>=1]  [required]                                        │
+│ *  --out                 PATH                  Output directory: FASTA, TSV, provenance JSON.    │
+│                                                [required]                                        │
+│    --count               INTEGER RANGE [x>=1]  [default: 32]                                     │
+│    --steps               INTEGER RANGE [x>=1]  [default: 64]                                     │
+│    --guidance            FLOAT RANGE [x>=0]    [default: 1.0]                                    │
+│    --seed                INTEGER RANGE [x>=0]  [default: 0]                                      │
+│    --device              TEXT                  [default: auto]                                   │
+│    --min-distance        INTEGER RANGE [x>=0]  [default: 0]                                      │
+│    --help                                      Show this message and exit.                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

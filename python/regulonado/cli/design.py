@@ -94,7 +94,10 @@ def design(
         Optional[str],
         typer.Option("--group-by", help="Track annotation column defining cell-type groups."),
     ] = None,
-    method: Annotated[Optional[str], typer.Option("--method", help="'ism' or 'adalead'.")] = None,
+    method: Annotated[
+        Optional[str],
+        typer.Option("--method", help="'ism', 'adalead', 'gradient', or 'diffusion'."),
+    ] = None,
     out_dir: Annotated[
         Optional[Path], typer.Option("--out", help="Directory to write design outputs.")
     ] = None,

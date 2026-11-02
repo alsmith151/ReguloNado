@@ -181,7 +181,7 @@ def calculate_anchor_scaling(
         max_workers=max_workers,
     )
     df["track_name"] = included["track_name"].to_numpy()
-    degenerate = int((df["quality"] == "failed").sum())
+    degenerate = int((df["qc_tier"] == "failed").sum())
     if degenerate:
         typer.echo(f"{degenerate} degenerate anchor track(s) (anchor <= background).", err=True)
     save_scale_factors(df, out_path, fmt=fmt)  # type: ignore[arg-type]

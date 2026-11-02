@@ -50,3 +50,9 @@ tracks.parquet
 .gitignore
 test-00010-of-00026.parquet
 examples/2026-09-16-hl60-anchor-pipeline.yaml
+
+# Local biological data, trained weights and experiment outputs
+/models_from_ccb/
+/output/
+/specific_regions.bed
+/track_annotations.parquet

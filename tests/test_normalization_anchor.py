@@ -61,7 +61,7 @@ def test_anchor_quality_bands_informative_and_failed(tmp_path):
         informative,
         [("chr1", 0, 500, 20.0), ("chr1", 500, 1000, 1.0), ("chr1", 1000, 1500, 20.0)],
     )
-    # Failed: uniformly low everywhere, so anchor_reference <= background_q50.
+    # Failed: uniformly low everywhere, so housekeeping_median_stored <= background_median_stored.
     failed = tmp_path / "failed.bw"
     _write_bigwig(failed, [("chr1", 0, 1500, 1.0)])
 
@@ -84,8 +84,8 @@ def test_anchor_quality_bands_informative_and_failed(tmp_path):
         background_sample=None,
     )
     by_index = df.set_index("track_index")
-    assert by_index.loc[0, "quality"] == "informative"
-    assert by_index.loc[1, "quality"] == "failed"
+    assert by_index.loc[0, "qc_tier"] == "informative"
+    assert by_index.loc[1, "qc_tier"] == "failed"
     # A failed track is written as-is (not forced to neutral values elsewhere) —
     # anchor_scale_factors's own fallback already neutralises it to scale_factor=1.
     assert by_index.loc[1, "scale_factor"] == pytest.approx(1.0)
@@ -126,5 +126,5 @@ def test_anchor_quality_band_weak_for_partial_heldout_recovery(tmp_path):
         window_stat_bp=10,
         background_sample=None,
     )
-    assert df.loc[0, "quality"] == "weak"
-    assert df.loc[0, "heldout_recovery"] == pytest.approx(0.4)
+    assert df.loc[0, "qc_tier"] == "weak"
+    assert df.loc[0, "housekeeping_heldout_frac_above_p99"] == pytest.approx(0.4)

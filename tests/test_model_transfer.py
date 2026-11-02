@@ -152,7 +152,7 @@ def test_shared_channel_identity_ignores_per_track_technical_fields():
             "assay_class": "ATAC",
             "path": "/data/a.bigWig",
             "resolved_path": "/data/a.bigWig",
-            "background": 0.165,
+            "background_median_stored": 0.165,
         },
         {
             "track_index": 1,
@@ -160,7 +160,7 @@ def test_shared_channel_identity_ignores_per_track_technical_fields():
             "assay_class": "ATAC",
             "path": "/data/b.bigWig",
             "resolved_path": "/data/b.bigWig",
-            "background": 0.412,
+            "background_median_stored": 0.412,
         },
         {
             "track_index": 2,
@@ -168,7 +168,7 @@ def test_shared_channel_identity_ignores_per_track_technical_fields():
             "assay_class": "ChIP",
             "path": "/data/c.bigWig",
             "resolved_path": "/data/c.bigWig",
-            "background": 0.775,
+            "background_median_stored": 0.775,
         },
     ]
     assert build_condition_shared_track_index(records, condition_source="group") == [0, 0, 1]

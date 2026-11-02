@@ -1,0 +1,14 @@
+                                                                                                    
+ Usage: root generate select [OPTIONS]                                                              
+                                                                                                    
+ Select a diverse panel from scored pools (lower score is better).                                  
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --table               PATH                  Scored TSV; repeat to pool methods. [required]    │
+│ *  --out                 PATH                  Selected FASTA and TSV directory. [required]      │
+│    --count               INTEGER RANGE [x>=1]  [default: 24]                                     │
+│    --min-distance        INTEGER RANGE [x>=0]  [default: 10]                                     │
+│    --score               TEXT                  [default: energy]                                 │
+│    --help                                      Show this message and exit.                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

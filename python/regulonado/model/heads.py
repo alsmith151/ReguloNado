@@ -35,7 +35,7 @@ _CONDITION_COLLAPSE_IGNORED_FIELDS = {
     "path",
     "resolved_path",
     "bigwig_path",
-    "background",
+    "background_median_stored",
     "sample_id",
 }
 

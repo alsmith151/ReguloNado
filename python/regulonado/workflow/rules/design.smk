@@ -106,6 +106,15 @@ if DESIGN:
             for run in DESIGN_RUN_NAMES
         ]
 
+    def _design_denoiser_input(wildcards):
+        target = DESIGN_TARGET_BY_NAME[wildcards.target]
+        if target.get("method", "ism") != "diffusion":
+            return []
+        path = target.get("settings", {}).get("diffusion_checkpoint", DESIGN.get("diffusion_checkpoint"))
+        if not path:
+            raise ValueError("diffusion_checkpoint is required for diffusion design")
+        return [path]
+
     def _design_holdout_state_input(wildcards):
         if DESIGN_HOLDOUT_CHECKPOINT:
             return DESIGN_HOLDOUT_CHECKPOINT
@@ -126,6 +135,8 @@ if DESIGN:
         "target_alpha", "bending_factor", "bin_reduction", "topk_bins", "fold_mode", "batch_size",
         "device", "exclude_tracks", "wandb", "wandb_project", "wandb_group", "model_kind",
         "energy", "flank_mode", "flank_keep", "flank_keep_bp",
+        "gradient_learning_rate", "gradient_temperature", "diffusion_checkpoint",
+        "diffusion_activities", "diffusion_samples", "diffusion_steps", "diffusion_guidance",
     }
     # DesignConfig rejects an ISM-only/AdaLead-only key that doesn't match a target's own
     # method (regulonado/config/models.py:_method_specific_settings_are_consistent). The
@@ -150,10 +161,22 @@ if DESIGN:
 
         target = DESIGN_TARGET_BY_NAME[wildcards.target]
         method = target.get("method", "ism")
-        irrelevant = _DESIGN_ADALEAD_ONLY_KEYS if method == "ism" else _DESIGN_ISM_ONLY_KEYS
+        irrelevant = (_DESIGN_ADALEAD_ONLY_KEYS if method == "ism" else
+                      _DESIGN_ISM_ONLY_KEYS if method == "adalead" else
+                      _DESIGN_ISM_ONLY_KEYS | _DESIGN_ADALEAD_ONLY_KEYS)
+        if method != "gradient":
+            irrelevant = irrelevant | {"gradient_learning_rate", "gradient_temperature"}
+        if method != "diffusion":
+            irrelevant = irrelevant | {"diffusion_checkpoint", "diffusion_activities",
+                                       "diffusion_samples", "diffusion_steps", "diffusion_guidance"}
         shared_keys = _DESIGN_SETTINGS_KEYS - irrelevant
         merged = {k: v for k, v in DESIGN.items() if k in shared_keys}
-        merged.update(flatten_settings(target.get("settings", {})))
+        target_settings = dict(target.get("settings", {}))
+        # Activity dimension names are data keys, not nested config paths.
+        activities = target_settings.pop("diffusion_activities", None)
+        merged.update(flatten_settings(target_settings))
+        if activities is not None:
+            merged["diffusion_activities"] = activities
         # Schema validation fills the ordinary profile default (topk_bins=10) even when the
         # user did not set it. Region-count models have one degenerate bin, so their config
         # rightfully rejects that meaningless setting; only pass it for an actual top-k run.
@@ -219,6 +242,7 @@ if DESIGN:
             ),
             checkpoints=_design_checkpoint_state_inputs,
             holdout=_design_holdout_state_input,
+            denoiser=_design_denoiser_input,
         params:
             target=lambda w: DESIGN_TARGET_BY_NAME[w.target]["target"],
             group_by=lambda w: DESIGN_TARGET_BY_NAME[w.target].get("group_by", "source"),

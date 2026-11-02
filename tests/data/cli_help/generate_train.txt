@@ -1,0 +1,10 @@
+                                                                                                    
+ Usage: root generate train [OPTIONS]                                                               
+                                                                                                    
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --table         PATH  TSV/parquet: chrom, sequence, activity columns. [required]              │
+│ *  --params        PATH  Diffusion training YAML. [required]                                     │
+│ *  --out           PATH  Checkpoint directory. [required]                                        │
+│    --help                Show this message and exit.                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+

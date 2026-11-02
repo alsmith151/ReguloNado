@@ -27,5 +27,6 @@
 │ attribute      Score attribution profiles and/or call cores from in-silico mutagenesis.          │
 │ counts         Count BAM events over regions and gather them into a RegionCountData run.         │
 │ embed          Cache frozen-backbone embeddings over region targets, for training a count head.  │
+│ generate       Train and sample small enhancer diffusion models.                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 

@@ -217,6 +217,7 @@ prediction:
 - [Resume or reuse checkpoints](docs/checkpoints.md)
 - [Generate predictions](docs/prediction.md)
 - [Design synthetic enhancers](docs/design.md)
+- [Numeric-conditioned diffusion and gradient design](docs/generation.md)
 - [Architecture](ARCHITECTURE.md)
 - [Contributing](CONTRIBUTING.md)
 

@@ -212,6 +212,7 @@ def training_dataset_dir():
     return DATASET_DIR
 
 
+DIFFUSION = _VALIDATED.diffusion
 DESIGN = config.get("design")
 ATTRIBUTION = config.get("attribution")
 # Enabled sweeps by name (parameter_sweep.smk).
@@ -226,6 +227,7 @@ _QC_ENABLED = bool(config["qc"].get("checks"))
 
 rule all:
     input:
+        *([str(RESULTS / "diffusion" / "model" / "training_summary.json")] if DIFFUSION else []),
         *(
             str(TRAIN_DIR / run / final_phase(run) / "trainer_state.json")
             for run in RUN_NAMES
@@ -279,3 +281,5 @@ include: "rules/predict.smk"
 include: "rules/parameter_sweep.smk"
 include: "rules/attribute.smk"
 include: "rules/design.smk"
+
+include: "rules/diffusion.smk"

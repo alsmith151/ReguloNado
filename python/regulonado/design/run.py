@@ -326,6 +326,39 @@ def _dispatch_search(
             rng=rng,
             on_round=on_round,
         )
+    if method == "gradient":
+        from regulonado.design.generators import gradient_search
+
+        return gradient_search(
+            energy_fn,
+            seed,
+            context,
+            rounds=config.rounds,
+            learning_rate=config.gradient_learning_rate,
+            temperature=config.gradient_temperature,
+            rng=rng,
+            on_round=on_round,
+        )
+    if method == "diffusion":
+        from regulonado.design.generators import diffusion_search
+
+        if not config.diffusion_checkpoint:
+            raise ValueError("diffusion_checkpoint is required for diffusion design")
+        return diffusion_search(
+            energy_fn,
+            seed,
+            context,
+            checkpoint=config.diffusion_checkpoint,
+            activities=config.diffusion_activities,
+            count=config.diffusion_samples,
+            steps=config.diffusion_steps,
+            guidance=config.diffusion_guidance,
+            rng=rng,
+            on_round=on_round,
+            device=config.device or "auto",
+        )
+    if method != "adalead":
+        raise ValueError(f"Unknown design method: {method}")
     adalead_config = AdaLeadConfig(
         rounds=config.rounds,
         population_size=config.population_size,
@@ -640,6 +673,11 @@ def _build_run_info(
         "group_by": target.group_by,
         "method": method,
         "rounds": config.rounds,
+        "generator_settings": {
+            key: value
+            for key, value in config.model_dump().items()
+            if key.startswith(("gradient_", "diffusion_"))
+        },
         "pad": config.pad,
         "on_missing": config.on_missing,
         "fold_mode": config.fold_mode,
@@ -703,6 +741,12 @@ def run_design(config: "DesignConfig") -> DesignResult:
         raise ValueError("design.out_dir is required")
 
     target = config.targets[0]
+    # Resolve per-target settings identically for standalone and workflow calls.
+    if target.settings:
+        payload = config.model_dump(exclude_unset=True)
+        payload.update(target.settings)
+        config = type(config).model_validate(payload)
+        target = config.targets[0]
     method = target.method
     run_seed = _seed_everything(config.seed)
     intervals = _resolve_intervals(config)

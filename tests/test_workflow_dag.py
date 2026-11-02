@@ -464,7 +464,8 @@ train:
     assert "batch_size" in wrong_type_result.stdout + wrong_type_result.stderr
 
 
-def test_selective_activation_design_flags_reach_pipeline_command(tmp_path):
+@pytest.mark.parametrize("method", ["ism", "gradient", "diffusion"])
+def test_selective_activation_design_flags_reach_pipeline_command(tmp_path, method):
     snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
     if snakemake is None:
         pytest.skip("Snakemake is an optional workflow dependency")
@@ -479,6 +480,17 @@ def test_selective_activation_design_flags_reach_pipeline_command(tmp_path):
     candidates.write_text("chr1\t10\t20\tcandidate-1\n")
     checkpoint_a.mkdir()
     checkpoint_b.mkdir()
+
+    denoiser = tmp_path / "denoiser.pt"
+    denoiser.touch()
+    generator_settings = (
+        f"        diffusion_checkpoint: {denoiser}\n"
+        "        diffusion_activities: {HL60_activity: 2.4}\n"
+        if method == "diffusion"
+        else "        gradient_learning_rate: 0.2\n"
+        if method == "gradient"
+        else ""
+    )
 
     config = tmp_path / "design-config.yaml"
     config.write_text(
@@ -514,6 +526,7 @@ design:
   checkpoint_dirs:
     - {checkpoint_a}
     - {checkpoint_b}
+  model_kind: profile
   objective: selective-activation
   gain_transform: log2-fold-change
   gain_pseudocount: 1.0
@@ -523,9 +536,10 @@ design:
   targets:
     - name: k562
       target: K562
+      method: {method}
       settings:
         offtarget_boost_weight: 2.5
-"""
+{generator_settings}"""
     )
 
     # shard_candidates is a checkpoint (its shard count depends on its own input's real
@@ -574,6 +588,12 @@ design:
     # The target/method dispatch stays a direct CLI flag; the tuning settings reach the command
     # as a validated DesignConfig written to the --params file (cli/design.py, F03/S5).
     assert "--target K562" in output
+    assert f"--method {method}" in output
+    if method == "diffusion":
+        assert str(denoiser) in output
+        assert '"HL60_activity": 2.4' in output
+    if method == "gradient":
+        assert '"gradient_learning_rate": 0.2' in output
     assert "--params" in output
     assert '"objective": "selective-activation"' in output
     assert '"gain_transform": "log2-fold-change"' in output

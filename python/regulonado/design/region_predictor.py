@@ -89,9 +89,7 @@ class RegionSequencePredictor:
 
         config = self.model.config
         n_groups = int(config.n_groups)
-        self.group_names = list(
-            config.group_names or [f"group{i}" for i in range(n_groups)]
-        )
+        self.group_names = list(config.group_names or [f"group{i}" for i in range(n_groups)])
         # Deliberate pun -- see the class docstring.
         self.track_names = self.group_names
 
@@ -103,6 +101,12 @@ class RegionSequencePredictor:
     def __call__(self, one_hot_batch):
         import numpy as np
         import torch
+
+        if isinstance(one_hot_batch, torch.Tensor) and one_hot_batch.requires_grad:
+            chunk = one_hot_batch.to(device=self.device, dtype=torch.float32)
+            return torch.nn.functional.softplus(
+                self.model.group_log_rates(sequence=chunk)
+            ).unsqueeze(-1)
 
         if isinstance(one_hot_batch, np.ndarray):
             one_hot_batch = torch.from_numpy(one_hot_batch)

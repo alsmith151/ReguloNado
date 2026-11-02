@@ -3,7 +3,7 @@
 The panel is a set of genomic regions, each with an **observed** specificity score computed
 from the atlas bigwigs, so a model's predicted group-contrast channels can be scored against
 it at every evaluation (``trainer.specificity_panel_path``). Built once, offline, from the
-unique-enhancer-finding multiscale run.
+unique-enhancer-finding specificity run (``03-specificity``).
 
 Predictions stay in distribution: the panel only uses the training dataset's own prediction
 windows (``--intervals``, the BED the dataset was built from). Each enhancer region is
@@ -12,8 +12,8 @@ those windows:
 
 * ``curated``      — the hand-selected k-means cluster (the 85 of
   ``notebooks/01-target-specificity-on-ground-truth.ipynb``).
-* ``kmeans_other`` — every other region the multiscale pipeline passed as target-specific.
-* ``candidate``    — every other eligible, full-replicate-support HL-60 candidate region
+* ``specific``     — every other region the specificity run called ``specific``.
+* ``candidate``    — every other HL-60 candidate region detected in every target track
   inside the same windows: negatives that share their windows' sequence context.
 
 Each region carries its window (``window_chrom``/``window_start``/``window_end``) and the
@@ -35,7 +35,7 @@ threshold is fixed here so training runs stay comparable.
 Usage::
 
     uv run python scripts/build_specificity_panel.py \\
-        --spec-run <uef>/data/interim/03-multiscale-specificity/runs/<run> \\
+        --spec-run <uef>/data/interim/03-specificity/HL-60-ChIP \\
         --selected <uef>/data/interim/04-examined-outputs/selected-kmeans-peak-groups.parquet \\
         --bigwig-dir <uef>/data/raw/atlas/bigwigs/bamnado/unscaled \\
         --intervals sequences_human.bed.gz --tracks tracks.parquet \\
@@ -147,8 +147,11 @@ def main() -> None:
     parser.add_argument("--floor", type=float, default=0.139)
     args = parser.parse_args()
 
-    best = pd.read_parquet(args.spec_run / "best-overall-target-windows.parquet")
-    kmeans_ids = set(pd.read_parquet(args.spec_run / "kmeans-peak-groups.parquet").region_id)
+    calls = pd.read_parquet(args.spec_run / "region-specificity.parquet").rename(
+        columns={"start": "region_start", "end": "region_end"}
+    )
+    calls["region_bp"] = calls.region_end - calls.region_start
+    specific_ids = set(calls.region_id[calls.specificity_state == "specific"])
     curated_ids = set(pd.read_parquet(args.selected).region_id)
     windows = pd.read_csv(
         args.intervals,
@@ -158,12 +161,13 @@ def main() -> None:
         names=["chrom", "start", "end", "fold"],
     )
 
-    enhancers = best[best.region_id.isin(kmeans_ids)].reset_index(drop=True)
+    positive_ids = specific_ids | curated_ids
+    enhancers = calls[calls.region_id.isin(positive_ids)].reset_index(drop=True)
     enhancer_window = assign_windows(enhancers, windows)
     unplaced = int((enhancer_window < 0).sum())
     chosen = windows.loc[np.unique(enhancer_window[enhancer_window >= 0])]
-    others = best[
-        ~best.region_id.isin(kmeans_ids) & best.eligible_target_window & best.target_support.eq(3)
+    others = calls[
+        ~calls.region_id.isin(positive_ids) & (calls.specificity_state != "target_not_detected")
     ]
     others = others.reset_index(drop=True)
     other_window = assign_windows(others, chosen)
@@ -176,7 +180,7 @@ def main() -> None:
     panel["tier"] = np.where(
         panel.region_id.isin(curated_ids),
         "curated",
-        np.where(panel.region_id.isin(kmeans_ids), "kmeans_other", "candidate"),
+        np.where(panel.region_id.isin(specific_ids), "specific", "candidate"),
     )
     placed = windows.loc[panel.window_index].reset_index(drop=True)
     panel["window_chrom"], panel["window_start"] = placed.chrom, placed.start
@@ -187,7 +191,7 @@ def main() -> None:
         "region_start",
         "region_end",
         "region_bp",
-        "target_support",
+        "target_weakest_noise_units",
         "tier",
         "window_chrom",
         "window_start",
@@ -210,7 +214,7 @@ def main() -> None:
     group_index, group_names = group_index_from_records(records)
     target_index = group_names.index(args.target_group)
     scale_factor = np.array([float(r["scale_factor"]) for r in records], dtype=np.float32)
-    background = np.array([float(r.get("background") or 0.0) for r in records], dtype=np.float32)
+    background = np.array([float(r["background_median_stored"]) for r in records], dtype=np.float32)
 
     profiles, lengths = extract_profiles(panel, bigwigs)
 

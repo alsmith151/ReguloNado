@@ -58,6 +58,19 @@ def rolling_window_stat(values: np.ndarray, width: int) -> float:
     return float(means.max())
 
 
+#: Anchor-scaling diagnostics, one per track, and what each measures. Suffix ``_stored``
+#: = the BigWig's own units. Background windows are GC-matched, regulatory-free;
+#: housekeeping windows are common-essential gene TSSs (a fit set and a held-out set).
+ANCHOR_COLUMNS: dict[str, str] = {
+    "background_median_stored": "typical noise; maps to 0 in anchor units",
+    "background_p99_stored": "noise ceiling; signal above it is distinguishable from noise",
+    "housekeeping_median_stored": "fit housekeeping TSS median; maps to 1 in anchor units",
+    "housekeeping_heldout_median_stored": "held-out housekeeping TSS median; checks the scaling",
+    "housekeeping_heldout_frac_above_p99": "QC score: held-out TSSs above the noise ceiling",
+    "window_stat_bp": "rolling-window width every statistic above is measured at",
+    "qc_tier": "informative (>= 0.70) / weak (>= 0.30) / failed, from the QC score",
+}
+
 def track_window_stat(reader, windows, *, bin_size: int, window_stat_bp: int) -> np.ndarray:
     """Summarise each window using the maximum rolling mean at model bin size."""
     stats = []
@@ -87,7 +100,12 @@ def anchor_scale_factors(
     clip_soft_anchors: float = 10.0,
     clip_hard_anchors: float = 20.0,
 ) -> pd.DataFrame:
-    """Calculate biological anchor normalisation factors directly from BigWigs."""
+    """Calculate biological anchor normalisation factors directly from BigWigs.
+
+    Every statistic is the track's best ``window_stat_bp`` rolling mean
+    (:func:`track_window_stat`) over a window set, in *stored* units (the BigWig's own).
+    One row per track; see :data:`ANCHOR_COLUMNS` for what each column measures.
+    """
     import pybigtools
 
     anchors = read_regions(anchor_regions)
@@ -131,7 +149,6 @@ def anchor_scale_factors(
         return {
             "track_index": index,
             "scale_factor": sf,
-            "background": bg_q50,
             # ANCHOR units: 1.0 == housekeeping-promoter level (scale_factor = 1 /
             # (anchor_ref - bg_q50)), so these are ceilings in the same normalised
             # space, not raw counts. Renamed (from bare clip_soft/clip_hard) so
@@ -140,13 +157,15 @@ def anchor_scale_factors(
             # clip families -- see tracks_table.py's module docstring.
             "clip_soft_anchor": clip_soft_anchors,
             "clip_hard_anchor": clip_hard_anchors,
-            "anchor_reference": anchor_ref,
-            "background_q50": bg_q50,
-            "background_q99": bg_q99,
-            "heldout_reference": float(np.median(heldout_stat)) if heldout_stat.size else np.nan,
-            "heldout_recovery": recovery,
+            "background_median_stored": bg_q50,
+            "background_p99_stored": bg_q99,
+            "housekeeping_median_stored": anchor_ref,
+            "housekeeping_heldout_median_stored": (
+                float(np.median(heldout_stat)) if heldout_stat.size else np.nan
+            ),
+            "housekeeping_heldout_frac_above_p99": recovery,
             "window_stat_bp": stat_bp,
-            "quality": quality,
+            "qc_tier": quality,
             "path": str(path),
         }
 

@@ -123,9 +123,9 @@ def resolve_count_label_space(
         library_millions = _track_field(records, "library_size", purpose=purpose) / 1e6
         exposure_counts = library_millions * count_factors
     else:
-        reference = _track_field(records, "anchor_reference", purpose=purpose)
+        reference = _track_field(records, "housekeeping_median_stored", purpose=purpose)
         if exposure == "anchor_minus_background":
-            reference = reference - _track_field(records, "background", purpose=purpose)
+            reference = reference - _track_field(records, "background_median_stored", purpose=purpose)
         exposure_counts = reference * count_factors
 
     bad = np.flatnonzero(~(np.isfinite(exposure_counts) & (exposure_counts > 0)))

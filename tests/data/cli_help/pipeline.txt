@@ -5,7 +5,8 @@
                                                                                                     
 ╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
 │ *    configfile      PATH     Workflow YAML config [required]                                    │
-│      stage           [STAGE]  Stage to run: train, parameter-sweep, attribution, or design.      │
+│      stage           [STAGE]  Stage to run: train, diffusion, parameter-sweep, attribution, or   │
+│                               design.                                                            │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
 │ --cores           -c      INTEGER RANGE [x>=1]  Local execution cores. [default: 1]              │

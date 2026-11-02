@@ -13,6 +13,15 @@ Pipeline, matching :func:`regulonado.dataset.build.transform_signal`'s anchor-un
    units — replicates are averaged before any log).
 4. :func:`target_specificity_score` — log2 anchor units, target group vs. a quantile/top-k
    reduction over every other group.
+5. :func:`noise_units` + :func:`specificity_states` — the call: a region is ``specific`` when
+   every target track is clearly above its own noise, no reference track is, and the target
+   group beats the strongest reference group by ``min_specificity_log2``.
+
+Two units, two jobs. *Detection* is judged in **noise units**, against each track's own
+background (0 = background median, 1 = background p99, the noise ceiling) — no promoter
+yardstick, since enhancer signal is routinely far below a housekeeping promoter.
+*Comparison* across cell types is in **anchor units** (0 = background median, 1 =
+housekeeping-TSS median), the only scale on which different tracks are commensurable.
 """
 
 from __future__ import annotations
@@ -32,7 +41,13 @@ __all__ = [
     "to_anchor_units",
     "group_mean",
     "target_specificity_score",
+    "noise_units",
+    "specificity_states",
+    "SPECIFICITY_STATES",
 ]
+
+#: Possible outputs of :func:`specificity_states`, in the order they are checked.
+SPECIFICITY_STATES = ("target_not_detected", "shared", "specific")
 
 
 @dataclass(frozen=True)
@@ -110,7 +125,7 @@ def group_index_from_records(
     *,
     key: str = "group",
     assay_classes: set[str] | None = None,
-    quality: set[str] | None = None,
+    qc_tier: set[str] | None = None,
 ) -> tuple[np.ndarray, list[str]]:
     """Map track-table ``records`` to a per-track group index, filtering as requested.
 
@@ -122,7 +137,7 @@ def group_index_from_records(
 
     - ``record[key]`` is missing/``None``, or
     - ``assay_classes`` is given and ``record.get("assay_class")`` is not in it, or
-    - ``quality`` is given and ``record.get("quality")`` is not in it.
+    - ``qc_tier`` is given and ``record.get("qc_tier")`` is not in it.
 
     Group names are the distinct, non-excluded ``record[key]`` values, sorted alphabetically
     (stable and independent of track order) — this is the order used everywhere else in this
@@ -138,8 +153,8 @@ def group_index_from_records(
         ok = value is not None
         if ok and assay_classes is not None:
             ok = record.get("assay_class") in assay_classes
-        if ok and quality is not None:
-            ok = record.get("quality") in quality
+        if ok and qc_tier is not None:
+            ok = record.get("qc_tier") in qc_tier
         raw_keys.append(value)
         keep.append(ok)
         if ok:
@@ -307,3 +322,54 @@ def target_specificity_score(
         target_rank=target_rank.astype(np.int64),
         strongest_reference=strongest_reference,
     )
+
+
+def noise_units(
+    signal: np.ndarray, *, background_median: np.ndarray, background_p99: np.ndarray
+) -> np.ndarray:
+    """Stored-units ``signal (R, T)`` -> noise units: 0 = background median, 1 = noise ceiling.
+
+    ``background_median``/``background_p99`` are per-track ``(T,)``, measured with the same
+    statistic as ``signal`` (``normalization.anchor_scale_factors``). Not clipped: a value
+    below 0 is a region quieter than typical background.
+    """
+    signal = np.asarray(signal, dtype=np.float64)
+    median = np.asarray(background_median, dtype=np.float64)
+    spread = np.asarray(background_p99, dtype=np.float64) - median
+    if np.any(~np.isfinite(spread)) or np.any(spread <= 0):
+        raise ValueError("background_p99 must exceed background_median for every track")
+    return (signal - median) / spread
+
+
+def specificity_states(
+    specificity_log2: np.ndarray,
+    target_noise_units: np.ndarray,
+    *,
+    reference_noise_units: np.ndarray | None = None,
+    min_target_noise_units: float = 3.0,
+    min_specificity_log2: float = 1.0,
+    max_reference_noise_units: float = np.inf,
+) -> np.ndarray:
+    """Call each region ``target_not_detected``, ``shared`` or ``specific``.
+
+    ``target_noise_units`` is ``(R, T_target)`` (:func:`noise_units` over the target tracks
+    only). Every target track must reach ``min_target_noise_units`` — the weakest track
+    decides, so one replicate cannot carry the call. A detected region is ``specific`` when
+    ``specificity_log2`` (:attr:`TargetSpecificityResult.score`) reaches
+    ``min_specificity_log2`` — 1.0 means at least 2x the strongest reference group when the
+    score was reduced with ``quantile=1.0`` — and no reference track reaches
+    ``max_reference_noise_units``.
+
+    ``reference_noise_units`` is ``(R, T_reference)``. The veto is per track, in each
+    track's own noise units, because anchor units compress a track whose housekeeping TSSs
+    sit far above its enhancers and replicate means dilute a single clear replicate: a
+    reference can be plainly marked yet still lose the anchor-unit contrast. ``None`` (or
+    the default ``inf``) skips the veto.
+    """
+    weakest = np.min(np.asarray(target_noise_units, dtype=np.float64), axis=1)
+    detected = weakest >= min_target_noise_units
+    specific = np.asarray(specificity_log2) >= min_specificity_log2
+    if reference_noise_units is not None:
+        strongest = np.max(np.asarray(reference_noise_units, dtype=np.float64), axis=1)
+        specific &= strongest < max_reference_noise_units
+    return np.select([~detected, ~specific], list(SPECIFICITY_STATES[:2]), SPECIFICITY_STATES[2])

@@ -275,6 +275,10 @@ def load_model_for_inference(
     records = list(metadata.get("final_track_records") or [])
     if not records:
         raise ValueError(f"No 'final_track_records' in dataset metadata under {dataset_dir}")
+    from regulonado.tracks_table import reject_renamed_fields
+
+    for record in records:
+        reject_renamed_fields(record, source=f"dataset metadata under {dataset_dir}")
 
     # Keep pretrained_name so from_pretrained builds the exact architecture used during training
     # (e.g. flash-attention key layout for flashzoi checkpoints). The pretrained weights are
