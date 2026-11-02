@@ -5,7 +5,8 @@ if DIFFUSION:
     DIFFUSION_DIR = RESULTS / 'diffusion'
     DIFFUSION_DATASET = Path(DIFFUSION.dataset_dir) if DIFFUSION.dataset_dir else RESULTS / 'region_counts' / 'dataset'
     DIFFUSION_ENCODER_RUN = (phase_run_dir(DIFFUSION.encoder_run, final_phase(DIFFUSION.encoder_run))
-                             if DIFFUSION.encoder_run else None)
+                             if DIFFUSION.encoder_run else Path(DIFFUSION.encoder_run_dir)
+                             if DIFFUSION.encoder_run_dir else None)
     DIFFUSION_ENCODER_INPUTS = ([str(DIFFUSION_ENCODER_RUN / 'trainer_state.json')]
         if DIFFUSION_ENCODER_RUN else
         [str(Path(DIFFUSION.training.encoder_checkpoint) / name) for name in ['config.json', 'model.safetensors']]

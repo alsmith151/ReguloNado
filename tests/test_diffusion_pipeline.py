@@ -123,7 +123,8 @@ def test_resume_matches_uninterrupted_training(tmp_path):
         torch.testing.assert_close(a["model"][key], b["model"][key], rtol=0, atol=0)
 
 
-def test_workflow_diffusion_dryrun(tmp_path):
+@pytest.mark.parametrize("encoder_phase", [False, True])
+def test_workflow_diffusion_dryrun(tmp_path, encoder_phase):
     import os
     import subprocess
     import sys
@@ -137,6 +138,13 @@ def test_workflow_diffusion_dryrun(tmp_path):
         (source / f"{name}.parquet").touch()
     fasta = tmp_path / "ref.fa"
     fasta.touch()
+    phase = tmp_path / "completed_encoder" / "target"
+    phase.mkdir(parents=True)
+    (phase / "trainer_state.json").write_text("{}")
+    encoder = {"encoder_run_dir": str(phase)} if encoder_phase else {}
+    training = {"activity_columns": ["target_activity"], "device": "cuda"}
+    if encoder_phase:
+        training["architecture"] = "alphagenome_encoder"
     config = tmp_path / "config.yaml"
     config.write_text(
         yaml.safe_dump(
@@ -146,7 +154,8 @@ def test_workflow_diffusion_dryrun(tmp_path):
                 qc={"checks": []},
                 diffusion={
                     "dataset_dir": str(source),
-                    "training": {"activity_columns": ["target_activity"], "device": "cuda"},
+                    "training": training,
+                    **encoder,
                 },
             )
         )
@@ -171,6 +180,10 @@ def test_workflow_diffusion_dryrun(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "diffusion_train" in result.stdout
     assert "generate fit" in result.stdout
+    if encoder_phase:
+        assert "--encoder-run-dir" in result.stdout
+        assert str(phase / "trainer_state.json") in result.stdout
+        assert "train_phase" not in result.stdout
 
 
 def test_pipeline_wandb_payload_excludes_data_and_paths(tmp_path, monkeypatch):
@@ -232,3 +245,53 @@ def test_pipeline_wandb_payload_excludes_data_and_paths(tmp_path, monkeypatch):
     assert "chr8" not in json.dumps(safe)
     assert payload["metrics"]["validation_loss"] == 1.4
     assert payload["finished"]
+
+
+@pytest.mark.parametrize("export", ["final", "best", "latest"])
+def test_completed_encoder_phase_resolves_generated_checkpoint(tmp_path, monkeypatch, export):
+    import regulonado.design.diffusion as diffusion
+    from regulonado.design.diffusion_pipeline import fit_pipeline
+
+    phase = tmp_path / "encoder" / "target"
+    phase.mkdir(parents=True)
+    first, latest = phase / "checkpoint-10", phase / "checkpoint-20"
+    first.mkdir()
+    latest.mkdir()
+    state = {"best_model_checkpoint": str(first)} if export != "latest" else {}
+    (phase / "trainer_state.json").write_text(json.dumps(state))
+    if export == "final":
+        (phase / "model.safetensors").touch()
+    expected = phase if export == "final" else first if export == "best" else latest
+    params = tmp_path / "settings.json"
+    params.write_text(
+        json.dumps(
+            {
+                "encoder_run_dir": str(phase),
+                "training": {
+                    "architecture": "alphagenome_encoder",
+                    "activity_columns": ["target_activity"],
+                },
+            }
+        )
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"chromosomes": {"validation": ["chr8"], "test": ["chr9"]}}))
+
+    def train(table, out, config, **kwargs):
+        assert config.encoder_checkpoint == str(expected)
+        return out / "best.pt"
+
+    monkeypatch.setattr(diffusion, "train_diffusion", train)
+    fit_pipeline(params, tmp_path / "table.parquet", manifest, tmp_path / "out")
+
+
+def test_encoder_sources_are_exclusive():
+    with pytest.raises(ValueError, match="Choose one"):
+        DiffusionStageConfig(
+            encoder_run_dir="phase",
+            training={
+                "architecture": "alphagenome_encoder",
+                "encoder_checkpoint": "weights",
+                "activity_columns": ["target_activity"],
+            },
+        )

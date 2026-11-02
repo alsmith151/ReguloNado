@@ -1010,6 +1010,10 @@ class DiffusionStageConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     dataset_dir: str | None = None
     encoder_run: str | None = None
+    encoder_run_dir: str | None = Field(
+        default=None,
+        description="Completed encoder phase directory; resolve its checkpoint at runtime.",
+    )
     specificity_regions: str | None = None
     priority_sampling_weight: float = Field(default=1.0, ge=1, allow_inf_nan=False)
     priority_views: int = Field(default=1, ge=1)
@@ -1049,14 +1053,18 @@ class DiffusionStageConfig(BaseModel):
             raise ValueError("diffusion.core_length exceeds training.max_length")
         if "target_specificity" in self.training.activity_columns and not self.specificity_regions:
             raise ValueError("target_specificity needs diffusion.specificity_regions")
-        if self.encoder_run and self.training.encoder_checkpoint:
-            raise ValueError("Choose encoder_run or training.encoder_checkpoint, not both")
+        sources = [self.encoder_run, self.encoder_run_dir, self.training.encoder_checkpoint]
+        if sum(bool(source) for source in sources) > 1:
+            raise ValueError(
+                "Choose one of encoder_run, encoder_run_dir, training.encoder_checkpoint"
+            )
         if self.training.architecture == "alphagenome_encoder":
-            if not (self.encoder_run or self.training.encoder_checkpoint):
+            if not any(sources):
                 raise ValueError(
-                    "Encoder diffusion needs encoder_run or training.encoder_checkpoint"
+                    "Encoder diffusion needs encoder_run, encoder_run_dir "
+                    "or training.encoder_checkpoint"
                 )
-        elif self.encoder_run or self.training.encoder_checkpoint:
+        elif any(sources):
             raise ValueError("Encoder source is only used by alphagenome_encoder diffusion")
         return self
 

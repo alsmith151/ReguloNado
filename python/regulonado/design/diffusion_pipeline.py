@@ -18,6 +18,7 @@ def fit_pipeline(params, table, manifest, out, encoder_run_dir=None):
         heldout_chromosomes=metadata["chromosomes"]["test"],
         sampling_weight_column="sampling_weight",
     )
+    encoder_run_dir = encoder_run_dir or stage.encoder_run_dir
     if encoder_run_dir:
         from regulonado.workflow.scripts.resolve_checkpoint import resolve_checkpoint
 

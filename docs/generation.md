@@ -209,3 +209,10 @@ plateau learning-rate schedule accommodate small improvements in flat diffusion 
 Optional W&B logging sends scalar losses, diagnostics, aggregate counts and safe
 training settings only. It does not upload sequence tables, coordinates, model files,
 code or artifacts. Its run URL is saved in `model/wandb.json`.
+
+For a completed encoder from a previous pipeline, set `diffusion.encoder_run_dir`
+to its phase directory (for example `results/previous/train/encoder/target`)
+and omit `training.encoder_checkpoint`. The workflow depends on that phase's
+`trainer_state.json` and resolves the generated checkpoint at runtime, preferring
+the final exported model, then the recorded best checkpoint, then the highest
+numbered checkpoint directory. This does not schedule another encoder training run.

@@ -914,6 +914,14 @@ $defs:
         - type: 'null'
         default: null
         title: Encoder Run
+      encoder_run_dir:
+        anyOf:
+        - type: string
+        - type: 'null'
+        default: null
+        description: Completed encoder phase directory; resolve its checkpoint at
+          runtime.
+        title: Encoder Run Dir
       specificity_regions:
         anyOf:
         - type: string
