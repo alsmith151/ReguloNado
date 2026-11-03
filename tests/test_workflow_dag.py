@@ -486,6 +486,8 @@ def test_selective_activation_design_flags_reach_pipeline_command(tmp_path, meth
     generator_settings = (
         f"        diffusion_checkpoint: {denoiser}\n"
         "        diffusion_activities: {HL60_activity: 2.4}\n"
+        "        diffusion_mode: edit\n"
+        "        diffusion_mask_fraction: 0.4\n"
         if method == "diffusion"
         else "        gradient_learning_rate: 0.2\n"
         if method == "gradient"
@@ -592,6 +594,8 @@ design:
     if method == "diffusion":
         assert str(denoiser) in output
         assert '"HL60_activity": 2.4' in output
+        assert '"diffusion_mode": "edit"' in output
+        assert '"diffusion_mask_fraction": 0.4' in output
     if method == "gradient":
         assert '"gradient_learning_rate": 0.2' in output
     assert "--params" in output

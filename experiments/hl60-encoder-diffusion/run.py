@@ -94,6 +94,7 @@ def prepare(out, baseline):
         candidates=str(out / "candidates.bed"),
         intervals=str(out / "anchors.bed"),
         out_dir=str(out / "designs/diffusion"),
+        diffusion_mode="de_novo",
         diffusion_checkpoint=str(out / "mdlm/best.pt"),
         diffusion_activities=profiles["q75"],
     )

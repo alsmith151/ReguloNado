@@ -242,6 +242,7 @@ def configs(args, out):
             settings.update(rounds=50, gradient_learning_rate=0.1)
         else:
             settings.update(
+                diffusion_mode="de_novo",
                 diffusion_checkpoint=str(out / "mdlm/best.pt"),
                 diffusion_samples=32,
                 diffusion_steps=64,
@@ -283,9 +284,10 @@ def design(args, out):
             logging.info("DESIGN %s: starting all 20 test cores", method)
             counts.update(calls=0, sequences=0, differentiable_sequences=0)
             started = time.perf_counter()
-            runner.run_design(
-                DesignConfig.model_validate(yaml.safe_load((out / f"{method}.yaml").read_text()))
-            )
+            payload = yaml.safe_load((out / f"{method}.yaml").read_text())
+            if method == "diffusion":
+                payload.setdefault("diffusion_mode", "de_novo")
+            runner.run_design(DesignConfig.model_validate(payload))
             performance[method] = dict(seconds=time.perf_counter() - started, **counts)
             save_json(marker, performance[method])
             logging.info("DESIGN %s complete: %s", method, performance[method])
@@ -406,7 +408,15 @@ def evaluate(args, out, oracle=None):
         for level, profile in profiles.items():
             values, known = condition_vector(metadata, profile)
             sequences = sample(
-                model, values, known, length=200, count=32, steps=64, guidance=1.5, seed=201
+                model,
+                values,
+                known,
+                mode="de_novo",
+                length=200,
+                count=32,
+                steps=64,
+                guidance=1.5,
+                seed=201,
             )
             for region in regions.loc[regions.split.eq("test")].itertuples():
                 window = window_for_interval(
@@ -551,9 +561,7 @@ def main():
     parser.add_argument(
         "--stage", choices=["all", "prepare", "train", "design", "evaluate"], default="all"
     )
-    parser.add_argument(
-        "--fasta", type=Path, default=Path("reference/hg38.fa")
-    )
+    parser.add_argument("--fasta", type=Path, default=Path("reference/hg38.fa"))
     parser.add_argument(
         "--regions",
         type=Path,

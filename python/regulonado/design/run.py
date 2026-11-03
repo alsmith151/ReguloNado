@@ -301,6 +301,8 @@ def _dispatch_search(
     run_seed: int,
     candidate_index: int,
     on_round: Callable[[dict], None],
+    journal=None,
+    on_proposal=None,
 ) -> "DesignState":
     from regulonado.design.search import AdaLeadConfig, adalead, ism_greedy
 
@@ -356,6 +358,10 @@ def _dispatch_search(
             rng=rng,
             on_round=on_round,
             device=config.device or "auto",
+            mode=config.diffusion_mode,
+            mask_fraction=config.diffusion_mask_fraction,
+            journal=journal,
+            on_proposal=on_proposal,
         )
     if method != "adalead":
         raise ValueError(f"Unknown design method: {method}")
@@ -384,8 +390,7 @@ def _make_on_round(
         if wandb_run is None:
             return
         wandb_history.append(dict(entry))
-        table = _trajectory_table(wandb_module, wandb_history)
-        scalars = {k: v for k, v in entry.items() if k not in ("positions", "sequence")}
+        scalars = {k: v for k, v in entry.items() if isinstance(v, (int, float, bool))}
         scalars.update(
             {
                 f"track/{name}": entry[f"track_{index}"]
@@ -393,7 +398,11 @@ def _make_on_round(
                 if f"track_{index}" in entry
             }
         )
-        wandb_run.log({**scalars, "candidate_results": table}, step=entry["round"])
+        try:
+            table = _trajectory_table(wandb_module, wandb_history)
+            wandb_run.log({**scalars, "candidate_results": table})
+        except Exception as exc:
+            logger.warning("W&B progress upload failed; local results are retained: %s", exc)
 
     return _on_round
 
@@ -418,6 +427,17 @@ def _start_wandb_run(
             "gain_transform": config.gain_transform,
             "gain_pseudocount": config.gain_pseudocount,
             "rounds": config.rounds,
+            **(
+                {
+                    "diffusion_mode": config.diffusion_mode,
+                    "diffusion_mask_fraction": config.diffusion_mask_fraction,
+                    "diffusion_samples": config.diffusion_samples,
+                    "diffusion_steps": config.diffusion_steps,
+                    "diffusion_guidance": config.diffusion_guidance,
+                }
+                if method == "diffusion"
+                else {}
+            ),
             "target": target.target,
             "group_by": target.group_by,
             "wandb_group": config.wandb_group or target.target,
@@ -447,7 +467,7 @@ def _finish_wandb_run(
         wandb_run.summary["holdout_offtarget_boost"] = float(holdout_result.offtarget_boost[0])
     # Keep the final complete snapshot under a stable key as well.
     table = _trajectory_table(wandb_module, state.history)
-    wandb_run.log({"trajectory": table, "candidate_results": table}, step=len(state.history) - 1)
+    wandb_run.log({"trajectory": table, "candidate_results": table})
     wandb_run.finish()
 
 
@@ -541,13 +561,90 @@ def _score_one_candidate(
     if _needs_reference(config):
         energy_fn.set_reference(context[None])
 
-    wandb_run = (
-        _start_wandb_run(wandb_module, config, seed, method, target) if wandb_module else None
-    )
+    journal = None
+    if method == "diffusion":
+        # Reuse identical full-context scores, including the final selection rescore.
+        raw_energy_fn = energy_fn
+        score_cache = {}
+
+        def cached_energy(batch):
+            if len(batch) != 1:
+                return raw_energy_fn(batch)
+            key = np.ascontiguousarray(batch).tobytes()
+            if key not in score_cache:
+                score_cache[key] = raw_energy_fn(batch)
+            return score_cache[key]
+
+        energy_fn = cached_energy
+        from regulonado.design.provenance import ProposalJournal, checkpoint_identity
+        from regulonado.genomics import decode
+
+        journal = ProposalJournal(
+            Path(config.out_dir) / "provenance",
+            parent=decode(context[:, seed.editable]),
+            metadata=dict(
+                candidate=seed.name,
+                candidate_index=candidate_index,
+                context_start=seed.window.ctx_start,
+                context_end=seed.window.ctx_end,
+                editable_start=seed.editable.start,
+                editable_stop=seed.editable.stop,
+                conditions=config.diffusion_activities,
+                checkpoint=str(config.diffusion_checkpoint),
+                checkpoint_id=checkpoint_identity(config.diffusion_checkpoint),
+                oracle_checkpoints=list(config.checkpoint_dirs or []),
+                target_group=target.target,
+                chrom=seed.chrom,
+                start=seed.cand_start,
+                end=seed.cand_end,
+                run_seed=run_seed,
+                requested_proposals=config.diffusion_samples,
+                steps=config.diffusion_steps,
+                guidance=config.diffusion_guidance,
+            ),
+        )
+    if journal:
+        journal._json("design_settings.json", config.model_dump(mode="json"))
+    wandb_run = None
+    if config.wandb and wandb_module is None and journal:
+        journal._append(
+            "upload_errors.jsonl", {"error": "W&B package unavailable", "stage": "initialisation"}
+        )
+    if wandb_module:
+        try:
+            wandb_run = _start_wandb_run(wandb_module, config, seed, method, target)
+        except Exception as exc:
+            logger.warning("W&B initialisation failed; continuing locally: %s", exc)
+            if journal:
+                journal._append(
+                    "upload_errors.jsonl", {"error": str(exc), "stage": "initialisation"}
+                )
     on_round = _make_on_round(seed.name, wandb_run, [], ensemble, wandb_module)
-    state = _dispatch_search(
-        config, method, energy_fn, seed, context, ism_hits, run_seed, candidate_index, on_round
-    )
+    search_complete = False
+    try:
+        state = _dispatch_search(
+            config,
+            method,
+            energy_fn,
+            seed,
+            context,
+            ism_hits,
+            run_seed,
+            candidate_index,
+            on_round,
+            journal=journal,
+            on_proposal=lambda item: item.upload(wandb_module, wandb_run),
+        )
+        search_complete = True
+    finally:
+        if journal:
+            journal.upload(wandb_module, wandb_run, final=True)
+        if not search_complete and wandb_run is not None:
+            try:
+                wandb_run.finish(exit_code=1)
+            except Exception as exc:
+                logger.warning("W&B error finalisation failed: %s", exc)
+
     final_result = energy_fn(state.context[None])
 
     # Always record portability on the final edited insert.  Under genomic mode this is exactly
@@ -578,9 +675,14 @@ def _score_one_candidate(
         f"{state.energy:.4f}{holdout_suffix}"
     )
     if wandb_run is not None:
-        _finish_wandb_run(
-            wandb_module, wandb_run, state, baseline_energy, final_result, holdout_result
-        )
+        try:
+            _finish_wandb_run(
+                wandb_module, wandb_run, state, baseline_energy, final_result, holdout_result
+            )
+        except Exception as exc:
+            logger.warning("W&B finalisation failed; local results are retained: %s", exc)
+            if journal:
+                journal._append("upload_errors.jsonl", {"error": str(exc), "stage": "finalisation"})
 
     record = DesignRecord(
         seed=seed,
@@ -601,6 +703,7 @@ def _score_one_candidate(
         "window_end": seed.window.ctx_end,
         "fold_label": seed.fold_label,
     }
+    report_entry.update(state.provenance)
     return record, report_entry
 
 
@@ -769,12 +872,11 @@ def run_design(config: "DesignConfig") -> DesignResult:
     if config.wandb:
         try:
             import wandb as wandb_module
-        except ImportError as exc:
-            raise ValueError(
-                "design.wandb=true requires the 'wandb' package (part of regulonado[train])."
-            ) from exc
+        except ImportError:
+            logger.warning("W&B package unavailable; keeping full sequence records locally.")
 
     out_dir = Path(config.out_dir)
+    (out_dir / "provenance").mkdir(parents=True, exist_ok=True)
     records, seed_report = _process_candidates(
         config,
         seeds,
@@ -794,6 +896,19 @@ def run_design(config: "DesignConfig") -> DesignResult:
         config, intervals, method, target, groups, run_seed, seed_report, ensemble
     )
     write_designs(out_dir, records, run_info=run_info)
+    import json
+
+    (out_dir / "provenance.complete.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "journals": sorted(
+                    path.name for path in (out_dir / "provenance").iterdir() if path.is_dir()
+                ),
+            },
+            indent=2,
+        )
+    )
     return DesignResult(
         out_dir=out_dir, target=target.target, method=method, n_candidates=len(records)
     )

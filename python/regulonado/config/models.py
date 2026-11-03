@@ -638,6 +638,8 @@ class DesignConfig(BaseModel):
     diffusion_samples: int = Field(default=32, ge=1)
     diffusion_steps: int = Field(default=64, ge=1)
     diffusion_guidance: float = Field(default=1.0, ge=0)
+    diffusion_mode: Literal["edit", "de_novo"] = "edit"
+    diffusion_mask_fraction: float = Field(default=0.25, gt=0, lt=1, allow_inf_nan=False)
 
     rounds: int = Field(default=20, ge=1)
     pad: int = Field(default=0, ge=0)
@@ -748,6 +750,8 @@ class DesignConfig(BaseModel):
             "diffusion_samples",
             "diffusion_steps",
             "diffusion_guidance",
+            "diffusion_mode",
+            "diffusion_mask_fraction",
         }
         set_fields = self.model_fields_set
         for target in self.targets:

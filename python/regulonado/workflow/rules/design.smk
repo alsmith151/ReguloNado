@@ -137,6 +137,7 @@ if DESIGN:
         "energy", "flank_mode", "flank_keep", "flank_keep_bp",
         "gradient_learning_rate", "gradient_temperature", "diffusion_checkpoint",
         "diffusion_activities", "diffusion_samples", "diffusion_steps", "diffusion_guidance",
+        "diffusion_mode", "diffusion_mask_fraction",
     }
     # DesignConfig rejects an ISM-only/AdaLead-only key that doesn't match a target's own
     # method (regulonado/config/models.py:_method_specific_settings_are_consistent). The
@@ -168,7 +169,8 @@ if DESIGN:
             irrelevant = irrelevant | {"gradient_learning_rate", "gradient_temperature"}
         if method != "diffusion":
             irrelevant = irrelevant | {"diffusion_checkpoint", "diffusion_activities",
-                                       "diffusion_samples", "diffusion_steps", "diffusion_guidance"}
+                                       "diffusion_samples", "diffusion_steps", "diffusion_guidance",
+                                       "diffusion_mode", "diffusion_mask_fraction"}
         shared_keys = _DESIGN_SETTINGS_KEYS - irrelevant
         merged = {k: v for k, v in DESIGN.items() if k in shared_keys}
         target_settings = dict(target.get("settings", {}))
@@ -263,6 +265,9 @@ if DESIGN:
             trajectory=str(DESIGN_DIR / "{target}" / "shards" / "{shard}" / "trajectory.tsv"),
             edits=str(DESIGN_DIR / "{target}" / "shards" / "{shard}" / "edits.tsv"),
             run_json=str(DESIGN_DIR / "{target}" / "shards" / "{shard}" / "run.json"),
+            # Journals are deliberately not declared outputs: Snakemake removes
+            # incomplete outputs on failure, but recovery records must survive.
+            provenance_manifest=str(DESIGN_DIR / "{target}" / "shards" / "{shard}" / "provenance.complete.json"),
         resources:
             gpu=1,
             # Doubles on each retry (see `retries` in the SLURM profiles) so a job that dies
@@ -317,6 +322,10 @@ if DESIGN:
 
     rule merge_designs:
         input:
+            provenance=lambda w: expand(
+                str(DESIGN_DIR / w.target / "shards" / "{shard}" / "provenance.complete.json"),
+                shard=_design_shard_names(w),
+            ),
             tsv=lambda w: expand(
                 str(DESIGN_DIR / w.target / "shards" / "{shard}" / "designs.tsv"),
                 shard=_design_shard_names(w),
@@ -343,6 +352,7 @@ if DESIGN:
             bed=str(DESIGN_DIR / "{target}" / "designs.bed"),
             trajectory=str(DESIGN_DIR / "{target}" / "trajectory.tsv"),
             edits=str(DESIGN_DIR / "{target}" / "edits.tsv"),
+            provenance=directory(str(DESIGN_DIR / "{target}" / "provenance")),
         resources:
             mem_mb=scaled_mem_mb(16000),
         wildcard_constraints:
@@ -353,3 +363,6 @@ if DESIGN:
             _merge_tsvs(input.tsv, output.tsv)
             _merge_tsvs(input.trajectory, output.trajectory)
             _merge_tsvs(input.edits, output.edits)
+            from regulonado.design.provenance import merge_provenance
+            merge_provenance([Path(path).parent / "provenance" for path in input.provenance],
+                             output.provenance)

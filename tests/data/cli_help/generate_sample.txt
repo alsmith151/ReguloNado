@@ -1,20 +1,28 @@
                                                                                                     
  Usage: root generate sample [OPTIONS]                                                              
                                                                                                     
+ Sample edited enhancers by default, or explicitly generate de novo cores.                          
+                                                                                                    
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
-│ *  --checkpoint          PATH                  [required]                                        │
-│ *  --activities          TEXT                  JSON numeric profile, e.g. {"HL60": 2.5, "K562":  │
-│                                                0.2}.                                             │
-│                                                [required]                                        │
-│ *  --length              INTEGER RANGE [x>=1]  [required]                                        │
-│ *  --out                 PATH                  Output directory: FASTA, TSV, provenance JSON.    │
-│                                                [required]                                        │
-│    --count               INTEGER RANGE [x>=1]  [default: 32]                                     │
-│    --steps               INTEGER RANGE [x>=1]  [default: 64]                                     │
-│    --guidance            FLOAT RANGE [x>=0]    [default: 1.0]                                    │
-│    --seed                INTEGER RANGE [x>=0]  [default: 0]                                      │
-│    --device              TEXT                  [default: auto]                                   │
-│    --min-distance        INTEGER RANGE [x>=0]  [default: 0]                                      │
-│    --help                                      Show this message and exit.                       │
+│ *  --checkpoint            PATH                  [required]                                      │
+│ *  --activities            TEXT                  JSON numeric activity profile. [required]       │
+│ *  --out                   PATH                  FASTA, proposal records and provenance          │
+│                                                  directory.                                      │
+│                                                  [required]                                      │
+│    --length                INTEGER RANGE [x>=1]                                                  │
+│    --template-fasta        PATH                  Single-record A/C/G/T FASTA required for edit   │
+│                                                  mode.                                           │
+│    --mode                  TEXT                  edit (default) or de_novo. [default: edit]      │
+│    --mask-fraction         FLOAT                 Fraction masked per edit proposal.              │
+│                                                  [default: 0.25]                                 │
+│    --count                 INTEGER RANGE [x>=1]  [default: 32]                                   │
+│    --steps                 INTEGER RANGE [x>=1]  [default: 64]                                   │
+│    --guidance              FLOAT RANGE [x>=0]    [default: 1.0]                                  │
+│    --seed                  INTEGER RANGE [x>=0]  [default: 0]                                    │
+│    --device                TEXT                  [default: auto]                                 │
+│    --min-distance          INTEGER RANGE [x>=0]  [default: 0]                                    │
+│    --wandb-project         TEXT                  Upload full sequence records to this project.   │
+│    --wandb-entity          TEXT                                                                  │
+│    --help                                        Show this message and exit.                     │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 

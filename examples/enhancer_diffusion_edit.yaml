@@ -1,0 +1,24 @@
+# Supply your existing oracle checkpoint, genomic inputs and trained diffusion model.
+candidates: /path/to/enhancer_cores.bed
+fasta: /path/to/hg38.fa
+intervals: /path/to/model_regions.parquet
+checkpoint_dirs: [/path/to/oracle_checkpoint]
+model_kind: region_counts
+out_dir: results/diffusion-edits
+energy: contrast
+objective: selective-activation
+offtarget_boost_weight: 2.0
+fold_mode: resident
+batch_size: 8
+seed: 17
+diffusion_checkpoint: /path/to/diffusion/best.pt
+diffusion_mode: edit
+diffusion_mask_fraction: 0.25
+diffusion_activities: {target_activity: 2.5, offtarget_mean: 0.3, offtarget_max: 0.6}
+diffusion_samples: 32
+diffusion_steps: 64
+diffusion_guidance: 1.0
+wandb: true
+wandb_project: regulonado-design
+targets:
+  - {name: hl60_diffusion, target: HL-60, group_by: group, method: diffusion}

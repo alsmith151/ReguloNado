@@ -72,7 +72,7 @@ def test_frozen_encoder_trains_only_decoder_and_roundtrips(tmp_path, monkeypatch
     assert not any(key.startswith("network.backbone.") for key in saved["model"])
     loaded, metadata = load_checkpoint(path, "cpu")
     assert metadata["config"]["encoder_sha256"]
-    assert len(sample(loaded, [1.0], [True], length=8, count=2, steps=2)) == 2
+    assert len(sample(loaded, [1.0], [True], mode="de_novo", length=8, count=2, steps=2)) == 2
     (encoder / "model.safetensors").write_bytes(b"changed source")
     with pytest.raises(ValueError, match="SHA256"):
         load_checkpoint(path, "cpu")

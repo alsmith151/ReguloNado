@@ -35,28 +35,85 @@ def train(
 @generate_app.command("sample")
 def generate(
     checkpoint: Annotated[Path, typer.Option(exists=True)],
-    activities: Annotated[
-        str, typer.Option(help='JSON numeric profile, e.g. {"HL60": 2.5, "K562": 0.2}.')
-    ],
-    length: Annotated[int, typer.Option(min=1)],
-    out: Annotated[Path, typer.Option(help="Output directory: FASTA, TSV, provenance JSON.")],
+    activities: Annotated[str, typer.Option(help="JSON numeric activity profile.")],
+    out: Annotated[Path, typer.Option(help="FASTA, proposal records and provenance directory.")],
+    length: Annotated[int | None, typer.Option(min=1)] = None,
+    template_fasta: Annotated[
+        Path | None,
+        typer.Option(exists=True, help="Single-record A/C/G/T FASTA required for edit mode."),
+    ] = None,
+    mode: Annotated[str, typer.Option(help="edit (default) or de_novo.")] = "edit",
+    mask_fraction: Annotated[float, typer.Option(help="Fraction masked per edit proposal.")] = 0.25,
     count: Annotated[int, typer.Option(min=1)] = 32,
     steps: Annotated[int, typer.Option(min=1)] = 64,
     guidance: Annotated[float, typer.Option(min=0)] = 1.0,
     seed: Annotated[int, typer.Option(min=0)] = 0,
     device: str = "auto",
     min_distance: Annotated[int, typer.Option(min=0)] = 0,
+    wandb_project: Annotated[
+        str | None, typer.Option(help="Upload full sequence records to this project.")
+    ] = None,
+    wandb_entity: str | None = None,
 ):
+    """Sample edited enhancers by default, or explicitly generate de novo cores."""
+    import logging
+    import math
+
     from regulonado.design.diffusion import condition_vector, load_checkpoint, sample
     from regulonado.design.generators import diverse_sequences
+    from regulonado.design.provenance import ProposalJournal, checkpoint_identity
 
     try:
+        if mode not in {"edit", "de_novo"}:
+            raise ValueError("mode must be edit or de_novo")
+        if mode == "edit" and (not math.isfinite(mask_fraction) or not 0 < mask_fraction < 1):
+            raise ValueError("Edit mask_fraction must be finite and strictly between zero and one")
         profile = json.loads(activities)
         if not isinstance(profile, dict):
             raise ValueError("activities must be a JSON object")
+        template = None
+        if template_fasta:
+            from regulonado.design.provenance import read_template
+
+            template = read_template(template_fasta)
+            if length is not None and length != len(template):
+                raise ValueError("Explicit length conflicts with the template FASTA")
+            length = len(template)
+        if mode == "edit" and template is None:
+            raise ValueError(
+                "Edit mode requires --template-fasta; use --mode de_novo for a new core"
+            )
+        if mode == "de_novo" and template is not None:
+            raise ValueError("--template-fasta is only used in edit mode")
+        if length is None:
+            raise ValueError("De novo mode requires --length")
         model, metadata = load_checkpoint(checkpoint, device)
         values, observed = condition_vector(metadata, profile)
-        sequences = sample(
+        journal = ProposalJournal(
+            out / "provenance",
+            parent=template,
+            metadata=dict(
+                checkpoint=str(checkpoint.resolve()),
+                checkpoint_id=checkpoint_identity(checkpoint),
+                conditions=profile,
+                requested_proposals=count,
+                steps=steps,
+                guidance=guidance,
+                random_seed=seed,
+            ),
+        )
+        if template:
+            journal.add(
+                dict(
+                    sequence=template,
+                    mode=mode,
+                    masked_positions=[],
+                    requested_mask_fraction=0.0,
+                    actual_mask_fraction=0.0,
+                ),
+                baseline=True,
+            )
+        proposals = sample(
             model,
             values,
             observed,
@@ -65,39 +122,87 @@ def generate(
             steps=steps,
             guidance=guidance,
             seed=seed,
+            mode=mode,
+            template=template,
+            mask_fraction=mask_fraction,
+            return_records=True,
         )
+        ids = [journal.add(proposal) for proposal in proposals]
+        sequences = [proposal["sequence"] for proposal in proposals]
         selected = diverse_sequences(sequences, count=count, min_distance=min_distance)
     except (ValueError, TypeError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     out.mkdir(parents=True, exist_ok=True)
+    first_id = {}
+    for event_id, sequence in zip(ids, sequences):
+        first_id.setdefault(sequence, event_id)
+    selected_ids = {first_id[sequence] for sequence in selected}
+    for event_id in journal.records:
+        journal.update(event_id, selected=event_id in selected_ids, oracle_scored=False)
     (out / "sequences.fa").write_text(
-        "".join(f">diffusion_{i}\n{s}\n" for i, s in enumerate(selected))
-    )
-    (out / "sequences.tsv").write_text(
-        "name\tsequence\tgc_fraction\n"
-        + "".join(
-            f"diffusion_{i}\t{s}\t{(s.count('G') + s.count('C')) / len(s):.6f}\n"
-            for i, s in enumerate(selected)
+        "".join(
+            f">{first_id[sequence]} "
+            f"sequence_id={journal.records[first_id[sequence]]['sequence_id']}\n{sequence}\n"
+            for sequence in selected
         )
     )
-    (out / "run.json").write_text(
-        json.dumps(
-            dict(
-                checkpoint=str(checkpoint.resolve()),
-                activities=profile,
-                length=length,
-                requested=count,
-                retained=len(selected),
-                steps=steps,
-                guidance=guidance,
-                seed=seed,
-                min_distance=min_distance,
-                activity_columns=metadata["config"]["activity_columns"],
-            ),
-            indent=2,
-        )
+    with (out / "sequences.tsv").open("w") as handle:
+        handle.write("proposal_id\tsequence_id\tsequence\tgc_fraction\n")
+        for sequence in selected:
+            event_id = first_id[sequence]
+            handle.write(
+                f"{event_id}\t{journal.records[event_id]['sequence_id']}\t{sequence}\t"
+                f"{(sequence.count('G') + sequence.count('C')) / len(sequence):.6f}\n"
+            )
+    info = dict(
+        checkpoint=str(checkpoint.resolve()),
+        activities=profile,
+        length=length,
+        requested=count,
+        retained=len(selected),
+        steps=steps,
+        guidance=guidance,
+        seed=seed,
+        mode=mode,
+        mask_fraction=mask_fraction if mode == "edit" else 1.0,
+        min_distance=min_distance,
+        activity_columns=metadata["config"]["activity_columns"],
+        provenance_dir=str(journal.root),
     )
-    typer.echo(f"Generated {len(selected)} unique sequences in {out}")
+    (out / "run.json").write_text(json.dumps(info, indent=2))
+    journal._json(
+        "selection.json",
+        dict(
+            selected_proposal_ids=[first_id[s] for s in selected],
+            oracle_scored=False,
+            selection_method="unique/min_distance",
+        ),
+    )
+    (journal.root / "selection.fa").write_text((out / "sequences.fa").read_text())
+    run = None
+    if wandb_project:
+        try:
+            import wandb
+
+            run = wandb.init(
+                project=wandb_project, entity=wandb_entity, job_type="diffusion-sample", config=info
+            )
+            (journal.root / "wandb.json").write_text(json.dumps({"url": run.url, "id": run.id}))
+            journal.upload(wandb, run, final=True)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "W&B upload failed; local records retained: %s", exc
+            )
+            journal._append("upload_errors.jsonl", {"error": str(exc)})
+        finally:
+            if run is not None:
+                try:
+                    run.finish()
+                except Exception as exc:
+                    journal._append("upload_errors.jsonl", {"error": str(exc)})
+    typer.echo(
+        f"Generated {len(proposals)} proposals; retained {len(selected)} unique sequences in {out}"
+    )
 
 
 @generate_app.command("select")

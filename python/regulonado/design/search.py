@@ -27,6 +27,7 @@ class DesignState:
     editable: slice  # == seed.editable, candidate span in context coordinates
     energy: float
     history: list[dict] = field(default_factory=list)
+    provenance: dict = field(default_factory=dict)
 
 
 def _to_numpy(value) -> np.ndarray:

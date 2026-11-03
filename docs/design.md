@@ -107,8 +107,9 @@ held-out score is the number that decides whether a design is real.
 
 ISM and AdaLead start from the candidate's endogenous sequence and only touch
 its editable span. Gradient optimisation also starts from the endogenous seed;
-diffusion generates the entire editable span from masks. All methods preserve
-the surrounding scoring context.
+diffusion defaults to partial-mask editing of that seed, retaining the original
+unless a proposal improves the objective. Explicit `diffusion_mode: de_novo`
+generates a whole core. All methods preserve the surrounding scoring context.
 
 - **`method: ism`** (default): greedy in-silico mutagenesis. Each round
   scores every alternative base at every editable position and accepts the

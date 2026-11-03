@@ -225,6 +225,7 @@ def write_configs(
             settings.update(rounds=8, gradient_learning_rate=0.5)
         else:
             settings.update(
+                diffusion_mode="de_novo",
                 diffusion_checkpoint=str(out / "mdlm" / "best.pt"),
                 diffusion_activities=activities or {},
                 diffusion_samples=4,
@@ -495,9 +496,10 @@ def main():
     for method in ["ism", "adalead", "gradient", "diffusion"]:
         print(f"Running {method}", flush=True)
         started = time.perf_counter()
-        run_design(
-            DesignConfig.model_validate(yaml.safe_load((out / f"{method}.yaml").read_text()))
-        )
+        payload = yaml.safe_load((out / f"{method}.yaml").read_text())
+        if method == "diffusion":
+            payload.setdefault("diffusion_mode", "de_novo")
+        run_design(DesignConfig.model_validate(payload))
         elapsed[method] = time.perf_counter() - started
     summarize(out, elapsed)
     print(f"Smoke test complete: {out / 'designs'}")

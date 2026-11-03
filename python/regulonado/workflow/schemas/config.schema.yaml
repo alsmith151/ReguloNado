@@ -473,6 +473,19 @@ $defs:
         minimum: 0
         title: Diffusion Guidance
         type: number
+      diffusion_mode:
+        default: edit
+        enum:
+        - edit
+        - de_novo
+        title: Diffusion Mode
+        type: string
+      diffusion_mask_fraction:
+        default: 0.25
+        exclusiveMaximum: 1
+        exclusiveMinimum: 0
+        title: Diffusion Mask Fraction
+        type: number
       rounds:
         default: 20
         minimum: 1

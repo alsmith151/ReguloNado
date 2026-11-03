@@ -123,21 +123,55 @@ def denoising_diagnostics(model, clean, values, observed, *, prefix, seed):
 
 
 @torch.no_grad()
-def sample(model, values, observed, *, length, count=16, steps=64, guidance=1.0, seed=0):
+def sample(
+    model,
+    values,
+    observed,
+    *,
+    length,
+    count=16,
+    steps=64,
+    guidance=1.0,
+    seed=0,
+    mode="edit",
+    template=None,
+    mask_fraction=0.25,
+    return_records=False,
+):
     """Absorbing-mask reverse process. Revealed bases are copied exactly."""
     if not 1 <= length <= model.config.max_length or count < 1 or steps < 1:
         raise ValueError("Invalid generation length, count, or steps")
     if not np.isfinite(guidance) or guidance < 0:
         raise ValueError("guidance must be finite and nonnegative")
+    if mode not in {"edit", "de_novo"}:
+        raise ValueError("mode must be edit or de_novo")
+    if mode == "edit":
+        if template is None or len(template) != length or set(template.upper()) - set("ACGT"):
+            raise ValueError("Edit sampling requires an A/C/G/T template matching length")
+        if not np.isfinite(mask_fraction) or not 0 < mask_fraction < 1:
+            raise ValueError("Edit mask_fraction must be finite and strictly between zero and one")
+        template = template.upper()
     device = next(model.parameters()).device
     # CPU RNG provides repeatable draws without requiring MPS generator support.
     generator = torch.Generator().manual_seed(seed)
     values = torch.as_tensor(values, dtype=torch.float32, device=device).expand(count, -1)
     observed = torch.as_tensor(observed, dtype=torch.bool, device=device).expand(count, -1)
     tokens = torch.full((count, length), MASK, dtype=torch.long, device=device)
+    positions = [list(range(length)) for _ in range(count)]
+    fraction = 1.0
+    if mode == "edit":
+        n_masked = max(1, int(np.floor(mask_fraction * length)))
+        fraction = n_masked / length
+        tokens[:] = encode(template).to(device)
+        positions = [
+            sorted(torch.randperm(length, generator=generator)[:n_masked].tolist())
+            for _ in range(count)
+        ]
+        for row, selected in enumerate(positions):
+            tokens[row, selected] = MASK
     model.eval()
     for index in range(steps, 0, -1):
-        times = torch.full((count,), index / steps, device=device)
+        times = torch.full((count,), fraction * index / steps, device=device)
         logits = model(tokens, times, values, observed)
         if guidance != 1:
             null = model(tokens, times, values, torch.zeros_like(observed))
@@ -151,7 +185,21 @@ def sample(model, values, observed, *, length, count=16, steps=64, guidance=1.0,
         # (alpha(s)-alpha(t))/(1-alpha(t)) = (t-s)/t = 1/index.
         reveal = (torch.rand((count, length), generator=generator) < 1 / index).to(device)
         tokens = torch.where(tokens.eq(MASK) & reveal, bases, tokens)
-    return ["".join("ACGT"[base] for base in row) for row in tokens.cpu().tolist()]
+    sequences = ["".join("ACGT"[base] for base in row) for row in tokens.cpu().tolist()]
+    if return_records:
+        return [
+            dict(
+                sequence=sequence,
+                masked_positions=selected,
+                mode=mode,
+                requested_mask_fraction=mask_fraction if mode == "edit" else 1.0,
+                actual_mask_fraction=fraction,
+                random_seed=seed,
+                sample_index=index,
+            )
+            for index, (sequence, selected) in enumerate(zip(sequences, positions))
+        ]
+    return sequences
 
 
 def load_checkpoint(path, device="auto"):

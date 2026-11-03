@@ -50,15 +50,28 @@ def test_numeric_conditioning_and_null_are_distinct():
 
 def test_sampling_complete_and_deterministic():
     model = Denoiser(config())
-    first = sample(model, [0.0, 1.0], [True, True], length=8, count=3, steps=4, seed=5)
-    assert first == sample(model, [0.0, 1.0], [True, True], length=8, count=3, steps=4, seed=5)
+    first = sample(
+        model, [0.0, 1.0], [True, True], mode="de_novo", length=8, count=3, steps=4, seed=5
+    )
+    assert first == sample(
+        model, [0.0, 1.0], [True, True], mode="de_novo", length=8, count=3, steps=4, seed=5
+    )
     assert all(len(s) == 8 and set(s) <= set("ACGT") for s in first)
     assert all(
         len(s) == 8
-        for s in sample(model, [0.0, 0.0], [False, False], length=8, count=2, steps=1, guidance=2)
+        for s in sample(
+            model,
+            [0.0, 0.0],
+            [False, False],
+            mode="de_novo",
+            length=8,
+            count=2,
+            steps=1,
+            guidance=2,
+        )
     )
     with pytest.raises(ValueError):
-        sample(model, [0.0, 0.0], [True, True], length=17)
+        sample(model, [0.0, 0.0], [True, True], mode="de_novo", length=17)
 
 
 def test_loss_ignores_padding_and_unknown_targets():
@@ -93,7 +106,7 @@ def test_training_checkpoint_and_split_normalisation(tmp_path):
     assert observed.tolist() == [True, False]
     with pytest.raises(ValueError, match="Unknown"):
         condition_vector(checkpoint, {"typo": 1})
-    assert len(sample(model, values, observed, length=8, count=1, steps=2)) == 1
+    assert len(sample(model, values, observed, mode="de_novo", length=8, count=1, steps=2)) == 1
     runner = CliRunner()
     output = tmp_path / "generated"
     result = runner.invoke(
@@ -105,6 +118,8 @@ def test_training_checkpoint_and_split_normalisation(tmp_path):
             str(checkpoint_path),
             "--activities",
             '{"target": 3}',
+            "--mode",
+            "de_novo",
             "--length",
             "8",
             "--count",
@@ -151,10 +166,18 @@ def test_diffusion_ranks_completed_samples_and_preserves_flanks(tmp_path, monkey
 
     monkeypatch.setattr(module, "load_checkpoint", lambda *args: (None, {}))
     monkeypatch.setattr(module, "condition_vector", lambda *args: ([0.0], [True]))
-    monkeypatch.setattr(module, "sample", lambda *args, **kwargs: ["CCCC", "AAAA", "AACC"])
+    monkeypatch.setattr(
+        module,
+        "sample",
+        lambda *args, **kwargs: [
+            dict(sequence=s, actual_mask_fraction=1.0) for s in ["CCCC", "AAAA", "AACC"]
+        ],
+    )
     seed = SimpleNamespace(editable=slice(2, 6))
     context = one_hot("CCCCCCCC")
-    state = diffusion_search(toy_energy, seed, context, checkpoint="unused", activities={})
+    state = diffusion_search(
+        toy_energy, seed, context, checkpoint="unused", activities={}, mode="de_novo"
+    )
     assert state.energy == -4
     np.testing.assert_array_equal(state.context, one_hot("CCAAAACC"))
     assert len(state.history) == 4
@@ -194,7 +217,7 @@ def test_revealed_tokens_never_change():
             return super().forward(tokens, *args)
 
     model = Recording(config())
-    sample(model, [0.0, 0.0], [True, True], length=16, count=2, steps=8)
+    sample(model, [0.0, 0.0], [True, True], mode="de_novo", length=16, count=2, steps=8)
 
 
 def test_shared_panel_selection(tmp_path):

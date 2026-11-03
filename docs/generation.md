@@ -2,10 +2,10 @@
 
 ReguloNado supports four complementary design methods: greedy ISM, evolutionary
 AdaLead, gradient optimisation, and numeric-conditioned masked diffusion.
-The diffusion model is a separate learned sequence generator. It generates an
-entire enhancer from masks; it does not perform a greedy mutation walk.
-Existing activity predictors score completed designs and provide the objective
-for the three optimisation methods.
+The diffusion model is a separate learned sequence generator. By default it edits
+an endogenous enhancer through partial masking. Explicit de novo mode generates
+an entire core from masks. Existing activity predictors score the completed
+proposals; their gradients do not guide the diffusion steps.
 
 ## Train a small conditional generator
 
@@ -51,7 +51,7 @@ seed: 17
 regulonado generate train --table enhancers.tsv --params diffusion.yaml --out runs/mdlm
 regulonado generate sample --checkpoint runs/mdlm/best.pt \
   --activities '{"HL60_activity": 2.4, "K562_activity": 0.3}' \
-  --length 200 --count 64 --steps 64 --guidance 1.5 --seed 17 --out generated/
+  --mode de_novo --length 200 --count 64 --steps 64 --guidance 1.5 --seed 17 --out generated/
 ```
 
 The default network has four small bidirectional Transformer layers. Training
@@ -74,23 +74,46 @@ training run rather than resuming an optimiser.
 batch size for constrained laptops. The activity predictors have their own
 hardware requirements, independently of the small denoiser.
 
-Standalone sampling writes `sequences.fa`, `sequences.tsv` (including GC
-fraction), and `run.json`. Samples are deduplicated; `--min-distance` optionally
-filters by Hamming distance. Fewer than the requested count may survive.
+Standalone sampling now defaults to **edit**, requiring a single-record A/C/G/T
+template FASTA; length is inferred. Existing whole-core scripts must explicitly
+request `--mode de_novo` (the examples and experiment runners are updated).
+The same trained checkpoint supports both modes; no retraining is required.
 
-## Score whole generated enhancers in existing genomic contexts
+```bash
+regulonado generate sample --checkpoint runs/mdlm/best.pt \
+  --activities '{"HL60_activity": 2.4, "K562_activity": 0.3}' \
+  --template-fasta endogenous.fa --mask-fraction 0.25 --out edited/ \
+  --wandb-project regulonado-design
+```
+
+Sampling writes `sequences.fa`, `sequences.tsv` and `run.json`. The selected pool
+is deduplicated as before; `--min-distance` optionally filters it. Every generation
+event, including repeats and the unchanged baseline, remains in the provenance
+records. Standalone sampling has no oracle: selection there only applies the
+existing uniqueness/distance filter. Use `regulonado design` for oracle selection.
+
+## Edit enhancers or generate new cores in genomic contexts
 
 Use `regulonado design` with the usual candidate BED, intervals, reference,
 checkpoints, and target. Each candidate supplies the enhancer length and a
-fixed genomic context for scoring. Diffusion replaces the **entire editable
-span**, not just selected seed bases. The best generated enhancer is retained
-even when the endogenous baseline scores better; the baseline remains in the
-trajectory for comparison.
+fixed genomic context for scoring. The default `diffusion_mode: edit` masks 25%
+of core positions per proposal and leaves all other bases fixed. Each proposal
+gets a reproducible random mask; only masked positions can change. The number
+masked is `max(1, floor(fraction * core_length))`, so short cores can have a
+larger actual fraction. Actual substitutions may be fewer than masked bases.
+The reverse process starts at the actual masked fraction rather than full noise.
+
+Edit mode retains the original enhancer unless a proposal improves the objective.
+Set `diffusion_mode: de_novo` to generate an entire core; this mode retains the
+best generated sequence even when the endogenous baseline scores better. Both
+modes preserve genomic flanks and use the same oracle objective.
 
 ```yaml
 # diffusion-design.yaml; supply usual I/O through CLI or this file
 candidates: enhancer_cores.bed
 diffusion_checkpoint: runs/mdlm/best.pt
+diffusion_mode: edit
+diffusion_mask_fraction: 0.25
 diffusion_activities: {HL60_activity: 2.4, K562_activity: 0.3}
 diffusion_samples: 32
 diffusion_steps: 64
@@ -216,3 +239,29 @@ and omit `training.encoder_checkpoint`. The workflow depends on that phase's
 `trainer_state.json` and resolves the generated checkpoint at runtime, preferring
 the final exported model, then the recorded best checkpoint, then the highest
 numbered checkpoint directory. This does not schedule another encoder training run.
+
+## Recoverable sequence provenance
+
+Each diffusion invocation writes a unique directory under `provenance/`, containing
+`proposals.fa`, `proposals.tsv`, append-only `proposals.jsonl`, `provenance.json`,
+and final `selection.fa`/`selection.json`. JSONL snapshots are authoritative after
+an interruption: the last snapshot for each proposal ID is its latest state. All
+completed generations are written before the first oracle evaluation.
+
+Every generation event has a unique proposal ID; SHA-256 of the uppercase core
+provides a stable sequence ID. Repeated DNA shares a sequence ID while preserving
+separate events. Records include the full parent and generated sequences, parent
+identity, requested conditions, checkpoint SHA-256, random seed and sample index,
+mask positions (zero-based within the core), substitutions, and available oracle
+scores. The baseline and rejected proposals remain available. Repeated DNA is
+scored once within the same context/objective; selection records report requested
+proposals, completed proposals and search oracle evaluations. These budgets do
+not imply equal compute across diffusion, ISM and AdaLead.
+
+Design W&B runs upload full proposal tables incrementally and a versioned
+`sequence-design` artifact with all journal files, including the selected FASTA.
+Standalone sampling enables this with `--wandb-project`. Upload errors are logged
+and saved in `upload_errors.jsonl`; local results are preserved. Shard merging
+copies every provenance directory without changing proposal or sequence IDs. The
+workflow tracks a separate completion marker, keeping recovery journals outside
+the outputs Snakemake deletes after a failed job.

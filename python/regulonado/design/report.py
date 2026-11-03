@@ -16,6 +16,7 @@ from regulonado.genomics import decode
 
 __all__ = ["DesignRecord", "write_designs", "hamming_distance"]
 
+
 def hamming_distance(original: np.ndarray, final: np.ndarray, editable: slice) -> int:
     return int(np.any(original[:, editable] != final[:, editable], axis=0).sum())
 
@@ -58,6 +59,11 @@ def _write_fasta(path: Path, records: list[DesignRecord]) -> None:
                 f">{seed.name}_{record.method} {seed.chrom}:{seed.cand_start}-{seed.cand_end} "
                 f"energy={state.energy:.6g} n_edits={n_edits}"
             )
+            if state.provenance:
+                header += (
+                    f" proposal_id={state.provenance['proposal_id']}"
+                    f" sequence_id={state.provenance['sequence_id']}"
+                )
             handle.write(header + "\n")
             handle.write(insert + "\n")
 
@@ -111,6 +117,7 @@ def _write_designs_tsv(path: Path, records: list[DesignRecord]) -> None:
                 else ""
             ),
         }
+        row.update(state.provenance)
         row.update(_group_columns(result))
         if result is not None:
             for name, value in zip(result.group_names, result.per_group_gain[0].tolist()):
@@ -123,19 +130,13 @@ def _write_designs_tsv(path: Path, records: list[DesignRecord]) -> None:
                 row[f"track_{i}_topk_ratio"] = float(result.track_topk_ratio[0, i])
         holdout = record.holdout_result
         row["holdout_energy"] = float(holdout.energy[0]) if holdout is not None else ""
-        row["holdout_specificity"] = (
-            float(holdout.specificity[0]) if holdout is not None else ""
-        )
+        row["holdout_specificity"] = float(holdout.specificity[0]) if holdout is not None else ""
         row["holdout_target_score"] = float(holdout.target[0]) if holdout is not None else ""
-        row["holdout_target_gain"] = (
-            float(holdout.target_gain[0]) if holdout is not None else ""
-        )
+        row["holdout_target_gain"] = float(holdout.target_gain[0]) if holdout is not None else ""
         row["holdout_offtarget_boost"] = (
             float(holdout.offtarget_boost[0]) if holdout is not None else ""
         )
-        row["holdout_edit_penalty"] = (
-            float(holdout.edit_penalty[0]) if holdout is not None else ""
-        )
+        row["holdout_edit_penalty"] = float(holdout.edit_penalty[0]) if holdout is not None else ""
         for name, value in _group_columns(holdout).items():
             row[f"holdout_{name}"] = value
         if holdout is not None:
@@ -179,11 +180,20 @@ def _write_trajectory(path: Path, records: list[DesignRecord]) -> None:
             }
             row.update(
                 {
-                    key: value
-                    for key, value in entry.items()
-                    if key.startswith("group_")
+                    key: entry.get(key, "")
+                    for key in [
+                        "proposal_id",
+                        "sequence_id",
+                        "mode",
+                        "actual_mask_fraction",
+                        "oracle_cached",
+                        "improved_over_seed",
+                    ]
                 }
+                if record.method == "diffusion"
+                else {}
             )
+            row.update({key: value for key, value in entry.items() if key.startswith("group_")})
             rows.append(row)
     _write_tsv(path, rows)
 
@@ -238,14 +248,10 @@ def _write_topk(path: Path, records: list[DesignRecord], k: int = 10) -> None:
             else result.per_track[0].tolist()
         )
         means = (
-            result.track_mean[0].tolist()
-            if hasattr(result, "track_mean")
-            else [None] * len(values)
+            result.track_mean[0].tolist() if hasattr(result, "track_mean") else [None] * len(values)
         )
         maxima = (
-            result.track_max[0].tolist()
-            if hasattr(result, "track_max")
-            else [None] * len(values)
+            result.track_max[0].tolist() if hasattr(result, "track_max") else [None] * len(values)
         )
         ratios = (
             result.track_topk_ratio[0].tolist()
