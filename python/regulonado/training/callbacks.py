@@ -251,7 +251,9 @@ class EvalExampleDiagnostics(TrainerCallback):
         # back to the leading T channels before comparing, the same split
         # runner._split_track_and_group_logits applies for compute_loss/prediction_step.
         track_channel_count = getattr(
-            model, "track_channel_count", getattr(getattr(model, "module", None), "track_channel_count", None)
+            model,
+            "track_channel_count",
+            getattr(getattr(model, "module", None), "track_channel_count", None),
         )
         if track_channel_count is not None and preds_raw.shape[-2] > track_channel_count:
             preds_raw = preds_raw[..., :track_channel_count, :]

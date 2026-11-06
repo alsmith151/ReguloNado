@@ -286,7 +286,10 @@ def interval_means_cmd(
     included = _read_table(track_table, bigwig_reader="tracks interval-means")
     included = included[included["status"] == "included"].sort_values("track_index")
     windows = qc_module.intervals_from_bed(
-        intervals, n_pred_bins=n_pred_bins, bin_size=bin_size, shift_max_bp=shift_max_bp,
+        intervals,
+        n_pred_bins=n_pred_bins,
+        bin_size=bin_size,
+        shift_max_bp=shift_max_bp,
         sample_n=sample_n,
     )
     means = qc_module.track_interval_means(
@@ -317,9 +320,7 @@ def _parse_rules(values: Optional[list[str]]) -> dict[str, dict[str, float]]:
 
 @tracks_app.command("qc")
 def qc_cmd(
-    track_table: Annotated[
-        Path, typer.Argument(help="tracks/_stages/discovered.parquet")
-    ],
+    track_table: Annotated[Path, typer.Argument(help="tracks/_stages/discovered.parquet")],
     output: Annotated[Path, typer.Option("-o", "--output", help="qc_report.parquet")],
     check: Annotated[
         Optional[list[str]],
@@ -368,8 +369,8 @@ def qc_cmd(
         raise typer.Exit(1)
 
     table = _read_table(track_table, bigwig_reader="tracks qc")
-    included = table[table["status"] == "included"].sort_values("track_index").reset_index(
-        drop=True
+    included = (
+        table[table["status"] == "included"].sort_values("track_index").reset_index(drop=True)
     )
     if included.empty:
         typer.echo("No included tracks to QC.", err=True)
@@ -384,7 +385,10 @@ def qc_cmd(
             means = qc_module.load_interval_means(interval_means, included["track_name"].tolist())
         elif intervals is not None:
             windows = qc_module.intervals_from_bed(
-                intervals, n_pred_bins=n_pred_bins, bin_size=bin_size, shift_max_bp=shift_max_bp,
+                intervals,
+                n_pred_bins=n_pred_bins,
+                bin_size=bin_size,
+                shift_max_bp=shift_max_bp,
                 sample_n=sample_n,
             )
             means = qc_module.track_interval_means(
@@ -410,8 +414,11 @@ def qc_cmd(
             group_col = next(
                 (c for c in ("scaling_group", "condition") if c in included.columns), None
             )
-            labels = included[group_col].where(included[group_col].notna(), None).tolist() \
-                if group_col else [None] * len(included)
+            labels = (
+                included[group_col].where(included[group_col].notna(), None).tolist()
+                if group_col
+                else [None] * len(included)
+            )
             rep = pd.DataFrame(
                 qc_module.replicate_concordance_stats(means, labels), index=included.index
             )
@@ -512,7 +519,9 @@ def assemble(
             if str(scale_factors).endswith(".parquet")
             else pd.read_csv(scale_factors)
         )
-        sf = sf.drop(columns=[c for c in ("path", "resolved_path", "track_index") if c in sf], )
+        sf = sf.drop(
+            columns=[c for c in ("path", "resolved_path", "track_index") if c in sf],
+        )
         sf = sf.rename(columns=_SCALE_COLUMN_RENAME)
         merged = merged.merge(sf, on="track_name", how="left", validate="one_to_one")
         # Stamped into tracks.parquet's attrs (below) and read back by
@@ -520,16 +529,24 @@ def assemble(
         # and raw-count-unit (squash) clip column families -- "inferred" covers every
         # non-anchor method (original/tmm/seqnado/bamnado), which all write the
         # squash family via normalization.compute_clip_thresholds.
-        scaling_method = "anchor" if "scale_housekeeping_median_stored" in merged.columns else "inferred"
+        scaling_method = (
+            "anchor" if "scale_housekeeping_median_stored" in merged.columns else "inferred"
+        )
 
     if qc_report is not None:
-        qc_df = pd.read_parquet(qc_report) if str(qc_report).endswith(".parquet") \
+        qc_df = (
+            pd.read_parquet(qc_report)
+            if str(qc_report).endswith(".parquet")
             else pd.read_csv(qc_report)
+        )
         merged = merged.merge(qc_df, on="track_name", how="left", validate="one_to_one")
 
     if annotations is not None:
-        ann_df = pd.read_parquet(annotations) if str(annotations).endswith(".parquet") \
+        ann_df = (
+            pd.read_parquet(annotations)
+            if str(annotations).endswith(".parquet")
             else pd.read_csv(annotations)
+        )
         if "track_name" not in ann_df.columns:
             typer.echo("--annotations file must have a 'track_name' column", err=True)
             raise typer.Exit(1)
@@ -565,9 +582,7 @@ def assemble(
     merged["track_index"] = pd.array([pd.NA] * len(merged), dtype="Int64")
     merged.loc[included_mask, "track_index"] = range(int(included_mask.sum()))
 
-    write_track_table(
-        merged, output, scaling_method=scaling_method, track_format=discovered_format
-    )
+    write_track_table(merged, output, scaling_method=scaling_method, track_format=discovered_format)
     n_unannotated = int((merged["status"] == "unannotated").sum())
     typer.echo(
         f"Assembled {len(merged)} track(s): {int(included_mask.sum())} included"

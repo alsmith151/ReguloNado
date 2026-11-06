@@ -97,7 +97,14 @@ impl BinningScratch {
 
 /// Add `overlap` bases of `value` to one bin, routing NaN values to the NaN count.
 #[inline]
-fn accumulate(bin: usize, value: f64, overlap: u64, sums: &mut [f64], covered: &mut [u64], nan_bases: &mut [u64]) {
+fn accumulate(
+    bin: usize,
+    value: f64,
+    overlap: u64,
+    sums: &mut [f64],
+    covered: &mut [u64],
+    nan_bases: &mut [u64],
+) {
     if value.is_nan() {
         nan_bases[bin] += overlap;
     } else {
@@ -209,7 +216,14 @@ pub(crate) fn bin_region_into<R: BBIFileRead>(
             let last_bin = ((rel_end / bin_bp).ceil() as usize).min(n_bins);
             if first_bin + 1 == last_bin {
                 let ovl_len = (v_end - v_start) as u64;
-                accumulate(first_bin, val.value as f64, ovl_len, sums, covered, nan_bases);
+                accumulate(
+                    first_bin,
+                    val.value as f64,
+                    ovl_len,
+                    sums,
+                    covered,
+                    nan_bases,
+                );
             } else {
                 for bin in first_bin..last_bin {
                     let bin_abs_start = region_start + (bin as f64 * bin_bp) as u32;
@@ -233,7 +247,10 @@ pub(crate) fn bin_region_into<R: BBIFileRead>(
     for i in 0..n_bins {
         let (bin_abs_start, bin_abs_end) = if exact_bin_bp {
             let bin_bp = region_width / n_bins as u32;
-            (region_start + i as u32 * bin_bp, region_start + (i as u32 + 1) * bin_bp)
+            (
+                region_start + i as u32 * bin_bp,
+                region_start + (i as u32 + 1) * bin_bp,
+            )
         } else {
             let bin_bp = region_width as f64 / n_bins as f64;
             let end = if i + 1 >= n_bins {

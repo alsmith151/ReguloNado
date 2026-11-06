@@ -545,7 +545,8 @@ def group_contrast_unit_factors(
     ``exposure`` happens to equal the track's anchor reference with zero background — see
     the group-contrast-head plan). The exact conversion, derived from
     ``target_specificity.to_anchor_units``'s ``a = max(y - bg, 0) * sf`` (``y`` = stored
-    mean coverage, ``bg`` = ``record["background_median_stored"]``, ``sf`` = ``record["scale_factor"]``,
+    mean coverage, ``bg`` = ``record["background_median_stored"]``, and
+    ``sf`` = ``record["scale_factor"]``,
     verified numerically on real records to satisfy ``sf == 1 / (housekeeping_median_stored - bg)``)
     and ``counts = y * count_factors``, ``normalised = counts / exposure``:
 

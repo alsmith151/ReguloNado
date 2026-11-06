@@ -525,16 +525,15 @@ pub(crate) fn write_parquet_splits_chrom_pass(
                 .map_init(
                     BinningScratch::default,
                     |scratch, (track_idx, (out_row, reader))| {
-                        let usage =
-                            bin_region_into(
-                                reader,
-                                chrom_str,
-                                0,
-                                region_end,
-                                out_row,
-                                scratch,
-                                binning_options,
-                            );
+                        let usage = bin_region_into(
+                            reader,
+                            chrom_str,
+                            0,
+                            region_end,
+                            out_row,
+                            scratch,
+                            binning_options,
+                        );
 
                         let is_minus = minus_flags.get(track_idx).copied().unwrap_or(false);
                         if is_minus {

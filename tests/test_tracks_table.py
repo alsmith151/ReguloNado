@@ -227,7 +227,6 @@ def test_bigwig_dir_style_track_name_falls_back_to_stem(tmp_path):
 def test_renamed_fields_are_rejected_not_silently_dropped():
     import pandas as pd
     import pytest
-
     from regulonado.tracks_table import reject_renamed_fields, to_track_records
 
     with pytest.raises(ValueError, match="background -> background_median_stored"):
