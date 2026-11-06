@@ -26,7 +26,9 @@ The consolidation also fixes existing Python lint and Rust formatting failures.
 
 ## Validation
 
-- Full Python suite, with cache-related permission failures retried using cache access.
+- Full Python suite: 1,121 passed and 15 skipped across the initial run and
+  successful retry of all 29 cache-permission failures. The 27 workflow DAG
+  tests also passed in a separate run with cache access.
 - `ruff check python/ tests/`.
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all-targets`.
 - `uv lock --check --offline` with a writable temporary cache.
