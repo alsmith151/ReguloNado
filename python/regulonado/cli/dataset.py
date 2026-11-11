@@ -156,6 +156,17 @@ def dataset(
             ),
         ),
     ] = "bin_width",
+    source: Annotated[str, typer.Option(help="Profile input: bigwig or bam")] = "bigwig",
+    bam_pooling: Annotated[
+        str, typer.Option(help="Fragment profile pooling: mean or sum")
+    ] = "mean",
+    insertion_convention: Annotated[
+        str, typer.Option(help="regulonado (+4/-5), chrombpnet (+4/-4), or unshifted")
+    ] = "regulonado",
+    bam_threads: Annotated[int, typer.Option(help="BGZF decompression threads per BAM")] = 1,
+    profile_preset: Annotated[
+        Optional[str], typer.Option(help="borzoi selects summed fragment coverage")
+    ] = None,
     missing_bins: Annotated[
         str,
         typer.Option(
@@ -224,4 +235,9 @@ def dataset(
         chrom_filter=list(chrom) if chrom else None,
         bin_denominator=bin_denominator,
         missing_bins=missing_bins,
+        source=source,
+        bam_pooling=bam_pooling,
+        insertion_convention=insertion_convention,
+        bam_threads=bam_threads,
+        profile_preset=profile_preset,
     )

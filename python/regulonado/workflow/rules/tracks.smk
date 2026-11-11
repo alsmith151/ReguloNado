@@ -20,7 +20,7 @@ TRACKS_DIR = RESULTS / "tracks"
 TRACKS_STAGE_DIR = TRACKS_DIR / "_stages"
 QC = config.get("qc") or {"checks": []}
 QC_CHECKS = QC.get("checks") or []
-_NEEDS_INTERVAL_MEANS = TRACK_FORMAT == "bigwig" and (
+_NEEDS_INTERVAL_MEANS = PROFILE_BIGWIG and (
     bool({"interval_signal", "replicate_concordance"} & set(QC_CHECKS))
     or config["scaling"]["method"] == "tmm"
 )
@@ -162,7 +162,7 @@ rule track_assemble:
     input:
         discovered=str(TRACKS_STAGE_DIR / "discovered.parquet"),
         scale_factors=(
-            str(TRACKS_STAGE_DIR / "scale_factors.parquet") if TRACK_FORMAT == "bigwig" else []
+            str(TRACKS_STAGE_DIR / "scale_factors.parquet") if PROFILE_BIGWIG else []
         ),
         qc_report=str(TRACKS_STAGE_DIR / "qc_report.parquet") if QC_CHECKS else [],
         annotations=(

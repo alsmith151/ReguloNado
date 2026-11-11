@@ -10,5 +10,6 @@
 │ regions  Write the canonical region table ``counts bam``/``gather`` and ``embed regions`` share. │
 │ bam      Count BAM events over ``regions`` for every track (or one, with ``--track``).           │
 │ gather   Gather ``counts bam``'s per-track cache into one ``RegionCountData`` run.               │
+│ bigwig   Summarize BigWig signal over regions; assemble with counts gather --source bigwig.      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 

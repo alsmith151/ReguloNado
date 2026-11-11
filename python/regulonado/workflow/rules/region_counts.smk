@@ -81,7 +81,9 @@ checkpoint region_count_track_names:
 
         out_dir = Path(output[0])
         out_dir.mkdir(parents=True, exist_ok=True)
-        for track_name in read_count_tracks(input.table)["track_name"]:
+        from regulonado.counts.signal import signal_tracks
+        table = signal_tracks(input.table) if REGION_COUNTS["source"] == "bigwig" else read_count_tracks(input.table)
+        for track_name in table["track_name"]:
             (out_dir / f"{track_name}.track").touch()
 
 
@@ -95,12 +97,15 @@ rule region_count_track:
     input:
         regions=str(REGION_SET),
         tracks=str(TRACKS_DIR / "tracks.parquet"),
-        anchor_regions=REGION_ANCHORS,
-        background_regions=REGION_BACKGROUND,
+        anchor_regions=([REGION_ANCHORS] if REGION_COUNTS["source"] == "bam" and REGION_ANCHORS else []),
+        background_regions=([REGION_BACKGROUND] if REGION_COUNTS["source"] == "bam" and REGION_BACKGROUND else []),
         marker=lambda w: str(
             Path(checkpoints.region_count_track_names.get().output[0]) / f"{w.track}.track"
         ),
     params:
+        source=REGION_COUNTS["source"],
+        aggregation=REGION_COUNTS["aggregation"],
+        anchors=(f"--anchor-regions {shlex.quote(REGION_ANCHORS)} --background-regions {shlex.quote(REGION_BACKGROUND)}" if REGION_COUNTS["source"] == "bam" else ""),
         out_dir=str(REGION_TRACK_COUNTS_DIR),
         target_width=REGION_COUNTS["target_width"],
         threads=REGION_COUNTS["threads"],
@@ -118,8 +123,8 @@ rule region_count_track:
         mkdir -p "$(dirname {log:q})"
         regulonado counts bam {input.regions:q} \
             --tracks {input.tracks:q} \
-            --anchor-regions {input.anchor_regions:q} \
-            --background-regions {input.background_regions:q} \
+            --source {params.source} --aggregation {params.aggregation} \
+            {params.anchors} \
             --out-dir {params.out_dir:q} \
             --track {wildcards.track:q} \
             --target-width {params.target_width} \
@@ -137,6 +142,9 @@ rule region_counts_gather:
             str(REGION_TRACK_COUNTS_DIR / "{track}.parquet"), track=_region_track_names(w)
         ),
     params:
+        source=REGION_COUNTS["source"],
+        aggregation=REGION_COUNTS["aggregation"],
+        anchors=(f"--anchor-regions {shlex.quote(REGION_ANCHORS)} --background-regions {shlex.quote(REGION_BACKGROUND)}" if REGION_COUNTS["source"] == "bam" else ""),
         out_dir=str(REGION_TRACK_COUNTS_DIR),
         dataset_dir=str(REGION_DATASET_DIR),
         target_width=REGION_COUNTS["target_width"],
@@ -154,6 +162,7 @@ rule region_counts_gather:
         mkdir -p "$(dirname {log:q})"
         regulonado counts gather {input.regions:q} \
             --tracks {input.tracks:q} \
+            --source {params.source} --aggregation {params.aggregation} \
             --out-dir {params.out_dir:q} \
             --dataset-dir {params.dataset_dir:q} \
             --target-width {params.target_width} \

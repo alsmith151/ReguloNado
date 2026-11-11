@@ -55,6 +55,14 @@ jobs:
       - name: cargo test
         run: cargo test --all-targets
 
+  msrv:
+    name: Rust 1.90 compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90
+      - run: cargo check --locked
+
   test:
     name: "Data tests — Python ${{ matrix.python-version }}"
     runs-on: ubuntu-latest

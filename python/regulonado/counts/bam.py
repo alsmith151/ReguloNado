@@ -6,7 +6,7 @@ roughly ``length / bin_bp`` times, with ``length`` differing per track (PE
 fragment vs SE read, assay). That is fine for log-MSE targets, but no count
 likelihood (Poisson, NB, multinomial across tasks) is valid on it.
 
-So this module reads the BAMs with pysam and counts *events*, one per unit
+So this module reads the BAMs in Rust using BamNado and counts *events*, one per unit
 the assay actually measures (:class:`CountSpec`):
 
 ``insertions`` (ATAC)
@@ -35,11 +35,11 @@ Coordinates are 0-based half-open, as everywhere in ReguloNado.
 
 from __future__ import annotations
 
+import hashlib
 import json
-from array import array
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -163,67 +163,16 @@ def count_events(
         (separately sorted) end coordinates of every event, and how many of
         them came from paired vs single-end reads.
     """
-    import pysam
+    from regulonado._rs import bam_events
 
-    # array("q") rather than lists: ~8 bytes per event instead of ~36, which
-    # matters at tens of millions of events on the large chromosomes.
-    starts = array("q")
-    ends = array("q")
-    n_paired = 0
-    n_single = 0
-    excluded = _EXCLUDED_FLAGS | (_DUPLICATE_FLAG if spec.drop_duplicates else 0)
-
-    with pysam.AlignmentFile(str(bam_path), "rb", threads=threads) as bam:
-        if chrom not in bam.references:
-            return np.empty(0, np.int64), np.empty(0, np.int64), 0, 0
-        for read in bam.fetch(chrom):
-            if read.flag & excluded or read.mapping_quality < spec.min_mapq:
-                continue
-            paired = read.is_paired
-            if paired:
-                if spec.proper_pairs_only and not read.is_proper_pair:
-                    continue
-                if (
-                    spec.max_fragment_length is not None
-                    and abs(read.template_length) > spec.max_fragment_length
-                ):
-                    continue
-
-            if spec.unit == "insertions":
-                if read.is_reverse:
-                    position = read.reference_end - 1
-                    position += _TN5_REVERSE_SHIFT if spec.tn5_shift else 0
-                else:
-                    position = read.reference_start
-                    position += _TN5_FORWARD_SHIFT if spec.tn5_shift else 0
-                starts.append(position)
-                ends.append(position + 1)
-            elif paired:
-                # One event per fragment: only the leftmost mate (TLEN > 0).
-                if read.template_length <= 0:
-                    continue
-                starts.append(read.reference_start)
-                ends.append(read.reference_start + read.template_length)
-            else:
-                start, end = read.reference_start, read.reference_end
-                if spec.single_end_extension is not None:
-                    if read.is_reverse:
-                        start = end - spec.single_end_extension
-                    else:
-                        end = start + spec.single_end_extension
-                starts.append(start)
-                ends.append(end)
-
-            if paired:
-                n_paired += 1
-            else:
-                n_single += 1
-
+    raw_starts, raw_ends, paired, single = bam_events(
+        str(bam_path), chrom, json.dumps(asdict(spec)), threads
+    )
     return (
-        np.sort(np.frombuffer(starts, dtype=np.int64)),
-        np.sort(np.frombuffer(ends, dtype=np.int64)),
-        n_paired,
-        n_single,
+        np.frombuffer(raw_starts, dtype="<i8").copy(),
+        np.frombuffer(raw_ends, dtype="<i8").copy(),
+        paired,
+        single,
     )
 
 
@@ -281,6 +230,8 @@ class TrackCounts:
     n_single: int
     count_scale_high: float = float("nan")
     count_scale_low: float = float("nan")
+    cache_identity: str | None = None
+    region_identity: str | None = None
 
     def save(self, path: str | Path) -> Path:
         """Write to a single parquet file: one ``count`` column plus key/value metadata.
@@ -294,6 +245,8 @@ class TrackCounts:
 
         path = Path(path)
         metadata = {
+            "cache_identity": self.cache_identity,
+            "region_identity": self.region_identity,
             "track_name": self.track_name,
             "spec": asdict(self.spec),
             "n_events": self.n_events,
@@ -325,6 +278,8 @@ class TrackCounts:
         metadata = json.loads(raw)
         counts = table.column(_COUNT_COLUMN).to_numpy(zero_copy_only=False).astype(np.int64)
         return cls(
+            cache_identity=metadata.get("cache_identity"),
+            region_identity=metadata.get("region_identity"),
             track_name=metadata["track_name"],
             counts=counts,
             spec=CountSpec(**metadata["spec"]),
@@ -458,7 +413,7 @@ class BamRegionCounter:
         background_windows: background/null windows (``count_scale_low``).
         specs: per-``assay_class`` :class:`CountSpec`, overriding
             :data:`DEFAULT_COUNT_SPECS`.
-        threads: htslib decompression threads per BAM.
+        threads: BGZF decompression threads per BAM.
     """
 
     regions: pl.DataFrame
@@ -560,6 +515,24 @@ class BamRegionCounter:
             scale_bp=scale_bp_for(assay_class),
         )
 
+    def _region_identity(self):
+        windows = self.regions.select("chrom", "target_start", "target_end").rows()
+        return hashlib.sha256(json.dumps(windows).encode()).hexdigest()
+
+    def _count_identity(self, bam_path, spec, scale_bp):
+        path = Path(bam_path)
+        stat = path.stat() if path.exists() else None
+        payload = {
+            "bam": str(path.resolve()),
+            "stat": [stat.st_size, stat.st_mtime_ns] if stat else None,
+            "spec": asdict(spec),
+            "scale_bp": scale_bp,
+            "targets": self.regions.select("chrom", "target_start", "target_end").rows(),
+            "anchors": self.anchor_windows.rows(),
+            "background": self.background_windows.rows(),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
     def count_bam(
         self,
         bam_path: str | Path,
@@ -573,61 +546,30 @@ class BamRegionCounter:
         *scale_bp* is the anchor statistic's sub-window (see
         :func:`scale_bp_for`).
         """
-        counts = np.zeros(self.n_regions, dtype=np.int64)
-        anchor_scores: list[np.ndarray] = []
-        background_scores: list[np.ndarray] = []
-        n_events = n_paired = n_single = 0
+        from regulonado._rs import count_bam_windows
 
-        chroms = sorted(
-            set(self.regions["chrom"].unique())
-            | set(self.anchor_windows["chrom"].unique())
-            | set(self.background_windows["chrom"].unique())
+        windows = list(self.regions.select("chrom", "target_start", "target_end").iter_rows())
+        raw, paired, single, high, low = count_bam_windows(
+            str(bam_path),
+            json.dumps(asdict(spec)),
+            windows,
+            list(self.anchor_windows.iter_rows()),
+            list(self.background_windows.iter_rows()),
+            scale_bp,
+            self.threads,
+            "events",
         )
-        import pysam
-
-        with pysam.AlignmentFile(str(bam_path), "rb") as bam:
-            absent = sorted(set(self.regions["chrom"].unique()) - set(bam.references))
-        if absent:
-            # Otherwise a "1" vs "chr1" naming mismatch counts every region as zero.
-            raise ValueError(f"{track_name or bam_path}: region contigs absent from BAM: {absent}")
-
-        region_chrom = self.regions["chrom"].to_numpy()
-        target_start = self.regions["target_start"].to_numpy()
-        target_end = self.regions["target_end"].to_numpy()
-
-        for chrom in chroms:
-            starts, ends, paired, single = count_events(bam_path, chrom, spec, threads=self.threads)
-            n_events += starts.size
-            n_paired += paired
-            n_single += single
-
-            mask = region_chrom == chrom
-            if mask.any():
-                counts[mask] = _count_overlaps(starts, ends, target_start[mask], target_end[mask])
-            for windows, scores in (
-                (self.anchor_windows, anchor_scores),
-                (self.background_windows, background_scores),
-            ):
-                on_chrom = windows.filter(pl.col("chrom") == chrom)
-                if on_chrom.height:
-                    scores.append(
-                        _best_subwindow_counts(
-                            starts, ends, on_chrom["start"].to_numpy(), WINDOW_BP, scale_bp
-                        )
-                    )
-
-        def _median(scores: list[np.ndarray]) -> float:
-            return float(np.median(np.concatenate(scores))) if scores else float("nan")
-
         return TrackCounts(
+            cache_identity=self._count_identity(bam_path, spec, scale_bp),
+            region_identity=self._region_identity(),
             track_name=track_name,
-            counts=counts,
+            counts=np.frombuffer(raw, dtype="<f8").astype(np.int64),
             spec=spec,
-            n_events=n_events,
-            n_paired=n_paired,
-            n_single=n_single,
-            count_scale_high=_median(anchor_scores),
-            count_scale_low=_median(background_scores),
+            n_events=paired + single,
+            n_paired=paired,
+            n_single=single,
+            count_scale_high=high,
+            count_scale_low=low,
         )
 
     def count_tracks(
@@ -651,7 +593,26 @@ class BamRegionCounter:
         def cached(row: dict) -> Path | None:
             return None if cache is None else cache / f"{row['track_name']}.parquet"
 
-        todo = [row for row in rows if (p := cached(row)) is None or not p.exists()]
+        identities = {
+            row["track_name"]: self._count_identity(
+                row["bam"],
+                self.spec_for(str(row["assay_class"])),
+                scale_bp_for(str(row["assay_class"])),
+            )
+            for row in rows
+        }
+
+        cached_results = {
+            row["track_name"]: TrackCounts.load(path)
+            for row in rows
+            if (path := cached(row)) is not None and path.exists()
+        }
+
+        def reusable(row):
+            result = cached_results.get(row["track_name"])
+            return result is not None and result.cache_identity == identities[row["track_name"]]
+
+        todo = [row for row in rows if not reusable(row)]
         if max_workers > 1 and len(todo) > 1:
             with ProcessPoolExecutor(max_workers=max_workers) as pool:
                 fresh = dict(
@@ -668,11 +629,13 @@ class BamRegionCounter:
         for row in rows:
             path = cached(row)
             if row["track_name"] in fresh:
-                result = fresh[row["track_name"]]
+                result = replace(
+                    fresh[row["track_name"]], cache_identity=identities[row["track_name"]]
+                )
                 if path is not None:
                     result.save(path)
             else:
-                result = TrackCounts.load(path)
+                result = cached_results[row["track_name"]]
             results.append(result)
         return results
 
@@ -698,6 +661,11 @@ class BamRegionCounter:
             raise FileNotFoundError(f"no counts in {cache} for tracks: {missing}")
         results = [TrackCounts.load(cache / f"{t}.parquet") for t in order]
         for result in results:
+            if (
+                result.region_identity is not None
+                and result.region_identity != self._region_identity()
+            ):
+                raise ValueError(f"{result.track_name}: cached scored regions do not match")
             if result.counts.shape[0] != self.n_regions:
                 raise ValueError(
                     f"{result.track_name}: {result.counts.shape[0]} counts for {self.n_regions} "

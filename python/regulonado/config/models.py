@@ -126,6 +126,11 @@ class ProfileTargetConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    source: Literal["bigwig", "bam"] = "bigwig"
+    bam_pooling: Literal["mean", "sum"] = "mean"
+    insertion_convention: Literal["regulonado", "chrombpnet", "unshifted"] = "regulonado"
+    bam_threads: int = Field(default=1, ge=1)
+    profile_preset: Literal["borzoi"] | None = None
     intervals: str = Field(min_length=1)
     context_length: int = Field(default=524_288, ge=1)
     bin_size: int = Field(default=32, ge=1)
@@ -156,6 +161,8 @@ class RegionCountsTargetConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    source: Literal["bam", "bigwig"] = "bam"
+    aggregation: Literal["mean", "max", "count", "logcount"] = "mean"
     regions: str = Field(
         min_length=1,
         description=(
@@ -1123,7 +1130,12 @@ class RegulonadoConfig(BaseModel):
         carrying its ``bam`` when a sheet or ``inputs.bam_dir`` names one, so region-count
         runs count the same tracks), or BAM tracks when only region counts are needed.
         """
-        return "bigwig" if self.targets.profile is not None else "bam"
+        sources = [
+            target.source
+            for target in (self.targets.profile, self.targets.region_counts)
+            if target is not None
+        ]
+        return "bigwig" if "bigwig" in sources else "bam"
 
     def runs_for(self, target: str) -> list[TrainRun]:
         return [run for run in (self.train.runs if self.train else []) if run.target == target]
@@ -1157,7 +1169,7 @@ class RegulonadoConfig(BaseModel):
 
     @model_validator(mode="after")
     def _bigwig_stages_need_a_profile_target(self) -> "RegulonadoConfig":
-        if self.targets.profile is not None:
+        if self.targets.profile is not None and self.targets.profile.source == "bigwig":
             return self
         if self.qc.checks:
             raise ValueError("qc.checks scan bigWig tracks; configure targets.profile")
@@ -1264,6 +1276,12 @@ class RegulonadoConfig(BaseModel):
                 settings = merge_training_settings(
                     [self.train.common, phase.settings, run.settings]
                 )
+                if (
+                    self.targets.profile is not None
+                    and self.targets.profile.source == "bam"
+                    and settings.get("data.profile_space", "raw") == "raw"
+                ):
+                    continue
                 # Count labels ignore apply_squash entirely.
                 if settings.get("data.label_space") == "counts":
                     continue
@@ -1286,7 +1304,7 @@ class RegulonadoConfig(BaseModel):
     @model_validator(mode="after")
     def _region_count_anchors_are_present(self) -> "RegulonadoConfig":
         counts = self.targets.region_counts
-        if counts is None:
+        if counts is None or counts.source == "bigwig":
             return self
         for field_name in ("anchor_regions", "background_regions"):
             if not (getattr(counts, field_name) or getattr(self.scaling, field_name)):

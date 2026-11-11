@@ -1272,6 +1272,40 @@ $defs:
     description: 'Binned coverage profiles over ``intervals``, from bigWigs: the ``profile``
       dataset.'
     properties:
+      source:
+        default: bigwig
+        enum:
+        - bigwig
+        - bam
+        title: Source
+        type: string
+      bam_pooling:
+        default: mean
+        enum:
+        - mean
+        - sum
+        title: Bam Pooling
+        type: string
+      insertion_convention:
+        default: regulonado
+        enum:
+        - regulonado
+        - chrombpnet
+        - unshifted
+        title: Insertion Convention
+        type: string
+      bam_threads:
+        default: 1
+        minimum: 1
+        title: Bam Threads
+        type: integer
+      profile_preset:
+        anyOf:
+        - const: borzoi
+          type: string
+        - type: 'null'
+        default: null
+        title: Profile Preset
       intervals:
         minLength: 1
         title: Intervals
@@ -1387,6 +1421,22 @@ $defs:
     description: 'One count per region per track, from BAMs: the ``region_counts``
       dataset.'
     properties:
+      source:
+        default: bam
+        enum:
+        - bam
+        - bigwig
+        title: Source
+        type: string
+      aggregation:
+        default: mean
+        enum:
+        - mean
+        - max
+        - count
+        - logcount
+        title: Aggregation
+        type: string
       regions:
         description: BED/parquet region set; its 'split' column, and target_start/target_end
           if present, are used as-is.

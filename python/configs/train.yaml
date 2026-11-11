@@ -18,6 +18,8 @@ data:
   # predicts rates in exposure units (anchor | anchor_minus_background | library_size | none)
   # and the likelihood sees rate * exposure. apply_* are ignored.
   label_space: transformed
+  # BAM profiles use their stored units directly; transformed opts into signal transforms.
+  profile_space: raw
   count_unit: fragments
   exposure: anchor
   # Drop missing (NaN) bins from losses and metrics; false trains them as zero signal.

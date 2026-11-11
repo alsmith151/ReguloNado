@@ -154,7 +154,10 @@ def _build_optimizer(model: RegionCountModel, trainer_cfg: TrainerConfig) -> Ada
     """
     count_head_names = set(model.count_head_parameter_names())
     buckets: dict[str, list[torch.nn.Parameter]] = {
-        "head": [], "head_no_decay": [], "backbone": [], "backbone_no_decay": []
+        "head": [],
+        "head_no_decay": [],
+        "backbone": [],
+        "backbone_no_decay": [],
     }
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
@@ -178,6 +181,16 @@ def _build_optimizer(model: RegionCountModel, trainer_cfg: TrainerConfig) -> Ada
     return AdamW(groups)
 
 
+class RegionTrainer(Trainer):
+    """Validate signal/count units before HF restores optimizer and model state."""
+
+    def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
+        from regulonado.training.runner import _validate_target_checkpoint
+
+        _validate_target_checkpoint(model or self.model, resume_from_checkpoint)
+        return super()._load_from_checkpoint(resume_from_checkpoint, model=model)
+
+
 def build_model(
     cfg: Mapping[str, Any],
     source: "_FeatureSource",
@@ -191,7 +204,13 @@ def build_model(
     loss_cfg = cfg["loss"]
     data_cfg = cfg["data"]
 
+    signal_target = (
+        "target_source" in data.tracks.columns
+        and "bigwig" in data.tracks["target_source"].to_list()
+    )
     contrast_weight = float(loss_cfg.get("contrast_weight", 0.0) or 0.0)
+    if signal_target and contrast_weight:
+        raise ValueError("BigWig region MSE regression does not use the count-rate contrast term")
     contrast_task_weights = None
     if contrast_weight:
         target_group = data_cfg.get("target_group")
@@ -202,8 +221,7 @@ def build_model(
             if target_group not in group_names:
                 raise ValueError(f"data.target_group {target_group!r} not in groups {group_names}")
             contrast_task_weights = [
-                float(contrast_task_weight) if name == target_group else 1.0
-                for name in group_names
+                float(contrast_task_weight) if name == target_group else 1.0 for name in group_names
             ]
 
     config = RegionCountConfig(
@@ -219,13 +237,26 @@ def build_model(
         hidden=int(model_cfg.get("hidden", 512)),
         dropout=float(model_cfg.get("dropout", 0.1)),
         eta_max=model_cfg.get("eta_max"),
-        count_noise=str(model_cfg.get("count_noise", "nb")),
-        count_replicate_offsets=bool(model_cfg.get("count_replicate_offsets", True)),
+        count_noise=(
+            "mse"
+            if "target_source" in data.tracks.columns
+            and "bigwig" in data.tracks["target_source"].to_list()
+            else str(model_cfg.get("count_noise", "nb"))
+        ),
+        count_replicate_offsets=False
+        if signal_target
+        else bool(model_cfg.get("count_replicate_offsets", True)),
         count_freeze_noise=bool(model_cfg.get("count_freeze_noise", False)),
         count_noise_shrinkage=float(model_cfg.get("count_noise_shrinkage", 0.0)),
         loss_contrast_weight=contrast_weight,
         loss_contrast_multiplier=loss_cfg.get("contrast_multiplier"),
         contrast_task_weights=contrast_task_weights,
+        target_contract={
+            "source": data.tracks["target_source"].to_list(),
+            "aggregation": data.tracks["aggregation"].to_list(),
+        }
+        if "target_source" in data.tracks.columns
+        else None,
         trunk=source.trunk_info,
     )
     return RegionCountModel(config, trunk=source.trunk)
@@ -245,6 +276,9 @@ def _load_warm_start(model: RegionCountModel, checkpoint: str | Path) -> None:
     (warn-only, never-raising) loading logic itself, shared with the checkpoint loader
     used for inference/attribution.
     """
+    from regulonado.training.runner import _validate_target_checkpoint
+
+    _validate_target_checkpoint(model, checkpoint)
     load_state_dict_non_strict(model, checkpoint)
 
 
@@ -534,7 +568,7 @@ def run_training(cfg: Mapping[str, Any]) -> dict[str, Any]:
             )
         )
 
-    trainer = Trainer(
+    trainer = RegionTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,

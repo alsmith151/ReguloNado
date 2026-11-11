@@ -23,6 +23,11 @@ rule build_dataset:
         fasta=config["inputs"]["fasta"],
         table=str(TRACKS_DIR / "tracks.parquet"),
     params:
+        source=PROFILE["source"],
+        bam_pooling=PROFILE["bam_pooling"],
+        insertion_convention=PROFILE["insertion_convention"],
+        bam_threads=PROFILE["bam_threads"],
+        preset=("--profile-preset borzoi" if PROFILE.get("profile_preset") == "borzoi" else ""),
         out_dir=lambda w, output: str(Path(output.readme).parent),
         context_length=PROFILE["context_length"],
         bin_size=PROFILE["bin_size"],
@@ -51,6 +56,11 @@ rule build_dataset:
             {input.fasta} \
             {params.out_dir} \
             --track-table {input.table:q} \
+            --source {params.source} \
+            --bam-pooling {params.bam_pooling} \
+            --insertion-convention {params.insertion_convention} \
+            --bam-threads {params.bam_threads} \
+            {params.preset} \
             --context-length {params.context_length} \
             --bin-size {params.bin_size} \
             --n-pred-bins {params.n_pred_bins} \

@@ -13,6 +13,8 @@
 │ *  --tracks                PATH     Same tracks.parquet passed to 'counts bam' [required]        │
 │ *  --out-dir       -o      PATH     Per-track parquet cache written by 'counts bam' [required]   │
 │ *  --dataset-dir           PATH     Output RegionCountData run directory [required]              │
+│    --source                TEXT     Region target source: bam or bigwig [default: bam]           │
+│    --aggregation           TEXT     BigWig mean, max, count, or logcount [default: mean]         │
 │    --chrom-sizes           PATH     chrom.sizes/.fai for the region bounds check                 │
 │    --target-width          INTEGER  Width of the counted window, centred on each region          │
 │                                     [default: 1000]                                              │

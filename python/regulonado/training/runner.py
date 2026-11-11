@@ -104,6 +104,22 @@ def _normalise_checkpoint_mode(value: Any) -> str | bool | None:
     return str(value)
 
 
+def _validate_target_checkpoint(model, checkpoint):
+    expected = getattr(model.config, "target_contract", None)
+    path = Path(checkpoint) / "config.json"
+    if path.exists():
+        stored = json.loads(path.read_text()).get("target_contract")
+        legacy_signal = (
+            stored is None
+            and expected
+            and expected.get("source") == "bigwig"
+            and expected.get("pooling") == "mean"
+            and expected.get("training", {}).get("label_space") == "transformed"
+        )
+        if (expected or stored) and expected != stored and not legacy_signal:
+            raise ValueError("checkpoint target units/settings do not match the dataset")
+
+
 def load_model_weights_only(model: torch.nn.Module, checkpoint: str | Path) -> None:
     """Load model weights from a checkpoint without re-initializing missing keys.
 
@@ -127,6 +143,10 @@ def load_model_weights_only(model: torch.nn.Module, checkpoint: str | Path) -> N
         If unexpected or missing keys are encountered (beyond num_batches_tracked).
     """
     checkpoint_path = Path(checkpoint)
+    if hasattr(model, "config"):
+        _validate_target_checkpoint(
+            model, checkpoint_path.parent if checkpoint_path.is_file() else checkpoint_path
+        )
     if checkpoint_path.is_file():
         weight_path = checkpoint_path
     else:
@@ -225,7 +245,11 @@ def load_dataset_metadata(
                 f"{'; '.join(problems)}"
             )
 
-    return {**table.attrs, "final_track_records": to_track_records(table)}
+    metadata = {**table.attrs, "final_track_records": to_track_records(table)}
+    contract_path = data_path / "target_contract.json"
+    if contract_path.exists():
+        metadata["target_contract"] = json.loads(contract_path.read_text())
+    return metadata
 
 
 def track_records(metadata: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -675,9 +699,7 @@ def _resolve_group_contrast_loss_config(
         records, count_space, background_mode=background_mode
     )
     group_index, _ = group_index_from_records(records)
-    group_weights = group_replicate_weights(
-        torch.as_tensor(group_index), group_contrast_n_groups
-    )
+    group_weights = group_replicate_weights(torch.as_tensor(group_index), group_contrast_n_groups)
     clamp_min = float(trainer_cfg.get("group_contrast_clamp_min", -6.0))
     clamp_max = float(trainer_cfg.get("group_contrast_clamp_max", 6.0))
     return GroupContrastLossConfig(
@@ -1426,6 +1448,7 @@ def build_model(
     backbone_spec = _make_backbone_spec(cfg["backbone"], metadata)
     backbone = adapter_builder(backbone_spec)
     regulonado_config = _build_regulonado_config(cfg, metadata, records, backbone)
+    regulonado_config.target_contract = metadata.get("target_contract")
     model = RegulonadoModel(regulonado_config, backbone=backbone)
     return model
 
@@ -1801,6 +1824,10 @@ class RegulonadoTrainer(Trainer):
     then reduces labels to ``[B, T]`` before accumulation to avoid OOM.
     """
 
+    def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
+        _validate_target_checkpoint(model or self.model, resume_from_checkpoint)
+        return super()._load_from_checkpoint(resume_from_checkpoint, model=model)
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._loss_fn: Callable = kwargs.pop(
             "loss_fn",
@@ -1948,9 +1975,7 @@ class RegulonadoTrainer(Trainer):
             track_logits, group_logits = _split_track_and_group_logits(logits, model)
             # Labels may arrive as [B, L, T]; align to [B, T, L] expected by the loss.
             aligned = (
-                labels
-                if labels.shape[-2:] == track_logits.shape[-2:]
-                else labels.transpose(-2, -1)
+                labels if labels.shape[-2:] == track_logits.shape[-2:] else labels.transpose(-2, -1)
             )
             loss = self._loss_fn(track_logits, aligned, group_logits)
             outputs["loss"] = loss
@@ -2266,8 +2291,7 @@ def _build_collate_and_loss(
     # Only scaled_poisson_multinomial can consume a loss-time clip ceiling. Every
     # other loss receives already transformed labels or ignores clip_hard entirely.
     require_loss_clip = (
-        str(cfg["loss"].get("name")) == "scaled_poisson_multinomial"
-        and not labels_already_scaled
+        str(cfg["loss"].get("name")) == "scaled_poisson_multinomial" and not labels_already_scaled
     )
     scale_factors, _, clip_hard, background = resolve_scale_and_clip(
         records,
@@ -2616,6 +2640,50 @@ def run_training(
         data_path, metadata_path, dataset_dict, rank=rank
     )
 
+    contract = {
+        k: v
+        for k, v in (metadata.get("target_contract") or {}).items()
+        if k not in {"inputs", "regions_sha256", "geometry"}
+    }
+    if contract.get("source") == "bam":
+        profile_space = str(cfg["data"].get("profile_space", "raw"))
+        if profile_space not in {"raw", "transformed"}:
+            raise ValueError("data.profile_space must be raw or transformed")
+        if profile_space == "raw":
+            cfg["data"].update(
+                label_space="counts",
+                count_unit="stored",
+                exposure="none",
+                apply_scale=False,
+                apply_clip=False,
+                apply_squash=False,
+            )
+    if contract:
+        contract["training"] = {
+            k: cfg["data"].get(k)
+            for k in (
+                "label_space",
+                "count_unit",
+                "exposure",
+                "apply_scale",
+                "apply_clip",
+                "apply_squash",
+            )
+        }
+        contract["tracks"] = [
+            {
+                k: r.get(k)
+                for k in (
+                    "track_name",
+                    "stored_unit",
+                    "profile_pooling",
+                    "insertion_convention",
+                    "count_spec",
+                )
+            }
+            for r in records
+        ]
+        metadata["target_contract"] = contract
     count_space = _resolve_count_label_space(cfg["data"], metadata, records, rank=rank)
     dataset_dict = _apply_dataset_transforms(
         dataset_dict, metadata, records, cfg["data"], count_space

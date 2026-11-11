@@ -154,7 +154,7 @@ pub(crate) fn bin_region_into<R: BBIFileRead>(
     let mut interval_count = 0usize;
     let (sums, covered, nan_bases) = scratch.direct_buffers(n_bins);
 
-    if region_width as usize % n_bins == 0 {
+    if (region_width as usize).is_multiple_of(n_bins) {
         let bin_bp = (region_width as usize) / n_bins;
         for val_result in iter {
             let val = val_result.map_err(|error| {
@@ -243,7 +243,7 @@ pub(crate) fn bin_region_into<R: BBIFileRead>(
         }
     }
 
-    let exact_bin_bp = region_width as usize % n_bins == 0;
+    let exact_bin_bp = (region_width as usize).is_multiple_of(n_bins);
     for i in 0..n_bins {
         let (bin_abs_start, bin_abs_end) = if exact_bin_bp {
             let bin_bp = region_width / n_bins as u32;

@@ -272,3 +272,81 @@ fine-tuning fits comfortably. The full trunk is the constraint. A published benc
 this PyTorch port puts 1 Mb inference at about 41 GB peak and full fine-tuning at up to
 262 kb on 48 GB cards, without gradient checkpointing. Use shorter inputs, adapters and
 `trunk.gradient_checkpointing: true` for the full trunk.
+
+## Input source and target shape
+
+Targets can use BigWig signal or BAM alignments, as profiles or region summaries:
+
+| Source | Profile | Region |
+| --- | --- | --- |
+| BigWig | Existing binned signal | `mean`, `max`, `count` (signal sum), `logcount` (`log1p(sum)`) |
+| BAM accessibility | Insertion events per bin | Insertion events in the scored region |
+| BAM ChIP-seq / CUT&RUN | Fragment/read-span base coverage | One event per overlapping fragment/read |
+
+Select `targets.profile.source: bam` to build profiles directly from indexed BAMs.
+The existing profile geometry (`context_length`, `n_pred_bins`, `bin_size`,
+`shift_max_bp`) still applies. Each included track must have a known assay class.
+`targets.profile.bam_pooling` is `mean` by default; `sum` integrates coverage over
+bases in a bin. `profile_preset: borzoi` selects sum pooling. This is Borzoi-style
+coverage pooling, not a claim to reproduce all upstream assay-specific processing.
+
+Accessibility profiles use one event per read, including both paired mates.
+`insertion_convention: regulonado` preserves the existing ATAC shifts: +4 from a
+forward read start and -5 from a reverse read's last aligned base. `chrombpnet`
+uses +4/-4; `unshifted` uses the aligned 5′ bases. These settings describe unshifted
+BAM coordinates; they do not detect or undo earlier shifts. ChIP-seq/CUT&RUN use
+fragment spans, without Tn5 shifts. Region BAM counting always retains `bam.py`'s
+original convention and selection rules.
+
+For fragment profiles, a fragment contributes its depth across its span. Sum
+pooling measures covered-base mass; mean pooling divides that mass by bin width.
+Neither is a count of distinct fragments overlapping a region. Insertion profiles
+are different: summing their bins reproduces insertion region counts when the
+windows, filters, and shift convention match.
+
+### Profile losses and units
+
+BAM profiles default to `data.profile_space: raw` at training time. Training uses
+stored units directly (`label_space: counts`, `count_unit: stored`, exposure one),
+with scaling, clipping, and squashing disabled. The model predicts those same units.
+`data.profile_space: transformed` explicitly opts into the existing signal transforms.
+
+The existing `poisson_multinomial` loss combines a multinomial profile-shape term
+with Poisson NLL on the total profile mass. `poisson_multinomial_binwise` applies
+the Poisson term per bin; `poisson_nll` uses only per-bin Poisson NLL. All three
+support nonnegative mean or sum coverage. Coverage mass is a working likelihood
+objective: adjacent bins share fragments and its total is not a count of independent
+molecules. Switching pooling changes the target scale and loss weighting.
+
+Datasets record stored units, pooling, shifts, and filters. Checkpoints record the
+training unit contract and reject mismatched contracts on resume or warm start.
+Changing BAM profile build settings requires `--overwrite` or a new output directory.
+
+### BigWig region regression
+
+Set `targets.region_counts.source: bigwig` and choose `aggregation` (`mean` by
+default). The existing region embedding/live-trunk path trains an MSE regression
+head in signal units; it does not apply an NB count likelihood. Region target width
+remains separate from the backbone sequence context. No BAM anchors are required.
+
+The equivalent standalone commands are:
+
+```sh
+regulonado counts bigwig regions.bed --tracks tracks.parquet \
+  --out-dir region_signal --aggregation mean --target-width 1000
+regulonado counts gather regions.bed --tracks tracks.parquet \
+  --out-dir region_signal --dataset-dir region_dataset \
+  --source bigwig --aggregation mean --target-width 1000
+```
+
+### BAM execution and memory
+
+BamNado supplies Rust read filtering and CIGAR-aware spans, with an adapter retaining
+ReguloNado's counting rules. Indexed chromosome queries run once per requested
+chromosome per operation. Events are reused for all windows and anchor/background
+statistics; no temporary BigWigs are needed. BAMs require BAI or CSI indexes.
+`threads` / `bam_threads` control BGZF decompression, and existing worker/extraction
+controls bound parallel BAMs. Event endpoints use about 16 bytes per retained event,
+plus prefix-sum/work buffers and the profile writer's track-by-chromosome matrix.
+Memory therefore grows with concurrent BAMs. The Rust dependency stack requires
+Rust 1.90 or later.

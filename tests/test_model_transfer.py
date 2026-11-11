@@ -796,7 +796,10 @@ def _write_parquet_split(data_dir, split: str, *, n_rows: int, context: int, n_t
     pq.write_table(table, str(data_dir / "data" / f"{split}-00000-of-00001.parquet"))
 
 
-def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
+@pytest.mark.parametrize(
+    "bam_loss", [None, "poisson_multinomial", "poisson_multinomial_binwise", "poisson_nll"]
+)
+def test_run_training_entrypoint_with_dummy_adapter(tmp_path, bam_loss):
     data_dir = tmp_path / "dataset"
     (data_dir / "README.md").parent.mkdir(parents=True, exist_ok=True)
     (data_dir / "README.md").write_text("# fixture dataset\n")
@@ -817,6 +820,16 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
                     "condition": conditions,
                     "group": groups,
                     "assay": ["atac", "atac"],
+                    **(
+                        {
+                            "target_source": ["bam", "bam"],
+                            "stored_unit": ["insertions", "insertions"],
+                            "profile_pooling": ["events", "events"],
+                            "insertion_convention": ["regulonado", "regulonado"],
+                        }
+                        if bam_loss
+                        else {}
+                    ),
                     "scale_factor": scale_factors,
                     # apply_clip: false below, but resolve_scale_and_clip still needs
                     # this space's clip pair to exist (no wrong-unit fallback).
@@ -835,6 +848,14 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
     enriched_metadata = tmp_path / "tracks.enriched.parquet"
     _write_tracks(enriched_metadata, ["z", "a"], [2.0, 3.0], ["beta", "alpha"])
 
+    if bam_loss:
+        import json
+
+        (data_dir / "target_contract.json").write_text(
+            json.dumps(
+                {"source": "bam", "representation": "profile", "pooling": "mean", "bin_size": 1}
+            )
+        )
     summary = run_training(
         {
             "seed": 1,
@@ -842,9 +863,9 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
             "data": {
                 "path": str(data_dir),
                 "metadata_path": str(enriched_metadata),
-                "apply_scale": False,
-                "apply_squash": False,
-                "apply_clip": False,
+                "apply_scale": bool(bam_loss),
+                "apply_squash": bool(bam_loss),
+                "apply_clip": bool(bam_loss),
                 "enable_rc_aug": False,
                 "context_length": 12,
                 "n_pred_bins": 12,
@@ -864,7 +885,7 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
                 "refinement_kernel": 9,
                 "mlp_hidden": None,
             },
-            "loss": {"name": "mse", "poisson_weight": 0.0, "delta": 1.0},
+            "loss": {"name": bam_loss or "mse", "poisson_weight": 0.2, "delta": 1.0},
             "trainer": {
                 "batch_size": 2,
                 "eval_batch_size": 2,
@@ -909,6 +930,15 @@ def test_run_training_entrypoint_with_dummy_adapter(tmp_path):
     # This proves the enriched metadata path drives the persisted FiLM IDs.
     assert saved_config.track_metadata["track_condition_ids"] == [1, 0]
     assert saved_config.condition_source == "group"
+
+    if bam_loss:
+        contract = saved_config.target_contract
+        assert contract["training"]["count_unit"] == "stored"
+        assert contract["training"]["exposure"] == "none"
+        assert all(
+            contract["training"][key] is False
+            for key in ("apply_scale", "apply_clip", "apply_squash")
+        )
 
 
 class _RunnableBorzoiLoconModule(DummyBorzoiLoconModule):

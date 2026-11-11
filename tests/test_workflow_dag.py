@@ -41,12 +41,12 @@ def test_attribution_shards_parquet_candidates_with_explicit_region_checkpoint(t
 results_dir: {results}
 inputs:
   fasta: {fasta}
-  bam_dir: {tmp_path / 'bams'}
+  bam_dir: {tmp_path / "bams"}
 targets:
   region_counts:
     regions: {candidates}
-    anchor_regions: {tmp_path / 'anchors.bed'}
-    background_regions: {tmp_path / 'background.parquet'}
+    anchor_regions: {tmp_path / "anchors.bed"}
+    background_regions: {tmp_path / "background.parquet"}
 scaling:
   method: tmm
 attribution:
@@ -1340,7 +1340,6 @@ def test_region_counts_without_runs_builds_the_dataset(tmp_path):
     assert "train_phase" not in output
 
 
-
 def test_region_count_parameter_sweep_waits_for_the_dataset_and_its_caches(tmp_path):
     """A region-count sweep builds the counts and the named caches, but trains no run."""
     pytest.importorskip("hydra")
@@ -1455,6 +1454,7 @@ parameter_sweeps:
     # Live trunk: no embedding cache is built.
     assert "embed_chrom" not in output
 
+
 def test_training_typos_fail_before_scheduling(tmp_path):
     pytest.importorskip("hydra")
     typo = """      - name: extra
@@ -1520,7 +1520,7 @@ train:
     assert "--format bigwig" in output
     assert re.search(
         r"checkpoint region_count_track_names:\n\s+input: \S+/tracks/tracks\.parquet", output
-    )# Only the live run gets a CPU schedule preflight; both train through one rule.
+    )  # Only the live run gets a CPU schedule preflight; both train through one rule.
     assert re.search(r"train_schedule_preflight\s+1", output)
     assert re.search(r"train_phase\s+4", output)
     assert "--metadata" in output and "--trunk cached" in output
@@ -1572,9 +1572,7 @@ def test_encoder_cache_and_live_trunk_region_runs(tmp_path):
         model: {{pooling: per_group}}
         trunk: {{finetune: adapters, adapters: [locon], gradient_checkpointing: true}}
 """
-    config = _count_only_config(
-        tmp_path, runs=[_cached_run("run_encoder", backbone=encoder), live]
-    )
+    config = _count_only_config(tmp_path, runs=[_cached_run("run_encoder", backbone=encoder), live])
     results = tmp_path / "results"
     output, code = _snakemake_dry_run(tmp_path, config)
     assert code == 0, output
@@ -1637,3 +1635,70 @@ def test_memory_requests_never_exceed_max_mem_mb(tmp_path):
     assert code == 0, output
     requests = [int(mb) for mb in re.findall(r"mem_mb=(\d+)", output)]
     assert requests and max(requests) == 20000  # train_phase's 32 GB base, capped
+
+
+@pytest.mark.parametrize("source,shape", [("bam", "profile"), ("bigwig", "region_counts")])
+def test_new_target_sources_reach_workflow_commands(tmp_path, source, shape):
+    import yaml
+
+    (tmp_path / "regions.bed").touch()
+    (tmp_path / "genome.fa").touch()
+    config = tmp_path / "config.yaml"
+    target = {"source": source}
+    if shape == "profile":
+        target.update(
+            intervals=str(tmp_path / "regions.bed"),
+            context_length=100,
+            bin_size=10,
+            n_pred_bins=4,
+            shift_max_bp=0,
+            profile_preset="borzoi",
+        )
+    else:
+        target.update(regions=str(tmp_path / "regions.bed"), aggregation="max")
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "results_dir": str(tmp_path / "results"),
+                "inputs": {
+                    "fasta": str(tmp_path / "genome.fa"),
+                    "bam_dir" if source == "bam" else "bigwig_dir": str(tmp_path / "tracks"),
+                },
+                "targets": {shape: target},
+                "scaling": {"method": "tmm"},
+            }
+        )
+    )
+    snakemake = shutil.which("snakemake", path=str(Path(sys.executable).parent))
+    if snakemake is None:
+        pytest.skip("Snakemake is optional")
+    target_file = (
+        tmp_path
+        / "results"
+        / ("dataset/README.md" if shape == "profile" else "region_counts/dataset/counts.parquet")
+    )
+    result = subprocess.run(
+        [
+            snakemake,
+            "--snakefile",
+            str(WORKFLOW),
+            "--configfile",
+            str(config),
+            "--cores",
+            "1",
+            "--dry-run",
+            "--printshellcmds",
+            str(target_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert f"--format {source}" in output
+    if shape == "profile":
+        assert "--source bam" in output and "--profile-preset borzoi" in output
+    else:
+        assert "--source bigwig --aggregation max" in output
+        assert "--anchor-regions" not in output

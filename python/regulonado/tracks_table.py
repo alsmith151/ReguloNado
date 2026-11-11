@@ -265,6 +265,13 @@ def bigwig_fingerprint(path: str | Path) -> dict[str, Any]:
 
 def verify_fingerprint(path: str | Path, expected: dict[str, Any]) -> list[str]:
     """Return mismatch descriptions between disk and a stored fingerprint; empty if consistent."""
+    if Path(path).suffix.lower() == ".bam":
+        current = file_fingerprint(path)
+        return [
+            f"{key}: recorded={value!r} disk={current.get(key)!r}"
+            for key, value in expected.items()
+            if key in current and current[key] != value
+        ]
     current = bigwig_fingerprint(path)
     problems = []
     for key in ("fp_bases_covered", "fp_genome_sum"):
@@ -337,7 +344,16 @@ def to_track_records(df: pd.DataFrame) -> list[dict[str, Any]]:
             "track_name": row["track_name"],
             "track_index": int(row["track_index"]),
         }
-        for column in ("sample_id", "path", "resolved_path"):
+        for column in (
+            "sample_id",
+            "path",
+            "resolved_path",
+            "count_spec",
+            "target_source",
+            "stored_unit",
+            "profile_pooling",
+            "insertion_convention",
+        ):
             if column in row and pd.notna(row[column]):
                 record[column] = row[column]
         for src, dst in numeric_rename.items():

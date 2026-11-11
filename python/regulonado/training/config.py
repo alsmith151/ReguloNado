@@ -50,6 +50,7 @@ class DataConfig:
     # are validated at runtime (see regulonado.training.label_space) — omegaconf 2.3.0
     # cannot structure typing.Literal.
     label_space: str = "transformed"
+    profile_space: str = "raw"
     count_unit: str = "fragments"
     exposure: str = "anchor"
     # Keep missing bins (NaN in datasets built with --missing-bins nan) out of losses and

@@ -25,6 +25,7 @@ for _section in ("scaling", "qc", "targets"):
 # also carry their BAM for region-count runs), otherwise BAMs.
 TRACK_FORMAT = _VALIDATED.track_format()
 PROFILE = config["targets"]["profile"]
+PROFILE_BIGWIG = bool(PROFILE and PROFILE.get("source", "bigwig") == "bigwig")
 REGION_COUNTS = config["targets"]["region_counts"]
 
 if config["scaling"]["method"] == "bamnado" and not config["inputs"].get("bam_dir"):
@@ -267,7 +268,7 @@ rule all:
 
 if PROFILE or REGION_COUNTS:
     include: "rules/tracks.smk"
-if TRACK_FORMAT == "bigwig":
+if PROFILE_BIGWIG:
     include: "rules/scaling.smk"
 if PROFILE:
     include: "rules/dataset.smk"

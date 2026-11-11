@@ -106,15 +106,17 @@ def bam(
             "'--format bam', or bigWig tracks that carry a 'bam')",
         ),
     ],
-    anchor_regions: Annotated[
-        Path, typer.Option("--anchor-regions", help="High-anchor BED/parquet")
-    ],
-    background_regions: Annotated[
-        Path, typer.Option("--background-regions", help="Background BED/parquet")
-    ],
     out_dir: Annotated[
         Path, typer.Option("--out-dir", "-o", help="Per-track parquet cache directory")
     ],
+    anchor_regions: Annotated[
+        Optional[Path], typer.Option("--anchor-regions", help="High-anchor BED/parquet")
+    ] = None,
+    background_regions: Annotated[
+        Optional[Path], typer.Option("--background-regions", help="Background BED/parquet")
+    ] = None,
+    source: Annotated[str, typer.Option(help="Region target source: bam or bigwig")] = "bam",
+    aggregation: Annotated[str, typer.Option(help="BigWig mean, max, count, or logcount")] = "mean",
     track: Annotated[
         Optional[str],
         typer.Option("--track", help="Count only this track (for per-track cluster array jobs)"),
@@ -128,7 +130,7 @@ def bam(
         typer.Option("--target-width", help="Width of the counted window, centred on each region"),
     ] = 1000,
     threads: Annotated[
-        int, typer.Option("--threads", help="htslib decompression threads per BAM")
+        int, typer.Option("--threads", help="BGZF decompression threads per BAM")
     ] = 1,
     max_workers: Annotated[
         int, typer.Option("--workers", "-w", help="Parallel BAMs when --track is not given")
@@ -144,6 +146,19 @@ def bam(
     from regulonado.genomics import read_chrom_sizes
     from regulonado.normalization import read_regions
 
+    if source == "bigwig":
+        from regulonado.counts.signal import count_signal_regions, signal_tracks
+
+        counter = BamRegionCounter(
+            _read_regions(regions),
+            target_width=target_width,
+            chrom_sizes=read_chrom_sizes(chrom_sizes) if chrom_sizes else None,
+        )
+        count_signal_regions(counter, signal_tracks(tracks), out_dir, aggregation, track)
+        typer.echo("Done.")
+        return
+    if source != "bam" or anchor_regions is None or background_regions is None:
+        raise typer.BadParameter("BAM source requires anchor-regions and background-regions")
     region_frame = _read_regions(regions)
     # Validate BAMs only for the track(s) this call counts, so one per-track job does
     # not fail on another track's missing file.
@@ -185,9 +200,7 @@ def bam(
 
 @counts_app.command("gather")
 def gather(
-    regions: Annotated[
-        Path, typer.Argument(help="Same region set passed to 'counts bam'")
-    ],
+    regions: Annotated[Path, typer.Argument(help="Same region set passed to 'counts bam'")],
     tracks: Annotated[
         Path,
         typer.Option("--tracks", help="Same tracks.parquet passed to 'counts bam'"),
@@ -199,6 +212,8 @@ def gather(
     dataset_dir: Annotated[
         Path, typer.Option("--dataset-dir", help="Output RegionCountData run directory")
     ],
+    source: Annotated[str, typer.Option(help="Region target source: bam or bigwig")] = "bam",
+    aggregation: Annotated[str, typer.Option(help="BigWig mean, max, count, or logcount")] = "mean",
     chrom_sizes: Annotated[
         Optional[Path],
         typer.Option("--chrom-sizes", help="chrom.sizes/.fai for the region bounds check"),
@@ -227,6 +242,21 @@ def gather(
     from regulonado.genomics import read_chrom_sizes
 
     region_frame = _assign_splits(_read_regions(regions), val_chroms, test_chroms)
+    if source == "bigwig":
+        from regulonado.counts.signal import gather_signal_regions, signal_tracks
+
+        counter = BamRegionCounter(
+            region_frame,
+            target_width=target_width,
+            chrom_sizes=read_chrom_sizes(chrom_sizes) if chrom_sizes else None,
+        )
+        data = gather_signal_regions(
+            counter, signal_tracks(tracks), out_dir, dataset_dir, aggregation
+        )
+        typer.echo(f"Wrote {data.n_regions} regions x {data.n_tracks} tracks to {dataset_dir}")
+        return
+    if source != "bam":
+        raise typer.BadParameter("source must be bam or bigwig")
     tracks_frame = read_count_tracks(tracks, require_bam=False)
 
     sizes = read_chrom_sizes(chrom_sizes) if chrom_sizes is not None else None
@@ -264,3 +294,28 @@ def gather(
     typer.echo(f"Wrote {data.n_regions} regions x {data.n_tracks} tracks to {dataset_dir}")
     for name, path in written.items():
         typer.echo(f"  {name}: {path}")
+
+
+@counts_app.command("bigwig")
+def bigwig(
+    regions: Annotated[Path, typer.Argument(help="BED/parquet regions")],
+    tracks: Annotated[Path, typer.Option("--tracks", help="Assembled BigWig tracks.parquet")],
+    out_dir: Annotated[Path, typer.Option("--out-dir", "-o", help="Per-track summary cache")],
+    aggregation: Annotated[str, typer.Option(help="mean, max, count, or logcount")] = "mean",
+    track: Annotated[Optional[str], typer.Option(help="Only this track")] = None,
+    target_width: Annotated[int, typer.Option(help="Scored region width")] = 1000,
+    chrom_sizes: Annotated[
+        Optional[Path], typer.Option(help="Contig sizes for bounds checks")
+    ] = None,
+) -> None:
+    """Summarize BigWig signal over regions; assemble with counts gather --source bigwig."""
+    bam(
+        regions=regions,
+        tracks=tracks,
+        out_dir=out_dir,
+        source="bigwig",
+        aggregation=aggregation,
+        track=track,
+        target_width=target_width,
+        chrom_sizes=chrom_sizes,
+    )

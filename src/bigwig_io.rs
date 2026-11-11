@@ -82,3 +82,78 @@ pub(crate) fn extract_bigwig_labels_batch(
 
     Ok(labels)
 }
+
+/// CREsted-style region summaries. Absent records inside a contig are zero.
+#[pyo3::pyfunction]
+pub(crate) fn bigwig_regions(
+    py: pyo3::Python<'_>,
+    path: String,
+    windows: Vec<(String, u32, u32)>,
+    aggregation: String,
+) -> pyo3::PyResult<pyo3::Py<pyo3::types::PyBytes>> {
+    use pyo3::{exceptions::PyValueError, types::PyBytes};
+    if !["mean", "max", "count", "logcount"].contains(&aggregation.as_str())
+        || windows.iter().any(|(_, a, b)| b <= a)
+    {
+        return Err(PyValueError::new_err("invalid aggregation or region width"));
+    }
+    let values = py
+        .allow_threads(|| -> Result<Vec<f64>, String> {
+            let mut reader = BigWigRead::open_file(&path).map_err(|e| e.to_string())?;
+            let mut output = Vec::with_capacity(windows.len());
+            for (chrom, start, end) in windows {
+                let size = reader
+                    .chroms()
+                    .iter()
+                    .find(|c| c.name == chrom)
+                    .map(|c| c.length)
+                    .ok_or_else(|| format!("contig absent from BigWig: {chrom}"))?;
+                if end > size {
+                    return Err(format!(
+                        "region outside BigWig contig: {chrom}:{start}-{end}"
+                    ));
+                }
+                let mut sum = 0.0;
+                let mut max = f64::NEG_INFINITY;
+                let mut covered = 0u64;
+                for item in reader
+                    .get_interval(&chrom, start, end)
+                    .map_err(|e| e.to_string())?
+                {
+                    let v = item.map_err(|e| e.to_string())?;
+                    if !v.value.is_finite() {
+                        return Err(format!("nonfinite BigWig signal: {chrom}"));
+                    }
+                    let width = u64::from(v.end.min(end) - v.start.max(start));
+                    covered += width;
+                    sum += width as f64 * f64::from(v.value);
+                    max = max.max(f64::from(v.value));
+                }
+                if covered < u64::from(end - start) {
+                    max = max.max(0.0);
+                }
+                let value = match aggregation.as_str() {
+                    "mean" => sum / f64::from(end - start),
+                    "max" => max,
+                    "logcount" => {
+                        if sum < 0.0 {
+                            return Err("logcount requires nonnegative summed signal".into());
+                        }
+                        sum.ln_1p()
+                    }
+                    _ => sum,
+                };
+                output.push(value);
+            }
+            Ok(output)
+        })
+        .map_err(PyValueError::new_err)?;
+    Ok(PyBytes::new(
+        py,
+        &values
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<_>>(),
+    )
+    .unbind())
+}

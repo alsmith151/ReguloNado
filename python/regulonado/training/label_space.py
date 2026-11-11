@@ -31,7 +31,7 @@ from typing import Any
 import numpy as np
 
 LABEL_SPACES = ("transformed", "counts")
-COUNT_UNITS = ("fragments", "coverage_sum", "mean_coverage")
+COUNT_UNITS = ("fragments", "coverage_sum", "mean_coverage", "insertions", "stored")
 EXPOSURES = ("anchor", "anchor_minus_background", "library_size", "none")
 
 
@@ -109,7 +109,18 @@ def resolve_count_label_space(
     validate_label_space("counts", count_unit, exposure)
     n_tracks = len(records)
 
-    if count_unit == "mean_coverage":
+    stored_units = [r.get("stored_unit", "mean_coverage") for r in records]
+    if count_unit == "stored":
+        count_factors = np.ones(n_tracks, dtype=np.float64)
+    elif any(r.get("target_source") == "bam" for r in records):
+        if any(unit != count_unit for unit in stored_units):
+            raise ValueError(
+                "BAM profile units differ from data.count_unit; use stored or matching units"
+            )
+        count_factors = np.ones(n_tracks, dtype=np.float64)
+    elif count_unit == "insertions":
+        raise ValueError("insertion labels require insertion-count provenance")
+    elif count_unit == "mean_coverage":
         count_factors = np.ones(n_tracks, dtype=np.float64)
     elif count_unit == "coverage_sum":
         count_factors = np.full(n_tracks, float(bin_size), dtype=np.float64)

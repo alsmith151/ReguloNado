@@ -456,6 +456,9 @@ class BuildPlan:
     edge_dropped_examples: tuple[str, ...]
     bin_denominator: str
     missing_bins: str
+    bam_specs: list[str] | None = None
+    bam_pooling: str = "mean"
+    bam_threads: int = 1
 
     @property
     def binning_kwargs(self) -> dict[str, bool]:
@@ -497,7 +500,9 @@ def _compute_geometry(
     )
 
 
-def _load_verified_track_table(track_table: str | Path) -> tuple[pd.DataFrame, list[str]]:
+def _load_verified_track_table(
+    track_table: str | Path, source: str = "bigwig"
+) -> tuple[pd.DataFrame, list[str]]:
     """Read tracks.parquet and verify each included track's on-disk fingerprint.
 
     Returns the full table (every status, for round-tripping to the output
@@ -511,7 +516,9 @@ def _load_verified_track_table(track_table: str | Path) -> tuple[pd.DataFrame, l
     )
 
     table = read_track_table(track_table)
-    require_track_format(table, "bigwig", "dataset build")
+
+    if source == "bigwig":
+        require_track_format(table, "bigwig", "dataset build")
     included = table[table["status"] == "included"].sort_values("track_index")
     for _, row in included.iterrows():
         expected = {k: row[k] for k in row.index if k.startswith("fp_") and pd.notna(row[k])}
@@ -521,6 +528,13 @@ def _load_verified_track_table(track_table: str | Path) -> tuple[pd.DataFrame, l
                 f"Track {row['track_name']!r} no longer matches its recorded fingerprint "
                 f"({row['resolved_path']}): {'; '.join(problems)}. Re-run discovery/assembly."
             )
+    if source == "bam":
+        paths = (
+            included["bam"].tolist() if "bam" in included else included["resolved_path"].tolist()
+        )
+        if any(pd.isna(p) or not Path(p).is_file() for p in paths):
+            raise ValueError("BAM profiles require a BAM path for every included track")
+        return table, paths
     return table, included["resolved_path"].tolist()
 
 
@@ -747,9 +761,13 @@ def _plan_build(
     n_extract_threads: int,
     bin_denominator: str,
     missing_bins: str,
+    source: str = "bigwig",
+    bam_pooling: str = "mean",
+    insertion_convention: str = "regulonado",
+    bam_threads: int = 1,
 ) -> BuildPlan:
     """Resolve every path, shape and row index the writer/publish steps need."""
-    table, bw_paths = _load_verified_track_table(track_table)
+    table, bw_paths = _load_verified_track_table(track_table, source)
     n_tracks = len(bw_paths)
     geometry = _compute_geometry(
         context_length=context_length,
@@ -763,6 +781,33 @@ def _plan_build(
         stage_to_scratch, fasta_file, bed_file, bw_paths, scratch_out
     )
 
+    bam_specs = None
+    if source == "bam":
+        from dataclasses import asdict
+
+        from regulonado.counts.bam import DEFAULT_COUNT_SPECS, read_count_tracks
+
+        rows = read_count_tracks(track_table, require_bam=False).to_dicts()
+        bam_specs = [
+            json.dumps(
+                {
+                    **asdict(DEFAULT_COUNT_SPECS[r["assay_class"]]),
+                    "insertion_convention": insertion_convention,
+                }
+            )
+            for r in rows
+        ]
+        if stage_to_scratch:
+            for original, staged in zip(bw_paths, active_bw_paths, strict=True):
+                indexes = [
+                    Path(original + ".bai"),
+                    Path(original).with_suffix(".bai"),
+                    Path(original + ".csi"),
+                ]
+                index = next((p for p in indexes if p.exists()), None)
+                if index is None:
+                    raise ValueError(f"BAM index required: {original}")
+                shutil.copy2(index, staged + (".csi" if index.suffix == ".csi" else ".bai"))
     bed_rows = _load_bed_rows(bed_file)
     edge_dropped = _edge_unsafe_row_indices(bed_rows, n_pred_bins, bin_size, shift_max_bp)
     edge_dropped_examples = tuple(
@@ -824,6 +869,9 @@ def _plan_build(
         edge_dropped_examples=edge_dropped_examples,
         bin_denominator=bin_denominator,
         missing_bins=missing_bins,
+        bam_specs=bam_specs,
+        bam_pooling=bam_pooling,
+        bam_threads=bam_threads,
     )
 
 
@@ -883,6 +931,15 @@ def _run_in_memory_strategy(
         write_threads=plan.effective_write_threads,
         profile=profile,
         **plan.binning_kwargs,
+        **(
+            {
+                "bam_specs": plan.bam_specs,
+                "bam_pooling": plan.bam_pooling,
+                "bam_threads": plan.bam_threads,
+            }
+            if plan.bam_specs is not None
+            else {}
+        ),
     )
 
     for split in split_names:
@@ -1072,6 +1129,11 @@ def build_dataset(
     chrom_filter: list[str] | None = None,
     bin_denominator: str = "bin_width",
     missing_bins: str = "nan",
+    source: str = "bigwig",
+    bam_pooling: str = "mean",
+    insertion_convention: str = "regulonado",
+    bam_threads: int = 1,
+    profile_preset: str | None = None,
 ) -> None:
     """Fast low-scratch dataset build using the Rust extension.
 
@@ -1129,6 +1191,61 @@ def build_dataset(
     are logged as a warning and recorded in the output ``tracks.parquet`` as
     ``edge_dropped_rows`` / ``edge_dropped_examples``.
     """
+    if source not in {"bigwig", "bam"} or bam_pooling not in {"mean", "sum"}:
+        raise ValueError("source must be bigwig/bam and bam_pooling must be mean/sum")
+    if insertion_convention not in {"regulonado", "chrombpnet", "unshifted"}:
+        raise ValueError("invalid insertion convention")
+    if profile_preset not in {None, "borzoi"}:
+        raise ValueError("profile_preset must be borzoi or None")
+    if profile_preset == "borzoi":
+        bam_pooling = "sum"
+    if source == "bam" and (strategy != "in_memory" or bam_threads < 1):
+        raise ValueError("BAM profiles require in_memory strategy and positive bam_threads")
+    contract = {
+        "source": source,
+        "representation": "profile",
+        "pooling": bam_pooling if source == "bam" else "mean",
+        "insertion_convention": insertion_convention if source == "bam" else None,
+        "label_space": "raw" if source == "bam" else "signal",
+        "bin_size": bin_size,
+    }
+    if source == "bam":
+        from regulonado.counts.bam import read_count_tracks
+
+        contract["inputs"] = [
+            {
+                "track_name": row["track_name"],
+                "assay_class": row["assay_class"],
+                "path": str(Path(row["bam"]).resolve()),
+                "size": Path(row["bam"]).stat().st_size,
+                "mtime_ns": Path(row["bam"]).stat().st_mtime_ns,
+            }
+            for row in read_count_tracks(track_table).to_dicts()
+        ]
+        contract["regions_sha256"] = hashlib.sha256(Path(bed_file).read_bytes()).hexdigest()
+        contract["geometry"] = [
+            context_length,
+            n_pred_bins,
+            shift_max_bp,
+            bin_denominator,
+            missing_bins,
+        ]
+    contract_path = Path(output_dir) / "target_contract.json"
+    if (
+        contract_path.exists()
+        and not overwrite
+        and json.loads(contract_path.read_text()) != contract
+    ):
+        raise ValueError("target units/settings changed; use overwrite or a new dataset directory")
+    if (
+        source == "bam"
+        and not overwrite
+        and not contract_path.exists()
+        and any((Path(output_dir) / "data").glob("*.parquet"))
+    ):
+        raise ValueError(
+            "existing dataset has no BAM target contract; use overwrite or a new directory"
+        )
     _validate_build_args(
         shift_max_bp=shift_max_bp,
         bin_size=bin_size,
@@ -1161,8 +1278,36 @@ def build_dataset(
         n_extract_threads=n_extract_threads,
         bin_denominator=bin_denominator,
         missing_bins=missing_bins,
+        source=source,
+        bam_pooling=bam_pooling,
+        insertion_convention=insertion_convention,
+        bam_threads=bam_threads,
     )
 
+    if source == "bam":
+        from dataclasses import replace
+
+        table = plan.track_table.copy()
+        table["target_source"] = "bam"
+        table["profile_pooling"] = bam_pooling
+        table["insertion_convention"] = insertion_convention
+        specs = [json.loads(s) for s in plan.bam_specs]
+        table["count_spec"] = None
+        included = table[table["status"] == "included"].sort_values("track_index").index
+        table.loc[included, "stored_unit"] = [
+            "insertions"
+            if s["unit"] == "insertions"
+            else ("coverage_sum" if bam_pooling == "sum" else "mean_coverage")
+            for s in specs
+        ]
+        table.loc[included, "count_spec"] = plan.bam_specs
+        table.loc[included, "profile_pooling"] = [
+            "events" if s["unit"] == "insertions" else bam_pooling for s in specs
+        ]
+        table.loc[included, "insertion_convention"] = [
+            insertion_convention if s["unit"] == "insertions" else "none" for s in specs
+        ]
+        plan = replace(plan, track_table=table)
     if plan.splits_to_build:
         row_counts = _run_strategy(
             plan, strategy=strategy, n_extract_threads=n_extract_threads, profile=profile
@@ -1187,6 +1332,9 @@ def build_dataset(
     all_row_counts = {
         split: row_counts.get(split, _split_row_count(data_dir, split)) for split in plan.splits
     }
+    contract_tmp = contract_path.with_suffix(".json.tmp")
+    contract_tmp.write_text(json.dumps(contract, indent=2) + "\n")
+    contract_tmp.replace(contract_path)
     _write_dataset_card(output_dir, features=plan.features, split_counts=all_row_counts)
 
     logger.info(f"Dataset saved to {output_dir}")

@@ -378,9 +378,7 @@ class RegionCountModel(PreTrainedModel):
             self.main_input_name = "sequence"
             # Checkpoints keep only what trains: frozen pretrained trunk weights (and its
             # buffers) are rebuilt from the backbone checkpoint, not re-saved every time.
-            trainable = {
-                f"trunk.{name}" for name, p in trunk.named_parameters() if p.requires_grad
-            }
+            trainable = {f"trunk.{name}" for name, p in trunk.named_parameters() if p.requires_grad}
             self._keys_to_ignore_on_save = [
                 f"trunk.{name}" for name in trunk.state_dict() if f"trunk.{name}" not in trainable
             ]
@@ -491,7 +489,9 @@ class RegionCountModel(PreTrainedModel):
                 log_size_factors=self.count_head.log_size_factors,
                 sample_weight=sample_weight,
             )
-        return RegionCountOutput(loss=loss, logits=eta.exp())
+        return RegionCountOutput(
+            loss=loss, logits=eta if self.config.count_noise == "mse" else eta.exp()
+        )
 
     def count_head_parameter_names(self) -> list[str]:
         """Fully-qualified names of :class:`CountHead`'s learnable parameters.

@@ -385,7 +385,10 @@ fn build_split_chrom_samples(
     write_threads=None,
     profile=false,
     mean_over_covered_bases=false,
-    missing_as_nan=true
+    missing_as_nan=true,
+    bam_specs=None,
+    bam_pooling="mean",
+    bam_threads=1
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_parquet_splits_chrom_pass(
@@ -410,6 +413,9 @@ pub(crate) fn write_parquet_splits_chrom_pass(
     profile: bool,
     mean_over_covered_bases: bool,
     missing_as_nan: bool,
+    bam_specs: Option<Vec<String>>,
+    bam_pooling: &str,
+    bam_threads: usize,
 ) -> PyResult<HashMap<String, usize>> {
     let binning_options = BinningOptions {
         mean_over_covered_bases,
@@ -469,9 +475,35 @@ pub(crate) fn write_parquet_splits_chrom_pass(
         write_threads,
     );
 
-    let mut handles: Vec<BwHandle> = py
-        .allow_threads(|| open_bigwig_handles(&bw_paths))
-        .map_err(PyRuntimeError::new_err)?;
+    let mut bam_handles = if let Some(specs) = bam_specs {
+        if specs.len() != n_tracks || !["mean", "sum"].contains(&bam_pooling) {
+            return Err(PyRuntimeError::new_err("invalid BAM specs or pooling"));
+        }
+        Some(
+            py.allow_threads(|| {
+                bw_paths
+                    .iter()
+                    .zip(specs)
+                    .map(|(path, spec)| {
+                        crate::bam_counts::BamCounter::open(
+                            path,
+                            crate::bam_counts::Spec::parse(&spec)?,
+                            bam_threads,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .map_err(PyRuntimeError::new_err)?,
+        )
+    } else {
+        None
+    };
+    let mut handles: Vec<BwHandle> = if bam_handles.is_none() {
+        py.allow_threads(|| open_bigwig_handles(&bw_paths))
+            .map_err(PyRuntimeError::new_err)?
+    } else {
+        Vec::new()
+    };
 
     let mut prof_chrom_scan_s: Vec<f64> = Vec::new();
     let mut prof_binning = BinningUsage::default();
@@ -517,47 +549,79 @@ pub(crate) fn write_parquet_splits_chrom_pass(
         let mut chrom_signals: Vec<f32> = vec![0.0; n_tracks * n_chrom_bins];
         let chrom_str: &str = chrom.as_str();
 
-        let scan_usage = py.allow_threads(|| {
-            chrom_signals
-                .par_chunks_mut(n_chrom_bins)
-                .zip(handles.par_iter_mut())
-                .enumerate()
-                .map_init(
-                    BinningScratch::default,
-                    |scratch, (track_idx, (out_row, reader))| {
-                        let usage = bin_region_into(
-                            reader,
-                            chrom_str,
-                            0,
-                            region_end,
-                            out_row,
-                            scratch,
-                            binning_options,
-                        );
+        let scan_usage = if let Some(readers) = bam_handles.as_mut() {
+            py.allow_threads(|| {
+                chrom_signals
+                    .par_chunks_mut(n_chrom_bins)
+                    .zip(readers.par_iter_mut())
+                    .map(|(row, reader)| {
+                        if !reader.has_chrom(chrom_str) {
+                            return Err(format!("region contig absent from BAM: {chrom_str}"));
+                        }
+                        let events = reader.events(chrom_str)?;
+                        let windows: Vec<_> = (0..n_chrom_bins)
+                            .map(|i| {
+                                (
+                                    (i as i64) * i64::from(bin_size),
+                                    ((i + 1) as i64) * i64::from(bin_size),
+                                )
+                            })
+                            .collect();
+                        let mode = if reader.is_insertions() {
+                            "events"
+                        } else {
+                            bam_pooling
+                        };
+                        for (out, value) in row.iter_mut().zip(events.measure(&windows, mode)) {
+                            *out = value as f32;
+                        }
+                        Ok(BinningUsage::default())
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })
+        } else {
+            py.allow_threads(|| {
+                chrom_signals
+                    .par_chunks_mut(n_chrom_bins)
+                    .zip(handles.par_iter_mut())
+                    .enumerate()
+                    .map_init(
+                        BinningScratch::default,
+                        |scratch, (track_idx, (out_row, reader))| {
+                            let usage = bin_region_into(
+                                reader,
+                                chrom_str,
+                                0,
+                                region_end,
+                                out_row,
+                                scratch,
+                                binning_options,
+                            );
 
-                        let is_minus = minus_flags.get(track_idx).copied().unwrap_or(false);
-                        if is_minus {
-                            let mut nz = 0usize;
-                            let mut neg = 0usize;
-                            for &v in out_row.iter() {
-                                if v != 0.0 && !v.is_nan() {
-                                    nz += 1;
-                                    if v < 0.0 {
-                                        neg += 1;
+                            let is_minus = minus_flags.get(track_idx).copied().unwrap_or(false);
+                            if is_minus {
+                                let mut nz = 0usize;
+                                let mut neg = 0usize;
+                                for &v in out_row.iter() {
+                                    if v != 0.0 && !v.is_nan() {
+                                        nz += 1;
+                                        if v < 0.0 {
+                                            neg += 1;
+                                        }
+                                    }
+                                }
+                                if nz > 0 && (neg as f32) / (nz as f32) >= 0.8 {
+                                    for v in out_row.iter_mut() {
+                                        *v = -*v;
                                     }
                                 }
                             }
-                            if nz > 0 && (neg as f32) / (nz as f32) >= 0.8 {
-                                for v in out_row.iter_mut() {
-                                    *v = -*v;
-                                }
-                            }
-                        }
-                        usage
-                    },
-                )
-                .collect::<Result<Vec<_>, _>>()
-        });
+                            usage
+                        },
+                    )
+                    .collect::<Result<Vec<_>, _>>()
+            })
+        };
         let scan_usage = scan_usage.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         if profile {
             prof_chrom_scan_s.push(t_scan.elapsed().as_secs_f64());

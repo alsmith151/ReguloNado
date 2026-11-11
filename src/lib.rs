@@ -14,6 +14,7 @@
 //!    as a fallback / reference path for parity testing.
 
 mod arrow_schema;
+mod bam_counts;
 mod bigwig_io;
 mod binning;
 mod chromosome_scan_writer;
@@ -35,6 +36,9 @@ fn version() -> &'static str {
 #[pymodule]
 fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
+    m.add_function(wrap_pyfunction!(bigwig_io::bigwig_regions, m)?)?;
+    m.add_function(wrap_pyfunction!(bam_counts::count_bam_windows, m)?)?;
+    m.add_function(wrap_pyfunction!(bam_counts::bam_events, m)?)?;
     m.add_function(wrap_pyfunction!(
         sample_batch_writer::write_parquet_split_from_bigwigs,
         m

@@ -21,6 +21,7 @@ _EPSILON = 1e-7
 #: unbounded learned noise buys loss by declaring a task noisy and then barely
 #: constrains its predictions (the Kendall failure mode), so both ends are clamped.
 COUNT_NOISE_MODELS: dict[str, tuple[float, float]] = {
+    "mse": (0.0, 0.0),
     # log dispersion alpha, var = mu + alpha * mu^2: 0.1 .. 2.0.
     "nb": (-2.303, 0.693),
     # log sigma of log1p(count): 0.05 .. 7.4
@@ -101,6 +102,8 @@ class CountLikelihoodLoss(nn.Module):
     def nll(self, y_true: Tensor, log_mu: Tensor, log_noise: Tensor) -> Tensor:
         """Elementwise negative log-likelihood ``[batch, n_tracks]`` (``NaN`` where *y_true* is)."""
         log_noise = self.clamp_noise(log_noise)
+        if self.noise == "mse":
+            return (y_true - log_mu).square()
         if self.noise == "nb":
             log_r = -log_noise  # r = 1 / alpha
             r = log_r.exp()

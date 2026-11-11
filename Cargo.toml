@@ -9,13 +9,17 @@ readme = "README.md"
 authors = ["alsmith <asmith151@googlemail.com>"]
 keywords = ["genomics", "bioinformatics", "bigwig", "arrow"]
 categories = ["science"]
-rust-version = "1.85"
+rust-version = "1.90"
 
 [lib]
 name = "regulonado_rs"
 crate-type = ["cdylib"]
 
 [dependencies]
+bamnado = { git = "https://github.com/alsmith151/BamNado.git", rev = "d04428dd9e1559e12f200377b4f426b25a3dd81e" }
+noodles = { version = "0.103.0", features = ["bam", "sam", "bgzf", "core", "csi"] }
+ahash = "0.8"
+serde = { version = "1", features = ["derive"] }
 pyo3 = { version = "0.23", features = ["extension-module"] }
 bigtools = { version = "0.5", default-features = false, features = ["read"] }
 rayon = "1"

@@ -1,0 +1,18 @@
+                                                                                                    
+ Usage: root counts bigwig [OPTIONS] REGIONS                                                        
+                                                                                                    
+ Summarize BigWig signal over regions; assemble with counts gather --source bigwig.                 
+                                                                                                    
+╭─ Arguments ──────────────────────────────────────────────────────────────────────────────────────╮
+│ *    regions      PATH  BED/parquet regions [required]                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ *  --tracks                PATH     Assembled BigWig tracks.parquet [required]                   │
+│ *  --out-dir       -o      PATH     Per-track summary cache [required]                           │
+│    --aggregation           TEXT     mean, max, count, or logcount [default: mean]                │
+│    --track                 TEXT     Only this track                                              │
+│    --target-width          INTEGER  Scored region width [default: 1000]                          │
+│    --chrom-sizes           PATH     Contig sizes for bounds checks                               │
+│    --help                           Show this message and exit.                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
